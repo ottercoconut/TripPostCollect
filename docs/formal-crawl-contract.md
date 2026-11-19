@@ -11,6 +11,8 @@
 > **授权记录（2026-11-14）：** 操作人决定知乎认证只认作者页官方身份认证（#193）。
 >
 > **授权记录（2026-11-17）：** 操作人决定知乎机构号（作者页 isOrg 为 true）认证记为是、文字以“机构号”开头（#205）。
+>
+> **授权记录（2026-11-19）：** 操作人授权临时解冻，同步 #211 微博桌面站页面取数、访问门禁与全量扫描口径。
 
 本文定义正式抓取的机器语义。平台参数和必需字段 profile：通用平台在
 `config/crawl_targets.json` 中配置；小红书在 `config/xhs_targets.json` 和
@@ -129,7 +131,7 @@ BrowserContext；只有触发轮的精确租约已经释放且 `runtime_session_
 取数来源分三级：L1 为被动截获页面自身发出的请求的响应，或读取页面状态；L2 为在页面上下文中
 主动发起请求；L3 为 Playwright `page.request` / `context.request`。L3 对所有平台禁止。浏览器外
 HTTP 客户端（httpx 等）不属于以上任何一级：已纳入访问门禁的平台不得用它取得平台数据，只有平台
-文档登记的例外（如知乎图片直连 CDN：UA 取自浏览器、Referer 固定为站点、不带 cookie）可以使用。已纳入访问门禁的
+文档登记的例外（如知乎、微博图片直连 CDN：UA 取自浏览器、Referer 固定为站点、不带 cookie）可以使用。已纳入访问门禁的
 平台只能经页面取数通道取得平台数据，静态检查 `tests/test_fetch_boundary.py` 禁止旁路导入、Playwright
 请求接口和页面脚本内的主动请求；L3 的静态检查覆盖全部平台目录。
 小红书已纳入访问门禁，搜索、详情、作者、图片与登录态只用 L1，没有例外。知乎（#185）已纳入访问门禁。
@@ -137,7 +139,14 @@ discovery 链为 `search_results → note_detail → creator_profile → images`
 （L1，`page_response`）；详情与作者由真实点击打开新标签，读取 `script#js-initialData` 页面状态
 （L1，`page_state`）；正文图是登记过的 CDN 直连例外，UA 取自浏览器，Referer 固定为 `https://www.zhihu.com/`，不带 Cookie，不经第三方代理，
 访问账本以 `cdn_direct` 登记并参与 R5。repair 链没有搜索访问：指定 URL 以 `navigate` 打开详情，作者仍为点击，
-图片仍为 `cdn_direct`。每条知乎入库记录须经 `content_visit_ok`。B站、微博和抖音目前不纳入访问门禁（#111），
+图片仍为 `cdn_direct`。每条知乎入库记录须经 `content_visit_ok`。微博（#211）已纳入访问门禁。discovery 链为
+`search_results → note_detail → creator_profile → images`：搜索页 `s.weibo.com` 由服务端渲染，经已登记的 DOM 脚本
+读取卡片与分页（L1，`page_state`）；详情由真实点击卡片时间链接打开新标签，被动截获页面自身的
+`/ajax/statuses/show`（L1，`page_response`）；作者是同一详情标签页面自身请求的 `/ajax/side/cards/sideUser`
+（L1，`page_response`），不另开作者页，与详情同一次触发；正文图是登记过的 CDN 直连例外，UA 取自浏览器，
+Referer 固定为 `https://weibo.com/`，不带 Cookie，不经第三方代理，访问账本以 `cdn_direct` 登记并参与 R5。
+repair 链没有搜索访问：指定 `weibo.com/{uid}/{mid}` 以 `navigate` 打开详情。每条微博入库记录须经
+`content_visit_ok`。B站和抖音目前不纳入访问门禁（#111），
 计划在 2026-11-12（UTC−8）之后重构（#157）：浏览器负责登录、Cookie
 与行为证据，搜索、详情、作者与图片由浏览器外 HTTP 客户端取得，不写访问账本，也不参与 `content_visit_ok`。抖音搜索例外（#124）：只经浏览器截获本轮
 搜索页自身请求的响应，截获不到即 `runtime_failed:browser_search_response_missing`，不改走浏览器外请求。
@@ -155,6 +164,8 @@ discovery 链为 `search_results → note_detail → creator_profile → images`
 前端自行加载的页只记诊断。必需节奏阶段按本轮实际发生的访问推导。任一项不满足即
 `behavior_evidence_ok=false`，不能用内容 JSONL 或退出码补签。逐条规则见对应平台文档。
 知乎 discovery 按列表点击、再点作者的顺序核验；repair 链的详情由指定 URL `navigate` 打开，不要求先有搜索访问。
+微博的作者访问不由点击触发：它必须与详情位于同一标签、晚于打开详情的那次点击或导航，且作者 ID 与
+`statuses/show` 的作者 ID 一致。
 
 ## 来源耗尽与计数字段
 
@@ -219,7 +230,7 @@ checkpoint，但必须通过新的 dry-run 冻结并核对计划。
 值为事实依据。
 
 “正文图片”只能由以下平台权威字段显式投影，顺序去重后每项角色固定为 `content`：B站详情
-`image_urls`、微博 `mblog.pics` 归一后的 `image_list`、小红书笔记详情 `image_list`、抖音图文
+`image_urls`、微博详情 `pic_infos` 按 `pic_ids` 顺序归一后的 `image_list`、小红书笔记详情 `image_list`、抖音图文
 `note_download_url`、知乎正文/详情 `image_list`。通用递归 URL 搜索不属于正式能力。作者头像、作者
 主页资源、搜索预览、封面、视频、音乐和知乎公式图片均不得生成正文候选、下载任务、manifest
 行、长期文件或任何图片关系；B站搜索预览图尤其不能替代详情正文图。作者头像不是可选图片角色，
@@ -299,7 +310,7 @@ checkpoint 按最后完整批次正常推进。`candidate_skipped` 不增加有�
 | 平台 | 受信任 `content_detail_source` | 正文字段 | 不可降级的来源 |
 |---|---|---|---|
 | B站 article | `article_view_api` | `content_text/content` | 搜索 `desc`、预览图 |
-| 微博 | `search_mblog_complete`、`mobile_detail` | `content_text/content` | 长文搜索截断 `mblog.text`、标题 |
+| 微博 | `desktop_detail`；历史行仍可能是 `search_mblog_complete`、`mobile_detail` | `content_text/content` | 列表截断正文、HTML `text`、标题 |
 | 小红书 | `note_detail` | `desc` | 搜索卡片摘要、标题 |
 | 抖音 | `search_aweme_info`、`aweme_detail` | `desc` | 标题、封面或预览文本 |
 | 知乎 | `answer_detail`、`article_detail`；历史行仍可能是 `search_content` | `content_text/content` | `title`、`desc/excerpt` |
@@ -311,6 +322,10 @@ checkpoint 按最后完整批次正常推进。`candidate_skipped` 不增加有�
 `answerCount + articlesCount`，缺键为空，不补 0。赞、评、藏三项必需，分别取详情页 `voteupCount`、
 `commentCount`、`favlistsCount`，缺键为空，不补 0。分享数平台不提供（#188）：网页端 `shareCount` 恒为占位 0，
 不读取，入库为空，不作必需项。认证以作者页为准（#193、#205）：用户实体 `isOrg` 为严格布尔 true 的机构号，`author_verified` 为 1，文字以“机构号”开头；已有身份认证描述时写成“机构号、<原描述>”，没有描述时为“机构号”；即使 `badgeV2` 缺失或结构不对也如此。非机构号仍只认 `badgeV2.detailBadges` 中 `type` 为 `identity`、`detailType` 为 `identity_org` 或 `identity_people` 且 `badgeStatus` 为 `passed` 的项，此时为 1，文字为这些项的 `description`（机构在前，去重后用“、”连接）；读到 `badgeV2` 且 `detailBadges` 是列表但没有这两类时为 0、文字为空；没有 `badgeV2` 或结构不对则不推断。不用 `userType`、`/org/` 路径或 `orgVerifyStatus` 判断机构号。读不到作者页用户实体时不改。搜索 `verify_bayes` 与 `badge_v2.title` 不是认证来源。
+微博（#211）粉丝取详情页自身请求 `sideUser` 的 `followers_count`，来源为 `detail_side_user`；关注数为 `friends_count`，作品数为
+`statuses_count`；赞、评、分享取 `statuses/show` 的 `attitudes_count`、`comments_count`、`reposts_count`；以上缺键均为空，
+不补 0。微博不提供收藏数。认证原值写入 `author_json`，`author_verified` / `author_verified_text` 的判定口径待操作人决定，
+决定前为空。
 详情或作者候选级失败服从上面的 `candidate_skipped` 规则，登录、授权、频控、验证码和
 风控仍属于运行级阻断。
 
@@ -358,7 +373,11 @@ dry-run 只执行计划冻结，因此预期只有 `plan_frozen=completed`，后
   `adaptive_search_stopped` 证据。空页必须由平台自身的结束标记证明，过滤后为空、缺少结束标记或结束
   标记与页码矛盾都不算：知乎只认响应 `paging.is_end=true`（`paging_is_end`）；B站只认首页
   `numResults=0`（`no_results`）或页码大于 `numPages`（`empty_page`），停止事件记录
-  `source_num_pages`/`source_num_results`；微博只认原始 `cards` 为空或页面明确无内容（`empty_page`）。
+  `source_num_pages`/`source_num_results`；微博（#211）只认搜索页分页控件的下一页按钮带 `disabled`
+（`next_disabled`）、第 1 页有卡片且没有分页控件（`single_page`），或第 1 页没有卡片且显示“找到0条结果”
+（`no_results`），停止事件记录 `source_page_info`、`source_max_page` 与 `page_cap_reached`。微博每个查询最多
+50 页，`page_cap_reached=true` 表示停在平台翻页上限而非内容取尽；是否接受该情形或改为时间窗切分待操作人
+在 #211 决定。
   这些平台的页内空页、缺少结束标记或缺少总数一律写 `runtime_failed`。抖音每轮链上的第 1 页是例外：
   `data=[]` 与 `has_more=false` 不能单独证明耗尽；还必须由当前可见搜索页明确显示无结果，停止细节
   写为 `verified_empty_first_page`。可见页仍有作品或页面状态不明确时必须写
@@ -377,7 +396,7 @@ dry-run 只执行计划冻结，因此预期只有 `plan_frozen=completed`，后
 
 每个分页批次必须记录平台页码、请求游标或 search ID（平台提供时）、下一游标、可恢复的
 下一页/offset/cursor、批次是否完整、发现阶段、原始返回条数和 `has_more`（平台提供时）。
-小红书与抖音例外：页码与 search ID 只作审计，每轮全量扫描不存在可恢复的下一页。知乎（#185）同样没有可恢复的下一页，保存页码只作审计。
+小红书与抖音例外：页码与 search ID 只作审计，每轮全量扫描不存在可恢复的下一页。知乎（#185）与微博（#211）同样没有可恢复的下一页，保存页码只作审计。
 抖音搜索响应还必须验证 HTTP 可解析后的业务 envelope：非成功 `status_code`、缺失或非列表
 `data`、缺失或非法 `has_more`，以及 `has_more=true` 但没有下一 `logid`，都属于
 `runtime_failed`，不得降级成空页。状态文件保存脱敏的 `douyin_search_response_observed`；
@@ -392,7 +411,7 @@ URL 和检查错误，不保存完整响应或整页文本。
 B站、微博、抖音和知乎的正式 `mediacrawler_search` 任务由通用调度器自动维护发现记忆。SQLite
 `crawl_discovery_checkpoints`、`crawl_discovery_seen_candidates` 与操作人授权的
 `crawl_discovery_candidate_exclusions` 均以 `job_id + query_fingerprint` 隔离；前者保存安全前沿
-（抖音与知乎只作审计），第二张表保存已完成处理的候选 ID，第三张表保存精确、可审计且不计成功的排除 ID。
+（抖音、知乎与微博只作审计），第二张表保存已完成处理的候选 ID，第三张表保存精确、可审计且不计成功的排除 ID。
 小红书由独立 runner 维护 `xhs_discovery_checkpoints`，以 `target_key + account_id + query_fingerprint`
 唯一定位（不保存前沿，每轮全量扫描），
 并在同一作用域的 `xhs_discovery_seen_candidates` 保存已完成处理的候选 ID；两者不与通用任务或
@@ -413,7 +432,7 @@ B站、微博、抖音和知乎的正式 `mediacrawler_search` 任务由通用�
 提交，未完成尾批仍允许保守重取。两套表的作用域不同：通用平台按 job 与查询
 指纹隔离，小红书还按人工指定账号隔离，不能跨账号共享未入库活动。
 
-“字段无效”必须已有决定性来源证据。B站 article、微博长文、小红书笔记和知乎 answer/article
+“字段无效”必须已有决定性来源证据。B站 article、微博详情、小红书笔记和知乎 answer/article
 的详情请求、空响应或解析失败先完成平台规定的有限重试；仍失败即记录 `candidate_skipped` 并写入候选
 记忆（小红书 `retryable=true` 的只计入本轮已处理集合，下一轮重试），失败页可在批次完整后推进，但该 ID 永远不进入有效内容集合。登录、验证码、安全限制、频控、
 搜索请求失败或浏览器整体故障仍是运行级失败，不得按候选跳过。数据库已有 ID 的历史内容修复仍必须
@@ -421,7 +440,7 @@ B站、微博、抖音和知乎的正式 `mediacrawler_search` 任务由通用�
 
 首次执行从来源第一页开始，不做顶部刷新。每个完整前沿批次把下一页写入状态事件。抖音（#124）与小红书
 一样每轮从首页全量翻到 `has_more=false`：抖音从第 1 页、offset 0、空 search ID 开始，状态事件记录的
-offset 与 search ID 只作审计；小红书在首页搜索后从顶部全量滚动，不保存前沿与 search ID。知乎（#185）每轮从搜索第一页滚到 `paging.is_end=true`，已处理 ID 只滑过，保存页码只作审计，不做顶部刷新。对应根执行器
+offset 与 search ID 只作审计；小红书在首页搜索后从顶部全量滚动，不保存前沿与 search ID。知乎（#185）每轮从搜索第一页滚到 `paging.is_end=true`，已处理 ID 只滑过，保存页码只作审计，不做顶部刷新。微博（#211）每轮从搜索第一页点下一页翻到结束标记，已处理 ID 只滑过，保存页码只作审计，不做顶部刷新。对应根执行器
 在 child 摘要形成后才把状态事件提交到 SQLite，不得由底层循环提前推进数据库游标。中途停止的
 批次保存当前请求位置，下一次允许重取该批次，依靠已知 ID 提前去重；这样可以重复少量边界
 数据，但不能跳过未持久化候选。小红书只有在 child 摘要形成后才提交本轮候选 ID 与累计摘要；
@@ -429,23 +448,24 @@ offset 与 search ID 只作审计；小红书在首页搜索后从顶部全量�
 决定性事件或摘要形成前崩溃的候选不会被提前标记为已处理。
 
 存在 checkpoint 时，runner 自动把保存位置传给 child；有未完成累计摘要时再传入上一份
-`summary.json`。顶部刷新仅限 B站、微博（小红书、抖音与知乎没有保存位置，每轮全量重滚）：child 先刷新
+`summary.json`。顶部刷新仅限 B站（小红书、抖音、知乎与微博没有保存位置，每轮全量重扫）：child 先刷新
 配置的 `top_refresh_max_pages` 个顶部页面，再从保存前沿继续。顶部刷新用于发现新近发布内容，
 不推进深层 checkpoint；已知 ID 在详情、粉丝和媒体处理前跳过。深层批次
 完整结束才推进到下一页。抖音 child 命令不含 `--start-page`、顶部刷新与耗尽参数，只在有累计摘要时带
 `--resume-summary`；child 收到这些恢复参数即以 `douyin_full_scan_rejects_resume_args` 报错。
 知乎 child 同样不含 `--start-page`、顶部刷新与耗尽参数，只在有累计摘要时带 `--resume-summary`；
-child 收到这些恢复参数即以 `zhihu_full_scan_rejects_resume_args` 报错。
+child 收到这些恢复参数即以 `zhihu_full_scan_rejects_resume_args` 报错。微博同样如此，报错为
+`weibo_full_scan_rejects_resume_args`。
 
 运行级阻断或未取得停止证据的产物不单独入库。runner 保存安全摘要引用，下一次将历史与本次
 JSONL 合并校验并从最后完整前沿继续；只有取得可验证耗尽证据后，才把累计中全部结构有效记录
-（含主题不相关记录）一次性原子入库并清空累计摘要。checkpoint 本身保留；B站、微博供下一次定时
-任务先刷新顶部，小红书、抖音与知乎下一轮仍全量重滚。运行错误仍按重试策略处理。
+（含主题不相关记录）一次性原子入库并清空累计摘要。checkpoint 本身保留；B站供下一次定时
+任务先刷新顶部，小红书、抖音、知乎与微博下一轮仍全量重扫。运行错误仍按重试策略处理。
 
-B站、微博的 `source_exhausted` checkpoint 默认不再盲目请求原深页，只执行顶部刷新；小红书、抖音与知乎
-耗尽后与其他轮相同，全量重滚。抖音的 search ID 只标识一次具体排序，新进程打开搜索页即得到新链，旧
+B站的 `source_exhausted` checkpoint 默认不再盲目请求原深页，只执行顶部刷新；小红书、抖音、知乎与微博
+耗尽后与其他轮相同，全量重扫。抖音的 search ID 只标识一次具体排序，新进程打开搜索页即得到新链，旧
 offset 在新链上没有意义，因此不跨进程续跑、不重绑定旧前沿、耗尽后也不 reseed；已处理 ID 在作者、
-详情与媒体请求前滑过。知乎已处理 ID 在详情、作者与媒体请求前滑过，保存页码不作续跑起点。来源重新出现未知内容时仍可累计。`--no-import` 诊断自动禁用 checkpoint 写入。
+详情与媒体请求前滑过。知乎与微博已处理 ID 在详情、作者与媒体请求前滑过，保存页码不作续跑起点。来源重新出现未知内容时仍可累计。`--no-import` 诊断自动禁用 checkpoint 写入。
 通用 runner 的显式 `--resume-summary`、`--start-page` 和 `--recovery-keyword` 仅用于人工恢复，不是
 正常 workflow；使用显式参数时调度器不自动混入旧 checkpoint。小红书不开放这些人工恢复参数，也没有
 可恢复的位置，账号级 checkpoint 只保存停止审计与累计摘要；换号产生独立记忆，不得解释为同一正式轮次
@@ -453,6 +473,8 @@ offset 在新链上没有意义，因此不跨进程续跑、不重绑定旧前�
 不到目标页时按 `runtime_failed:browser_search_response_missing` 停止，不得请求猜测的深页。
 知乎的 checkpoint 同样只作审计，runner 拒绝对知乎 job 显式传 `--start-page`；截获不到目标页时按
 `runtime_failed:browser_search_response_missing` 停止，不得改走浏览器外请求。
+微博的 checkpoint 同样只作审计，runner 拒绝对微博 job 显式传 `--start-page`；搜索页不符合结束标记或分页
+结构时按 `runtime_failed:search_page_invalid` 停止，不得拼接页码地址或改走浏览器外请求。
 
 ## 正文图片摘要与错误契约
 
