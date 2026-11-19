@@ -222,59 +222,6 @@ def update_weibo_note(
 # @Desc    :
 
 
-# TripPostCollect T05：迁自 MediaCrawler 5a68eb5098fcd17308c7fe0b9d53916ae839b303；仅拆分职责与注入依赖。
-def filter_search_result_card(card_list: List[Dict]) -> List[Dict]:
-    """
-    Filter Weibo search results, only keep data with card_type of 9
-    :param card_list: List of card items from search results
-    :return: Filtered list of note items
-    """
-    note_list: List[Dict] = []
-    for card_item in card_list or []:
-        if not isinstance(card_item, dict):
-            continue
-        if card_item.get("card_type") == 9:
-            note_list.append(card_item)
-        card_group = card_item.get("card_group")
-        if isinstance(card_group, list):
-            for card_group_item in card_group:
-                if isinstance(card_group_item, dict) and card_group_item.get("card_type") == 9:
-                    note_list.append(card_group_item)
-
-    return note_list
-
-
-# 平台在搜索结果末尾给出的明确无内容提示（卡片或卡片组内的文本）。
-WEIBO_EMPTY_RESULT_MARKERS = ("暂无内容", "这里还没有内容")
-
-
-def _card_texts(card: Any) -> List[str]:
-    if not isinstance(card, dict):
-        return []
-    texts = [str(card.get(key) or "") for key in ("desc", "desc1", "title_sub", "name")]
-    for nested in card.get("card_group") or []:
-        texts.extend(_card_texts(nested))
-    return texts
-
-
-def search_page_exhausted(card_list: List[Dict]) -> bool:
-    """只有原始 ``cards`` 为空，或页面没有微博卡片且带明确的无内容标记时才算来源耗尽。
-
-    有卡片但都不是 ``card_type=9``（推荐、话题、用户卡）是正常页，应继续翻页。
-    """
-    cards = card_list or []
-    if not cards:
-        return True
-    if filter_search_result_card(cards):
-        return False
-    return any(
-        marker in text
-        for card in cards
-        for text in _card_texts(card)
-        for marker in WEIBO_EMPTY_RESULT_MARKERS
-    )
-
-
 def _find_weibo_detail(value: Any, note_id: str) -> dict[str, Any] | None:
     return _find_nested_platform_record(
         value,

@@ -63,6 +63,16 @@ async def _no_cookies(context, urls=None):
     return "SUB=t127", {"SUB": "t127"}
 
 
+def _weibo_ua_capture(page: FakePage):
+    class Channel:
+        async def read_state(self, target, script_name, **kwargs):
+            assert script_name == "weibo.user_agent"
+            value = await target.evaluate("() => navigator.userAgent")
+            return value, "visit"
+
+    return SimpleNamespace(channel=Channel(), page=page)
+
+
 # ---------- 1. 知乎、微博：浏览器不强制 UA，视口与 warmup 相同 ----------
 
 
@@ -181,6 +191,7 @@ def test_weibo_client_headers_use_browser_user_agent(monkeypatch) -> None:
     crawler.cookie_urls = ["https://m.weibo.cn"]
     crawler.browser_context = object()
     crawler.context_page = FakePage()
+    crawler._capture = _weibo_ua_capture(crawler.context_page)
     crawler.ports = SimpleNamespace(
         client=SimpleNamespace(convert_browser_context_cookies=_no_cookies),
         post_repair=False,
@@ -204,6 +215,7 @@ def test_weibo_image_request_uses_client_user_agent(monkeypatch) -> None:
     crawler.cookie_urls = ["https://m.weibo.cn"]
     crawler.browser_context = object()
     crawler.context_page = FakePage()
+    crawler._capture = _weibo_ua_capture(crawler.context_page)
     requests: list[dict[str, Any]] = []
 
     class Http:

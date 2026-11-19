@@ -78,23 +78,6 @@ def test_projected_record_carries_platform_created_at():
     assert (item["create_time"], item["create_date_time"]) == (1749873600, "2025-06-14 12:00:00+08:00")
 
 
-@pytest.mark.parametrize(
-    "cards,exhausted,notes",
-    [
-        ([], True, 0),
-        (None, True, 0),
-        ([{"card_type": 11, "card_group": None}], False, 0),
-        ([{"card_type": 11, "card_group": [{"card_type": 4, "desc": "相关用户"}]}], False, 0),
-        ([{"card_type": 11, "card_group": [{"card_type": 4, "desc": "暂无内容"}]}], True, 0),
-        ([{"card_type": 11, "card_group": [{"card_type": 9, "mblog": {"id": "1"}}]}], False, 1),
-        ([{"card_type": 9, "mblog": {"id": "1"}}, "bad", None], False, 1),
-    ],
-)
-def test_search_page_exhaustion_requires_empty_cards_or_explicit_marker(cards, exhausted, notes):
-    assert weibo_store.search_page_exhausted(cards) is exhausted
-    assert len(weibo_store.filter_search_result_card(cards)) == notes
-
-
 @pytest.mark.asyncio
 async def test_store_uses_true_format_post_directory_and_schema_v1_manifest(
     monkeypatch, tmp_path

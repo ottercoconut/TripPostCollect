@@ -36,6 +36,7 @@ ACTION_KINDS = frozenset(
         "close_tab",
         "close_overlay",
         "navigate",
+        "click_next",
         "go_back",
         "reload",
     }

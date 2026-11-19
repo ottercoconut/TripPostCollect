@@ -28,16 +28,15 @@ import asyncio
 import json
 import logging
 import re
-from typing import Dict, List, Optional, Union
-from urllib.parse import urlencode, urlparse
+from typing import Dict, List, Optional
+from urllib.parse import urlparse
 
 import httpx
-from httpx import Response
 from playwright.async_api import BrowserContext, Page, Error as PlaywrightError
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_fixed
 
 from trippostcollect.application.contracts import WeiboClientPorts
-from .models import DataFetchError, PlatformRuntimeError, SearchType, WeiboServerError
+from .models import DataFetchError, PlatformRuntimeError
 from .parser import _find_weibo_detail
 
 logger = logging.getLogger("TripPostCollect")
@@ -61,22 +60,13 @@ def raise_for_weibo_status(status_code: int, label: str) -> None:
         raise PlatformRuntimeError(f"{label} HTTP {status_code}", code=code)
 
 
-def _retryable_request_error(exc: BaseException) -> bool:
-    """接口请求只对传输层异常与 5xx 重试；平台拒绝和业务错误立即上抛。"""
-    return isinstance(exc, (httpx.TransportError, WeiboServerError))
-
-
 def _retryable_detail_error(exc: BaseException) -> bool:
     return not isinstance(exc, PlatformRuntimeError)
 
 
-def _response_summary(response: Response) -> str:
+def _response_summary(response: httpx.Response) -> str:
     # 响应原文可能含作者头像等字段，日志和异常只带状态码与长度（#114）。
     return f"status={response.status_code} length={len(response.content or b'')}"
-
-
-def _payload_summary(data: Dict) -> str:
-    return f"ok={data.get('ok')!r} msg={str(data.get('msg') or '')[:80]!r}"
 
 
 def weibo_image_request_urls(image_url: str) -> List[str]:
@@ -119,87 +109,6 @@ class WeiboClient:
         self.ports = ports
         self.post_repair = post_repair
 
-    @retry(
-        stop=stop_after_attempt(5), wait=wait_fixed(3),
-        retry=retry_if_exception(_retryable_request_error), reraise=True,
-    )
-    async def request(self, method, url, **kwargs) -> Union[Response, Dict]:
-        enable_return_response = kwargs.pop("return_response", False)
-        allow_empty_search = kwargs.pop("allow_empty_search", False)
-        async with self.ports.make_async_client(proxy=self.proxy) as client:
-            response = await client.request(method, url, timeout=self.timeout, **kwargs)
-
-        if enable_return_response:
-            return response
-
-        label = f"[WeiboClient.request] {method} {urlparse(url).path}"
-        # issue: #771 搜索接口的 432/418 是风控拦截：直接作为运行级阻断，不再逐次重试并刷新 Cookie。
-        raise_for_weibo_status(response.status_code, label)
-        if response.status_code >= 500:
-            logger.error(f"{label} server error, {_response_summary(response)}")
-            raise WeiboServerError(f"{label} HTTP {response.status_code}")
-
-        try:
-            data: Dict = response.json()
-        except json.decoder.JSONDecodeError:
-            logger.error(f"{label} non-JSON response, {_response_summary(response)}")
-            raise DataFetchError(f"get response code error: {response.status_code}")
-
-        ok_code = data.get("ok")
-        if ok_code == 0:  # response error
-            response_data = data.get("data") or {}
-            if (
-                allow_empty_search
-                and str(data.get("msg") or "").strip() == "这里还没有内容"
-                and not (response_data.get("cards") or [])
-            ):
-                return response_data
-            logger.error(f"{label} err, {_payload_summary(data)}, {_response_summary(response)}")
-            raise DataFetchError(data.get("msg", "response error"))
-        elif ok_code == -100:  # 移动站未登录时返回登录跳转
-            logger.error(f"{label} login required, {_payload_summary(data)}")
-            raise PlatformRuntimeError(f"{label} ok=-100", code="login_required")
-        elif ok_code != 1:  # unknown error
-            logger.error(f"{label} err, {_payload_summary(data)}, {_response_summary(response)}")
-            raise DataFetchError(data.get("msg", "unknown error"))
-        else:  # response right
-            return data.get("data", {})
-
-    async def get(self, uri: str, params=None, headers=None, **kwargs) -> Union[Response, Dict]:
-        final_uri = uri
-        if isinstance(params, dict):
-            final_uri = (f"{uri}?"
-                         f"{urlencode(params)}")
-
-        if headers is None:
-            headers = self.headers
-        return await self.request(method="GET", url=f"{self._host}{final_uri}", headers=headers, **kwargs)
-
-    async def post(self, uri: str, data: dict) -> Dict:
-        json_str = json.dumps(data, separators=(',', ':'), ensure_ascii=False)
-        return await self.request(method="POST", url=f"{self._host}{uri}", data=json_str, headers=self.headers)
-
-    async def pong(self) -> bool:
-        """get a note to check if login state is ok"""
-        logger.info("[WeiboClient.pong] Begin pong weibo...")
-        ping_flag = False
-        try:
-            uri = "/api/config"
-            resp_data: Dict = await self.request(method="GET", url=f"{self._host}{uri}", headers=self.headers)
-            if resp_data.get("login"):
-                ping_flag = True
-            else:
-                logger.error("[WeiboClient.pong] cookie may be invalid and again login...")
-        except PlatformRuntimeError as e:
-            # 频控、风控不是登录失效，原样上抛；只有登录类拒绝回到登录流程。
-            if e.code != "login_required":
-                raise
-            logger.error(f"[WeiboClient.pong] Pong weibo failed: {e}, and try to login again...")
-        except Exception as e:
-            logger.error(f"[WeiboClient.pong] Pong weibo failed: {e}, and try to login again...")
-            ping_flag = False
-        return ping_flag
-
     async def update_cookies(self, browser_context: BrowserContext, urls: Optional[List[str]] = None):
         """
         Update cookies from browser context
@@ -217,31 +126,6 @@ class WeiboClient:
         logger.info(
             f"[WeiboClient.update_cookies] Cookie updated successfully for {cookie_urls}, total: {len(cookie_dict)} cookies"
         )
-
-    async def get_note_by_keyword(
-        self,
-        keyword: str,
-        page: int = 1,
-        search_type: SearchType = SearchType.DEFAULT,
-    ) -> Dict:
-        """
-        search note by keyword
-        :param keyword: Search keyword for Weibo
-        :param page: Pagination parameter - current page number
-        :param search_type: Search type, see SearchType enum in weibo/field.py
-        :return:
-        """
-        uri = "/api/container/getIndex"
-        containerid = f"100103type={search_type.value}&q={keyword}"
-        params = {
-            "containerid": containerid,
-            "page_type": "searchall",
-            "page": page,
-        }
-        return await self.get(uri, params, allow_empty_search=True)
-
-
-
 
     @retry(
         stop=stop_after_attempt(3), wait=wait_fixed(1),

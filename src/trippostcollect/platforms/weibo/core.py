@@ -26,20 +26,31 @@
 # TripPostCollect T05：迁自 MediaCrawler 5a68eb5098fcd17308c7fe0b9d53916ae839b303；仅拆分职责与注入依赖。
 import asyncio
 import logging
-from typing import Dict, List, Optional
-from urllib.parse import quote
+from typing import Any, Dict, List, Optional
 
 import httpx
-from playwright.async_api import BrowserContext, BrowserType, Page, Playwright, async_playwright
+from playwright.async_api import (
+    BrowserContext,
+    BrowserType,
+    Error as PlaywrightError,
+    Page,
+    Playwright,
+    async_playwright,
+)
 
 from trippostcollect.application.contracts import ImageStagingError, WeiboPorts
 from trippostcollect.core.paths import PROFILE_VIEWPORT, platform_profile_dir
-from trippostcollect.records.topic_relevance import topic_relevant_for_web_post
 from . import parser as weibo_store
 from .client import WeiboClient
-from .models import DataFetchError, PlatformRuntimeError, SearchType, WeiboImageDownloadError, WeiboFullTextFetchError
-from .parser import filter_search_result_card
-from .login import WeiboLogin
+from .detail_page import WeiboDetailPages
+from .models import DataFetchError, PlatformRuntimeError, WeiboImageDownloadError, WeiboFullTextFetchError
+from .search_page import (
+    HOME_URL,
+    WeiboPageCapture,
+    WeiboSearchPageInvalid,
+    WeiboSearchSnapshot,
+    search_url,
+)
 
 logger = logging.getLogger("TripPostCollect")
 
@@ -52,10 +63,13 @@ class WeiboCrawler:
         self.config = config
         self.ports = ports
         self.source_keyword = ""
-        self.index_url = "https://www.weibo.com"
+        self.index_url = HOME_URL
         self.mobile_index_url = "https://m.weibo.cn"
         self.cookie_urls = [self.mobile_index_url]
         self.cdp_manager = None
+        self._capture: WeiboPageCapture | None = None
+        self.detail_pages: WeiboDetailPages | None = None
+        self._opened_keyword = ""
 
     async def start(self):
         playwright_proxy_format, httpx_proxy_format = None, None
@@ -80,340 +94,198 @@ class WeiboCrawler:
             persistent = self.config.SAVE_LOGIN_STATE and not self.config.ENABLE_CDP_MODE
             pages = self.browser_context.pages if persistent else []
             self.context_page = pages[0] if pages else await self.browser_context.new_page()
-            await self.context_page.goto(self.index_url)
-            await asyncio.sleep(2)
-
-
-            # Create a client to interact with the xiaohongshu website.
-            self.wb_client = await self.create_weibo_client(httpx_proxy_format)
             try:
-                await self.ensure_login()
-            except PlatformRuntimeError as exc:
-                # 登录、频控或风控阻断：搜索模式记运行级失败后结束，不得继续搜索写出假耗尽（#114）。
-                if self.config.CRAWLER_TYPE == "search":
-                    self.ports.accumulator().mark_runtime_failed(exc.code)
-                raise
-
-            if self.config.CRAWLER_TYPE == "search":
-                # Search for video and retrieve their comment information.
-                behavior_keyword = self.config.KEYWORDS.split(",", maxsplit=1)[0].strip()
-                container_id = quote(f"100103type=1&q={behavior_keyword}", safe="")
-                await self.context_page.goto(
-                    f"{self.mobile_index_url}/search?containerid={container_id}",
-                    wait_until="domcontentloaded",
-                )
-                await self.ports.run_required_human_behavior(self.context_page, "weibo")
-                await self.wb_client.update_cookies(
-                    browser_context=self.browser_context,
-                    urls=self.cookie_urls,
-                )
-                await self.search()
-            elif self.config.CRAWLER_TYPE == "detail":
-                # Get the information and comments of the specified post
-                behavior_keyword = self.config.KEYWORDS.split(",", maxsplit=1)[0].strip()
-                self.source_keyword = behavior_keyword
-                container_id = quote(f"100103type=1&q={behavior_keyword}", safe="")
-                await self.context_page.goto(
-                    f"{self.mobile_index_url}/search?containerid={container_id}",
-                    wait_until="domcontentloaded",
-                )
-                await self.ports.run_required_human_behavior(self.context_page, "weibo")
-                await self.wb_client.update_cookies(
-                    browser_context=self.browser_context,
-                    urls=self.cookie_urls,
-                )
-                await self.get_specified_notes()
-            else:
-                pass
+                await self._run_after_browser_ready(httpx_proxy_format)
+            finally:
+                await self._close_capture()
             logger.info("[WeiboCrawler.start] Weibo Crawler finished ...")
 
-    async def ensure_login(self):
-        """移动端登录态必须由 /api/config 确认；登录流程后仍未确认即运行级阻断。"""
-        if await self.wb_client.pong():
+    async def _close_capture(self) -> None:
+        capture = getattr(self, "_capture", None)
+        if capture is None:
             return
-        login_obj = WeiboLogin(
-            login_type=self.config.LOGIN_TYPE,
-            login_phone="",  # your phone number
-            browser_context=self.browser_context,
-            context_page=self.context_page,
-            cookie_str=self.config.COOKIES,
-            ports=self.ports.login,
-        )
-        await login_obj.begin()
+        self._capture = None
+        await capture.aclose()
 
-        # After successful login, redirect to mobile website and update mobile cookies
-        logger.info("[WeiboCrawler.start] redirect weibo mobile homepage and update cookies on mobile platform")
-        await self.context_page.goto(self.mobile_index_url)
-        await asyncio.sleep(3)
-        # Only get mobile cookies to avoid confusion between PC and mobile cookies
-        await self.wb_client.update_cookies(
-            browser_context=self.browser_context,
-            urls=self.cookie_urls,
+    def _stop_for_block(self, code: str) -> None:
+        """登录、验证或频控：搜索模式记运行级停止后返回，不发起搜索，也不在本轮登录。"""
+
+        logger.error(
+            "[WeiboCrawler.start] Weibo session blocked code=%s; "
+            "run scripts/login_warmup.py --targets weibo before the next formal run",
+            code,
         )
-        if not await self.wb_client.pong():
-            raise PlatformRuntimeError(
-                "weibo mobile login state not confirmed after login flow",
-                code="login_required",
+        if self.config.CRAWLER_TYPE != "search":
+            raise PlatformRuntimeError(f"weibo {code}", code=code)
+        self.ports.accumulator().mark_runtime_failed(
+            code,
+            source_page=1,
+            resume_page=1,
+            discovery_phase="frontier",
+        )
+
+    async def _run_after_browser_ready(self, httpx_proxy_format: Optional[str]) -> None:
+        try:
+            await self.context_page.goto(
+                self.index_url, wait_until="domcontentloaded", timeout=30_000,
             )
-
-    async def search(self):
-        """
-        search weibo note with keywords
-        :return:
-        """
-        logger.info("[WeiboCrawler.search] Begin search weibo keywords")
-        start_page = self.config.START_PAGE
-        accumulator = self.ports.accumulator()
-
-        # Set the search type based on the configuration for weibo
-        if self.config.WEIBO_SEARCH_TYPE == "default":
-            search_type = SearchType.DEFAULT
-        elif self.config.WEIBO_SEARCH_TYPE == "real_time":
-            search_type = SearchType.REAL_TIME
-        elif self.config.WEIBO_SEARCH_TYPE == "popular":
-            search_type = SearchType.POPULAR
-        elif self.config.WEIBO_SEARCH_TYPE == "video":
-            search_type = SearchType.VIDEO
-        else:
-            logger.error(f"[WeiboCrawler.search] Invalid WEIBO_SEARCH_TYPE: {self.config.WEIBO_SEARCH_TYPE}")
+        except PlaywrightError as exc:
+            logger.warning(
+                "[WeiboCrawler.start] Homepage navigation did not settle: %s",
+                type(exc).__name__,
+            )
+        ledger_mode = "repair" if self.config.CRAWLER_TYPE == "detail" else "discovery"
+        self._capture = WeiboPageCapture.open(self.browser_context, mode=ledger_mode)
+        self._capture.install(self.context_page)
+        self.detail_pages = WeiboDetailPages(self._capture, self.context_page)
+        blocked = await self._capture.confirm_login(self.context_page)
+        if blocked:
+            self._stop_for_block(blocked)
             return
-
-        for keyword in self.config.KEYWORDS.split(","):
+        self.wb_client = await self.create_weibo_client(httpx_proxy_format)
+        keyword = self.config.KEYWORDS.split(",", maxsplit=1)[0].strip()
+        if self.config.CRAWLER_TYPE == "search":
+            await self._open_search_page(keyword)
+            await self.ports.run_required_human_behavior(self.context_page, "weibo")
+            await self.search()
+        elif self.config.CRAWLER_TYPE == "detail":
             self.source_keyword = keyword
-            logger.info(f"[WeiboCrawler.search] Current search keyword: {keyword}")
-            phases: list[tuple[str, int, int | None]] = []
-            refresh_max_pages = self.ports.refresh_max_pages()
-            if start_page > 1 and refresh_max_pages > 0:
-                phases.append(("refresh", 1, min(start_page - 1, refresh_max_pages)))
-            source_exhausted = self.ports.source_exhausted()
-            if not source_exhausted:
-                phases.append(("frontier", start_page, None))
-            for discovery_phase, phase_start, phase_end in phases:
-                page = phase_start
-                while (
-                    accumulator.can_continue
-                    and (phase_end is None or page <= phase_end)
-                ):
-                    logger.info(
-                        f"[WeiboCrawler.search] search weibo keyword: {keyword}, page: {page}"
-                    )
-                    requested_page = page
-                    try:
-                        search_res = await self.wb_client.get_note_by_keyword(
-                            keyword=keyword,
-                            page=requested_page,
-                            search_type=search_type,
-                        )
-                    except PlatformRuntimeError as exc:
-                        accumulator.mark_runtime_failed(
-                            exc.code,
-                            source_page=requested_page,
-                            resume_page=requested_page,
-                            discovery_phase=discovery_phase,
-                        )
-                        raise
-                    except httpx.TransportError:
-                        # #129：重试用尽后仍是传输层失败（DNS、连接、超时、重置）：网络整体故障，运行级失败。
-                        accumulator.mark_runtime_failed(
-                            "network_unreachable",
-                            source_page=requested_page,
-                            resume_page=requested_page,
-                            discovery_phase=discovery_phase,
-                        )
-                        raise
-                    except httpx.RequestError:
-                        # DataFetchError 等其余请求失败：运行级失败，不当作空页。
-                        accumulator.mark_runtime_failed(
-                            "search_request_failed",
-                            source_page=requested_page,
-                            resume_page=requested_page,
-                            discovery_phase=discovery_phase,
-                        )
-                        raise
-                    note_id_list: List[str] = []
-                    cards = search_res.get("cards") or []
-                    note_list = filter_search_result_card(cards)
-                    if weibo_store.search_page_exhausted(cards):
-                        if discovery_phase == "frontier":
-                            accumulator.mark_source_exhausted(
-                                "empty_page",
-                                source_page=requested_page,
-                                raw_batch_count=0,
-                                resume_page=requested_page,
-                                source_has_more=False,
-                                discovery_phase=discovery_phase,
-                            )
-                        break
-                    raw_batch_count = len(note_list)
-                    pending_note_ids: set[str] = set()
-                    unknown_notes = []
-                    for note_item in note_list:
-                        note_id = str(
-                            ((note_item or {}).get("mblog") or {}).get("id") or ""
-                        )
-                        if accumulator.is_known(note_id) or (
-                            note_id and note_id in pending_note_ids
-                        ):
-                            continue
-                        if note_id:
-                            pending_note_ids.add(note_id)
-                        unknown_notes.append(note_item)
-                    note_list = unknown_notes
-                    accumulator.begin_batch()
-                    processed_count = 0
-                    for note_item in note_list:
-                        processed_count += 1
-                        if not note_item:
-                            continue
-                        preliminary_id = str(
-                            ((note_item or {}).get("mblog") or {}).get("id") or ""
-                        )
-                        try:
-                            note_item = await self.get_note_full_text(note_item)
-                        except WeiboFullTextFetchError as exc:
-                            if exc.runtime_blocking:
-                                accumulator.mark_runtime_failed(
-                                    exc.code,
-                                    source_page=requested_page,
-                                    resume_page=requested_page,
-                                    discovery_phase=discovery_phase,
-                                )
-                                break
-                            logger.error(
-                                "[WeiboCrawler.search] Skip full-text candidate after "
-                                f"failed attempts: {exc!r}"
-                            )
-                            should_stop = accumulator.skip_candidate_failure(
-                                preliminary_id or exc.note_id,
-                                failure_scope="post",
-                                detail="full_text_request_failed",
-                                error_code=exc.code,
-                                attempts=exc.attempts,
-                                retryable=True,
-                                source_page=requested_page,
-                                discovery_phase=discovery_phase,
-                            )
-                            if should_stop:
-                                break
-                            continue
-                        mblog: Dict = note_item.get("mblog")
-                        if not mblog:
-                            continue
-                        note_id = str(mblog.get("id") or "")
-                        if weibo_store.weibo_created_at(mblog) is None:
-                            # 发帖时间缺失或无法解析：按候选失败跳过，不写出记录（#114）。
-                            logger.error(
-                                "[WeiboCrawler.search] Skip candidate without parseable "
-                                f"created_at: note_id={note_id}"
-                            )
-                            accumulator.skip_candidate_failure(
-                                note_id,
-                                failure_scope="post",
-                                detail="created_at_unparseable",
-                                error_code="created_at_unparseable",
-                                attempts=1,
-                                retryable=False,
-                                source_page=requested_page,
-                                discovery_phase=discovery_phase,
-                            )
-                            continue
-                        user = mblog.get("user") or {}
-                        followers_observed = any(
-                            key in user and user.get(key) not in (None, "")
-                            for key in (
-                                "followers_count",
-                                "followers_count_str",
-                                "fans_count",
-                                "fans_count_str",
-                            )
-                        )
-                        valid = bool(
-                            note_id
-                            and mblog.get("text")
-                            and mblog.get("content_detail_status") == "detail_observed"
-                            and mblog.get("content_detail_source")
-                            in {"search_mblog_complete", "mobile_detail"}
-                            and mblog.get("created_at")
-                            and user.get("id")
-                            and user.get("screen_name")
-                            and followers_observed
-                            and weibo_store._weibo_pic_urls(mblog)
-                            and all(
-                                mblog.get(key) not in (None, "")
-                                for key in (
-                                    "attitudes_count",
-                                    "comments_count",
-                                    "reposts_count",
-                                )
-                            )
-                        )
-                        if valid:
-                            try:
-                                await self.get_note_images(mblog)
-                            except WeiboImageDownloadError as exc:
-                                if self.ports.is_runtime_blocking_image_error(exc.code):
-                                    accumulator.mark_runtime_failed(
-                                        exc.code,
-                                        source_page=requested_page,
-                                        resume_page=requested_page,
-                                        discovery_phase=discovery_phase,
-                                    )
-                                    break
-                                should_stop = accumulator.skip_candidate_failure(
-                                    note_id,
-                                    failure_scope="image",
-                                    detail="image_download_failed",
-                                    error_code=exc.code,
-                                    attempts=exc.attempts,
-                                    source_index=exc.source_index,
-                                    source_page=requested_page,
-                                    discovery_phase=discovery_phase,
-                                )
-                                if should_stop:
-                                    break
-                                continue
-                        await self.update_weibo_note(note_item)
-                        note_id_list.append(note_id)
-                        target_valid = valid and topic_relevant_for_web_post(
-                            "weibo",
-                            {
-                                "content": weibo_store.persisted_weibo_content_text(
-                                    mblog
-                                ),
-                                "source_keyword": keyword,
-                            },
-                            fallback_keyword=keyword,
-                        )
-                        should_stop = accumulator.consider(note_id, valid=target_valid)
-                        if should_stop:
-                            break
+            await self._open_search_page(keyword)
+            await self.ports.run_required_human_behavior(self.context_page, "weibo")
+            await self.get_specified_notes()
 
-                    batch_complete = processed_count >= len(note_list)
-                    page += 1
-                    await asyncio.sleep(self.config.CRAWLER_MAX_SLEEP_SEC)
-                    logger.info(
-                        f"[WeiboCrawler.search] Sleeping for {self.config.CRAWLER_MAX_SLEEP_SEC} "
-                        f"seconds after page {page-1}"
-                    )
-                    
-                    if accumulator.finish_batch(
-                        source_page=requested_page,
-                        raw_batch_count=raw_batch_count,
-                        resume_page=page if batch_complete else requested_page,
-                        batch_complete=batch_complete,
-                        discovery_phase=discovery_phase,
-                        count_stagnation=discovery_phase == "frontier",
-                    ):
-                        break
-            if source_exhausted and not accumulator.stop_reason:
-                accumulator.mark_source_exhausted(
-                    "saved_source_exhausted",
-                    source_page=start_page,
-                    resume_page=start_page,
-                    source_has_more=False,
-                    raw_batch_count=0,
-                    discovery_phase="frontier",
+    async def _open_search_page(self, keyword: str) -> None:
+        capture = self._capture
+        if capture is None:
+            raise RuntimeError("weibo_capture_channel_missing")
+        capture.begin_navigation()
+        await self.context_page.goto(
+            search_url(keyword),
+            wait_until="domcontentloaded",
+            timeout=30_000,
+        )
+        self._opened_keyword = keyword
+
+    async def search(self) -> None:
+        """#211：每轮从搜索第一页点下一页翻到结束标记。不按保存页码恢复，也不做顶部刷新。"""
+
+        logger.info("[WeiboCrawler.search] Begin search weibo keywords")
+        accumulator = self.ports.accumulator()
+        discovery_phase = "frontier"
+        capture = self._capture
+        if capture is None:
+            raise RuntimeError("weibo_capture_channel_missing")
+        if self.detail_pages is None:
+            self.detail_pages = WeiboDetailPages(capture, self.context_page)
+        for raw_keyword in self.config.KEYWORDS.split(","):
+            keyword = raw_keyword.strip()
+            if not keyword or not accumulator.can_continue:
+                continue
+            self.source_keyword = keyword
+            logger.info("[WeiboCrawler.search] Current search keyword: %s", keyword)
+            if keyword != self._opened_keyword:
+                await self._open_search_page(keyword)
+            page = 1
+            while accumulator.can_continue:
+                requested_page = page
+                logger.info(
+                    "[WeiboCrawler.search] search weibo keyword page=%s",
+                    requested_page,
                 )
+                try:
+                    snapshot = await capture.read_search(requested_page)
+                except WeiboSearchPageInvalid:
+                    accumulator.mark_runtime_failed(
+                        "search_page_invalid",
+                        source_page=requested_page,
+                        resume_page=requested_page,
+                        discovery_phase=discovery_phase,
+                    )
+                    return
+                except PlatformRuntimeError as exc:
+                    accumulator.mark_runtime_failed(
+                        exc.code,
+                        source_page=requested_page,
+                        resume_page=requested_page,
+                        discovery_phase=discovery_phase,
+                    )
+                    return
+                if snapshot.stop_detail and not snapshot.cards:
+                    self._mark_search_exhausted(accumulator, snapshot, requested_page, discovery_phase)
+                    return
+                unknown = self._unknown_candidates(accumulator, snapshot)
+                accumulator.begin_batch()
+                processed_count = 0
+                for candidate in unknown:
+                    # 未实现的详情直接抛出，不写成候选级失败，也不回退到移动详情。
+                    await self.detail_pages.open_from_search(candidate)
+                    processed_count += 1
+                batch_complete = processed_count >= len(unknown)
+                resume_page = requested_page + 1 if batch_complete and snapshot.has_more else requested_page
+                if accumulator.finish_batch(
+                    source_page=requested_page,
+                    source_has_more=snapshot.has_more,
+                    raw_batch_count=len(snapshot.cards),
+                    resume_page=resume_page,
+                    batch_complete=batch_complete,
+                    discovery_phase=discovery_phase,
+                    count_stagnation=True,
+                ):
+                    return
+                if snapshot.stop_detail:
+                    self._mark_search_exhausted(
+                        accumulator,
+                        snapshot,
+                        requested_page,
+                        discovery_phase,
+                        batch_complete=batch_complete,
+                    )
+                    return
+                try:
+                    await capture.turn_page()
+                except WeiboSearchPageInvalid:
+                    accumulator.mark_runtime_failed(
+                        "search_page_invalid",
+                        source_page=requested_page,
+                        resume_page=requested_page,
+                        discovery_phase=discovery_phase,
+                    )
+                    return
+                page += 1
+
+    def _unknown_candidates(self, accumulator: Any, snapshot: WeiboSearchSnapshot) -> list:
+        pending: set[str] = set()
+        unknown = []
+        for candidate in snapshot.cards:
+            mid = candidate.mid
+            if accumulator.is_known(mid) or mid in pending:
+                continue
+            pending.add(mid)
+            unknown.append(candidate)
+        return unknown
+
+    def _mark_search_exhausted(
+        self,
+        accumulator: Any,
+        snapshot: WeiboSearchSnapshot,
+        source_page: int,
+        discovery_phase: str,
+        *,
+        batch_complete: bool = True,
+    ) -> None:
+        accumulator.mark_source_exhausted(
+            snapshot.stop_detail or "search_page_invalid",
+            source_page=source_page,
+            raw_batch_count=len(snapshot.cards),
+            resume_page=source_page,
+            source_has_more=False,
+            batch_complete=batch_complete,
+            discovery_phase=discovery_phase,
+            source_visit_id=snapshot.visit_id or None,
+            source_page_info=snapshot.page_info,
+            source_max_page=snapshot.max_page,
+            page_cap_reached=snapshot.page_cap_reached,
+        )
 
     async def get_specified_notes(self):
         """
@@ -580,11 +452,21 @@ class WeiboCrawler:
             self.browser_context,
             urls=self.cookie_urls,
         )
+        capture = self._capture
+        if capture is None:
+            raise RuntimeError("weibo_capture_channel_missing")
+        user_agent, _visit = await capture.channel.read_state(
+            self.context_page,
+            "weibo.user_agent",
+            stage="browser_ua",
+            subject_id=None,
+            trigger=None,
+        )
         weibo_client_obj = WeiboClient(
             proxy=httpx_proxy,
             headers={
-                # #127：与浏览器一致，取本轮浏览器自报的 UA；图片请求沿用这里的 UA。
-                "User-Agent": await self.context_page.evaluate("() => navigator.userAgent"),
+                # #127/#211：与浏览器一致，经已登记的状态脚本读取 UA；图片请求沿用这里的 UA。
+                "User-Agent": str(user_agent or ""),
                 "Cookie": cookie_str,
                 "Origin": "https://m.weibo.cn",
                 "Referer": "https://m.weibo.cn",
@@ -720,6 +602,7 @@ class WeiboCrawler:
 
     async def close(self):
         """Close browser context"""
+        await self._close_capture()
         # Special handling if using CDP mode
         if self.cdp_manager:
             await self.cdp_manager.cleanup()

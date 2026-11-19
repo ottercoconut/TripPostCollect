@@ -22,11 +22,15 @@ from trippostcollect.platforms.douyin import core as douyin_core
 from trippostcollect.platforms.douyin.client import DouYinClient
 from trippostcollect.platforms.douyin.models import PlatformRuntimeError as DouyinRuntimeError
 from trippostcollect.platforms.weibo.client import WeiboClient
+from trippostcollect.platforms.weibo.core import WeiboFullTextFetchError
+from trippostcollect.platforms.weibo.models import PlatformRuntimeError
 from trippostcollect.platforms.zhihu.client import ZhiHuClient
 
 from platforms.douyin import test_douyin_offline_faults as douyin_faults
-from platforms.weibo import test_weibo_offline_faults as weibo_faults
 from platforms.zhihu import test_zhihu_offline_faults as zhihu_faults
+from support.weibo_adapter import client_ports
+from support.weibo_adapter import crawler as make_weibo_crawler
+from support.weibo_adapter import settings as weibo_settings
 import test_bilibili_issue115 as bili115
 
 
@@ -173,61 +177,64 @@ async def test_zhihu_missing_search_capture_is_runtime_failed_without_seen(monke
 
 
 # ---------- 微博 ----------
+# #211：桌面搜索不再发浏览器外请求，搜索失败不是 network_unreachable。
+# 移动详情仍在，传输层失败保持 3 次尝试后的运行级阻断。
 
 
-@pytest.mark.asyncio
-async def test_weibo_long_text_detail_network_failure_stops_run_without_skip(monkeypatch, tmp_path):
-    sleeps: list[float] = []
+class _ConnectClient:
+    def __init__(self) -> None:
+        self.calls = 0
 
-    async def sleep(seconds):
-        sleeps.append(seconds)
+    async def __aenter__(self):
+        return self
 
-    monkeypatch.setattr(WeiboClient.request.retry, "sleep", sleep)
-    monkeypatch.setattr(WeiboClient._get_note_info_direct.retry, "sleep", sleep)
-    monkeypatch.setattr(weibo_faults.weibo_client.asyncio, "sleep", AsyncMock(return_value=None))
-    transport = weibo_faults.Transport(
-        {1: [weibo_faults.mblog("long", long=True), weibo_faults.mblog("short")]},
-        detail_fault={"long"},
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def request(self, method, url, **kwargs):
+        self.calls += 1
+        raise httpx.ConnectError("offline")
+
+
+def _weibo_client(http):
+    return WeiboClient(
+        headers={"User-Agent": "t129", "Cookie": ""},
+        playwright_page=None,
+        cookie_dict={},
+        ports=client_ports(make_async_client=lambda **kwargs: http),
     )
-    crawler, state_path = weibo_faults.prepare(monkeypatch, tmp_path, transport)
-
-    await crawler.search()
-
-    # 详情重试预算不变（3 次 / 1 秒），用尽后停止本轮；后面的候选不再处理。
-    assert transport.calls.count("/detail/long") == 3
-    assert sleeps.count(1) == 2
-    assert_runtime_network_stop(state_path, "long", "network_unreachable")
-    crawler.update_weibo_note.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_weibo_search_network_failure_keeps_retry_budget(monkeypatch, tmp_path):
+async def test_weibo_long_text_detail_network_failure_is_runtime_blocking(monkeypatch):
     sleeps: list[float] = []
 
     async def sleep(seconds):
         sleeps.append(seconds)
 
-    monkeypatch.setattr(WeiboClient.request.retry, "sleep", sleep)
     monkeypatch.setattr(WeiboClient._get_note_info_direct.retry, "sleep", sleep)
-    monkeypatch.setattr(weibo_faults.weibo_client.asyncio, "sleep", AsyncMock(return_value=None))
-    transport = weibo_faults.Transport({}, search_fault=True)
-    crawler, state_path = weibo_faults.prepare(monkeypatch, tmp_path, transport)
+    http = _ConnectClient()
+    crawler = make_weibo_crawler(weibo_settings(ENABLE_WEIBO_FULL_TEXT=True, CRAWLER_MAX_SLEEP_SEC=0))
+    crawler.wb_client = _weibo_client(http)
+    note = {"mblog": {"id": "long", "text": "truncated", "isLongText": True}}
 
-    with pytest.raises(httpx.ConnectError):
-        await crawler.search()
+    with pytest.raises(WeiboFullTextFetchError) as caught:
+        await crawler.get_note_full_text(note)
 
-    assert transport.calls == ["/api/container/getIndex"] * 5
-    assert sleeps == [3, 3, 3, 3]
-    assert_runtime_network_stop(state_path, "", "network_unreachable")
+    assert http.calls == 3
+    assert sleeps == [1, 1]
+    assert caught.value.code == "network_unreachable"
+    assert caught.value.runtime_blocking is True
+    assert "content_detail_status" not in note["mblog"]
 
 
 @pytest.mark.asyncio
-async def test_weibo_specified_note_network_failure_is_not_swallowed(monkeypatch, tmp_path):
+async def test_weibo_specified_note_network_failure_is_not_swallowed(monkeypatch):
     monkeypatch.setattr(WeiboClient._get_note_info_direct.retry, "sleep", AsyncMock(return_value=None))
-    transport = weibo_faults.Transport({}, detail_fault={"target"})
-    crawler, _ = weibo_faults.prepare(monkeypatch, tmp_path, transport)
+    crawler = make_weibo_crawler(weibo_settings(CRAWLER_MAX_SLEEP_SEC=0))
+    crawler.wb_client = _weibo_client(_ConnectClient())
 
-    with pytest.raises(weibo_faults.PlatformRuntimeError) as caught:
+    with pytest.raises(PlatformRuntimeError) as caught:
         await crawler.get_note_info_task("target", asyncio.Semaphore(1))
 
     assert caught.value.code == "network_unreachable"

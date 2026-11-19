@@ -25,7 +25,6 @@
 
 
 # TripPostCollect T05：迁自 MediaCrawler 5a68eb5098fcd17308c7fe0b9d53916ae839b303；仅拆分职责与注入依赖。
-from enum import Enum
 from dataclasses import dataclass
 from httpx import RequestError
 
@@ -65,10 +64,6 @@ class PlatformRuntimeError(DataFetchError):
         self.code = code
 
 
-class WeiboServerError(DataFetchError):
-    """A 5xx response; retried like a transport error."""
-
-
 # -*- coding: utf-8 -*-
 # Copyright (c) 2025 relakkes@gmail.com
 #
@@ -93,21 +88,6 @@ class WeiboServerError(DataFetchError):
 # @Author  : relakkes@gmail.com
 # @Time    : 2023/12/23 15:41
 # @Desc    :
-
-# TripPostCollect T05：迁自 MediaCrawler 5a68eb5098fcd17308c7fe0b9d53916ae839b303；仅拆分职责与注入依赖。
-class SearchType(Enum):
-    # Comprehensive
-    DEFAULT = "1"
-
-    # Real-time
-    REAL_TIME = "61"
-
-    # Popular
-    POPULAR = "60"
-
-    # Video
-    VIDEO = "64"
-
 
 # -*- coding: utf-8 -*-
 # Copyright (c) 2025 relakkes@gmail.com
