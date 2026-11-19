@@ -33,8 +33,9 @@
   - 分页控件 `div.m-page2`：当前页 `li.cur`、`span.page-info`（如“共50页/500条”）、页码链接的最大页，
     以及 `a.next` 是否带 `disabled`。
 - 用户卡、热门话题卡等不带 `mid` 的卡片不是候选。
-- 翻页：先写一段翻页停顿，用 `social_high_risk` 的真人分段滚动到页面底部，再真实点击
-  `div.m-page2 a.next`。页面在同一标签内跳到 `&page=N`，然后重新读取。不拼接页码地址，也不跳页。
+- 翻页：先写一段翻页停顿（账本阶段 `search_page`，随机 1.2–2.8 秒），用 `social_high_risk` 的真人分段滚动到
+  页面底部，再真实点击 `div.m-page2 a.next`（账本动作 `click_next`）。页面在同一标签内跳到 `&page=N`，然后
+  重新读取，并要求 `li.cur` 正好是本轮从 1 连续数的下一页。不拼接页码地址，也不跳页。
 - 搜索访问写入访问账本，每条带以下字段：
   - 连续 `search_page`（从 1 起）；
   - `is_target=true`；
@@ -56,6 +57,8 @@
   - `source_page_info` 原文；
   - `source_max_page`；
   - `page_cap_reached`：最大页是否为 50。
+
+  `single_page` 没有分页控件，`source_max_page` 为空，`page_cap_reached` 为 false。
 - 其他情况一律写 `runtime_failed/search_page_invalid`，不推断为耗尽：
   - 第 2 页及以后没有分页控件或没有卡片；
   - 第 1 页没有卡片却没有“找到0条结果”；
@@ -81,7 +84,7 @@
 ## 详情
 
 - 每条未知候选都在搜索页真实点击卡片的时间链接，在新标签打开 `https://weibo.com/{uid}/{mblogid}`。
-  点击前写一段 `search_results` 停顿。
+  点击前写一段 `search_results` 停顿（随机 1.2–2.8 秒）；新标签最多等 8 秒出现。
 - 详情数据是新标签页面自身请求 `/ajax/statuses/show?id=…&isGetLongText=true` 的响应（被动截获，
   `page_response`）。只接受 `idstr`（或 `mid`）与卡片 `mid` 完全一致的那一条，同页评论、推荐等响应里的
   其他微博对象不参与。
@@ -109,7 +112,7 @@
   - 正文为空。
 
   以下是运行级阻断，不写 seen：
-  - 详情标签落到登录、访客或安全验证页；
+  - 详情标签落到登录、访客或安全验证页，或出现频控提示（与搜索页同一组判定常量）；
   - `statuses/show` 返回 401/403（`login_required`）、429（`rate_limited`）或 418/432（`blocked_or_forbidden`）；
   - page/context 被关闭。
 - 搜索和详情都不走浏览器外 HTTP，因此不再产生 `network_unreachable`；正文图片下载仍按
@@ -134,6 +137,7 @@
   | `description` | `author_description` | |
 
   `author_profile_url` 写成 `https://weibo.com/u/{uid}`。以上各项缺键都为 NULL，不补 0；键上的 0 照记为 0。
+  #211 之前的历史行粉丝来源是 `search_author`，导入与修复校验仍接受；新抓取只写 `detail_side_user`。
 - 认证原值 `verified`、`verified_type`、`verified_type_ext`、`verified_reason` 写入 `author_json.weibo_verify`。
   `author_verified` 与 `author_verified_text` 的判定口径待操作人在 #211 决定。决定之前这两列为 NULL；
   决定后可从 `author_json` 离线回填，不需重访。侦察到的原值：
@@ -179,7 +183,7 @@
   - UA 取自浏览器 `navigator.userAgent`（经已登记的状态脚本读取）；
   - `Referer: https://weibo.com/`，并带图片 Accept；
   - 不带 Cookie、Origin 或 Content-Type，不经第三方代理。
-- 首选规格失败或超限时，退到下一个规格。每张成功下载的正文图在访问账本以来源 `cdn_direct`、规则
+- 首选规格失败或超限时，退到下一个规格。每张成功下载的正文图在访问账本以阶段 `note_image`、来源 `cdn_direct`、规则
   `weibo.content_image` 登记状态码、资产键和 sha256，供门禁 R5 与 manifest 对账。
 - 平台层写 staging/manifest，根项目再执行通用字节复验、同帖 SHA-256 去重、晋升和事务，见
   [数据持久化](../data-persistence.md)。
