@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import signal
 import sqlite3
@@ -42,6 +43,10 @@ from trippostcollect.runtime.process import (
     write_command_logs,
 )
 from trippostcollect.xhs.leases import DeferredTerminationSignals
+from trippostcollect.application.repair import (
+    MISSING_WEIBO_AUTHOR_PLATFORM_ID,
+    without_weibo_side_user_fields,
+)
 from trippostcollect.application.repair_runtime import (
     _complete_no_op,
     _fatal_child_failure,
@@ -74,7 +79,7 @@ REPAIR_CHILD_INTERRUPT_GRACE_SECONDS = (
 COMPLETED_REPAIR_OUTCOMES = {"completed", "completed_with_remaining"}
 TRUSTED_DETAIL_SOURCES = {
     "douyin": {"aweme_detail"},
-    "weibo": {"search_mblog_complete", "mobile_detail"},
+    "weibo": {"desktop_detail", "search_mblog_complete", "mobile_detail"},
     # #194：详情路径只写 answer_detail / article_detail，当前代码不再产生 search_content。
     "zhihu": {"answer_detail", "article_detail"},
 }
@@ -153,8 +158,21 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _detail_target(platform: str, post_id: str, canonical_url: str) -> tuple[str | None, str]:
+def _detail_target(
+    platform: str,
+    post_id: str,
+    canonical_url: str,
+    *,
+    author_platform_id: str = "",
+) -> tuple[str | None, str]:
     parsed = urlparse(canonical_url.strip().split("#", 1)[0].split("?", 1)[0])
+    if platform == "weibo":
+        author_id = str(author_platform_id or "").strip()
+        if not author_id:
+            return None, MISSING_WEIBO_AUTHOR_PLATFORM_ID
+        if not re.fullmatch(r"[0-9A-Za-z]+", author_id) or not re.fullmatch(r"[0-9]+", post_id):
+            return None, "invalid_weibo_canonical_url"
+        return f"https://weibo.com/{author_id}/{post_id}", ""
     if platform == "douyin":
         expected_paths = {f"/video/{post_id}", f"/note/{post_id}"}
         if (
@@ -164,14 +182,6 @@ def _detail_target(platform: str, post_id: str, canonical_url: str) -> tuple[str
         ):
             return parsed._replace(query="", fragment="").geturl(), ""
         return None, "invalid_douyin_canonical_url"
-    if platform == "weibo":
-        if (
-            parsed.scheme == "https"
-            and parsed.hostname == "m.weibo.cn"
-            and parsed.path.rstrip("/") == f"/detail/{post_id}"
-        ):
-            return post_id, ""
-        return None, "invalid_weibo_canonical_url"
     answer = bool(
         parsed.scheme == "https"
         and parsed.hostname in {"zhihu.com", "www.zhihu.com"}
@@ -328,7 +338,10 @@ def _repair_fallback_for_row(
             "followers_observed": raw_sample.get("followers_observed"),
             "followers_count": raw_sample.get("followers_count"),
         }
-    return {key: value for key, value in fields.items() if value not in (None, "")}
+    kept = {key: value for key, value in fields.items() if value not in (None, "")}
+    if platform == "weibo":
+        return without_weibo_side_user_fields(kept)
+    return kept
 
 
 def select_targets(
@@ -365,6 +378,7 @@ def select_targets(
             platform,
             post_id,
             str(row["canonical_url"] or ""),
+            author_platform_id=str(row["author_platform_id"] or ""),
         )
         raw_sample: dict[str, Any] = {}
         try:

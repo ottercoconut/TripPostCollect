@@ -63,6 +63,16 @@ async def _no_cookies(context, urls=None):
     return "SUB=t127", {"SUB": "t127"}
 
 
+def _weibo_ua_capture(page: FakePage):
+    class Channel:
+        async def read_state(self, target, script_name, **kwargs):
+            assert script_name == "weibo.user_agent"
+            value = await target.evaluate("() => navigator.userAgent")
+            return value, "visit"
+
+    return SimpleNamespace(channel=Channel(), page=page)
+
+
 # ---------- 1. 知乎、微博：浏览器不强制 UA，视口与 warmup 相同 ----------
 
 
@@ -127,7 +137,7 @@ def test_crawler_viewport_matches_warmup(platform, save_login_state, monkeypatch
     chromium = FakeChromium()
     asyncio.run(type(crawler).launch_browser(crawler, chromium, None, None, True))
     launched = (chromium.persistent or chromium.contexts)[0]
-    if save_login_state:
+    if platform == "weibo" or save_login_state:
         # #136/#142：微博、知乎标准模式持久 context 都走共享启动配置，不传 user_agent 键。
         # #139：共享配置与 warmup 一样按原生窗口启动，不传 viewport。
         assert "user_agent" not in launched
@@ -178,15 +188,15 @@ def test_weibo_client_headers_use_browser_user_agent(monkeypatch) -> None:
     from trippostcollect.platforms.weibo import core
 
     crawler = object.__new__(core.WeiboCrawler)
-    crawler.cookie_urls = ["https://m.weibo.cn"]
     crawler.browser_context = object()
     crawler.context_page = FakePage()
+    crawler._capture = _weibo_ua_capture(crawler.context_page)
     crawler.ports = SimpleNamespace(
         client=SimpleNamespace(convert_browser_context_cookies=_no_cookies),
         post_repair=False,
     )
     client = asyncio.run(crawler.create_weibo_client(None))
-    assert client.headers["User-Agent"] == BROWSER_UA
+    assert client.user_agent == BROWSER_UA
     assert crawler.context_page.scripts
     assert not hasattr(crawler, "user_agent")
     assert not hasattr(crawler, "mobile_user_agent")
@@ -196,15 +206,28 @@ def test_weibo_client_headers_use_browser_user_agent(monkeypatch) -> None:
 
 
 def test_weibo_image_request_uses_client_user_agent(monkeypatch) -> None:
-    import httpx
-
     from trippostcollect.platforms.weibo import core
 
     crawler = object.__new__(core.WeiboCrawler)
-    crawler.cookie_urls = ["https://m.weibo.cn"]
     crawler.browser_context = object()
     crawler.context_page = FakePage()
+    crawler._capture = _weibo_ua_capture(crawler.context_page)
     requests: list[dict[str, Any]] = []
+
+    class Response:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        async def aiter_bytes(self):
+            yield b"image"
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
 
     class Http:
         async def __aenter__(self):
@@ -213,9 +236,9 @@ def test_weibo_image_request_uses_client_user_agent(monkeypatch) -> None:
         async def __aexit__(self, *args):
             return False
 
-        async def request(self, method, url, **kwargs):
+        def stream(self, method, url, **kwargs):
             requests.append(kwargs)
-            return httpx.Response(200, content=b"image", request=httpx.Request(method, url))
+            return Response()
 
     crawler.ports = SimpleNamespace(
         client=SimpleNamespace(
@@ -227,7 +250,8 @@ def test_weibo_image_request_uses_client_user_agent(monkeypatch) -> None:
     )
     client = asyncio.run(crawler.create_weibo_client(None))
     assert asyncio.run(client.get_note_image("https://wx1.sinaimg.cn/large/abc.jpg")) == b"image"
-    assert requests[0]["headers"]["User-Agent"] == client.headers["User-Agent"] == BROWSER_UA
+    assert requests[0]["headers"]["user-agent"] == client.user_agent == BROWSER_UA
+    assert "cookie" not in {key.lower() for key in requests[0]["headers"]}
 
 
 # ---------- 3. warmup：Cookie 快照保存登录 page 的 navigator.userAgent ----------

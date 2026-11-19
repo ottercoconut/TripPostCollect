@@ -29,7 +29,9 @@ BILIBILI_TRUSTED_DETAIL_SOURCES = frozenset({"article_view_api"})
 
 TRUSTED_CONTENT_DETAIL_SOURCES = {
     "bilibili": BILIBILI_TRUSTED_DETAIL_SOURCES,
-    "weibo": frozenset({"search_mblog_complete", "mobile_detail"}),
+    # desktop_detail 是 #211 新写入的来源。search_mblog_complete / mobile_detail 仍受信任：
+    # 导入会重新跑 validate_formal_record，repair 用同一组来源判断历史行是否已经恢复。
+    "weibo": frozenset({"desktop_detail", "search_mblog_complete", "mobile_detail"}),
     "xhs": frozenset({"note_detail"}),
     "douyin": frozenset({"aweme_detail", "search_aweme_info"}),
     "zhihu": frozenset({"search_content", "answer_detail", "article_detail"}),
@@ -41,7 +43,8 @@ FOLLOWERS_REQUIRED_PLATFORMS = frozenset(PLATFORMS)
 
 REQUIRED_FOLLOWER_SOURCES = {
     "bilibili": frozenset({"relation_stat"}),
-    "weibo": frozenset({"search_author"}),
+    # detail_side_user 是 #211 的粉丝来源。search_author 仍接受，避免重新校验历史行时被判不可信。
+    "weibo": frozenset({"detail_side_user", "search_author"}),
     "xhs": frozenset({"creator_profile"}),
     "douyin": frozenset({"creator_profile"}),
     # #185：知乎粉丝只认作者页 followerCount；搜索结果里的 follower_count 不再作为正式来源。
@@ -246,27 +249,10 @@ def interact_count_evidence_ok(record: dict[str, Any]) -> bool:
     )
 
 
-def merge_repair_fallback_metadata(
-    platform_key: str,
-    record: dict[str, Any],
-    metadata: dict[str, Any] | None,
+def _merge_observed_follower_fallback(
+    merged: dict[str, Any], metadata: dict[str, Any],
 ) -> dict[str, Any]:
-    if not metadata:
-        return record
-    merged = dict(record)
-
-    if not published_at_for_record(merged):
-        for key in ("published_at", "created_time"):
-            value = metadata.get(key)
-            if value not in (None, ""):
-                merged["published_at" if key == "published_at" else key] = value
-                if published_at_for_record(merged):
-                    break
-
-    # #194：知乎粉丝、关注、作品数、认证和其他作者字段必须来自本次作者页。
-    # 旧行只允许补详情缺少的发帖时间，不能把历史作者资料带回新记录。
-    if platform_key == "zhihu":
-        return merged
+    """抖音在本轮没有观察到粉丝时，回填旧行的粉丝数、观察标记和来源。"""
 
     fallback_observed = metadata.get("followers_observed") is True
     current_observed = merged.get("followers_observed") is True
@@ -299,18 +285,48 @@ def merge_repair_fallback_metadata(
         ):
             if merged.get(key) in (None, "", 0) and metadata.get(key) not in (None, ""):
                 merged[key] = metadata[key]
+    return merged
+
+
+def merge_repair_fallback_metadata(
+    platform_key: str,
+    record: dict[str, Any],
+    metadata: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not metadata:
+        return record
+    merged = dict(record)
+
+    if not published_at_for_record(merged):
+        for key in ("published_at", "created_time"):
+            value = metadata.get(key)
+            if value not in (None, ""):
+                merged["published_at" if key == "published_at" else key] = value
+                if published_at_for_record(merged):
+                    break
+
+    # #194：知乎粉丝、关注、作品数、认证和其他作者字段必须来自本次作者页。
+    # 旧行只允许补详情缺少的发帖时间，不能把历史作者资料带回新记录。
+    if platform_key == "zhihu":
+        return merged
+
+    # #211：微博粉丝、关注、作品数和简介必须来自本次 sideUser。抖音仍可回填旧粉丝。
+    if platform_key != "weibo":
+        merged = _merge_observed_follower_fallback(merged, metadata)
 
     for key in (
         "creator_hash",
         "creator_url_token",
         "user_nickname",
         "author_profile_url",
-        "author_description",
         "author_display_name",
         "author_platform_id",
     ):
         if merged.get(key) in (None, "") and metadata.get(key) not in (None, ""):
             merged[key] = metadata[key]
+    if platform_key != "weibo":
+        if merged.get("author_description") in (None, "") and metadata.get("author_description") not in (None, ""):
+            merged["author_description"] = metadata["author_description"]
 
     if platform_key == "xhs":
         metric_fallbacks: dict[str, dict[str, Any]] = {}
@@ -392,7 +408,11 @@ def canonical_url_for_record(platform_key: str, record: dict[str, Any]) -> str |
     if not post_id:
         return None
     if platform_key == "weibo":
-        return f"https://m.weibo.cn/detail/{post_id}"
+        author_id = first_value(record, "creator_hash", "user_id", "author_id", "author_platform_id")
+        mblogid = first_value(record, "mblogid")
+        if author_id and mblogid:
+            return f"https://weibo.com/{author_id}/{mblogid}"
+        return None
     if platform_key == "douyin":
         return f"https://www.douyin.com/video/{post_id}"
     if platform_key == "bilibili":
@@ -598,6 +618,17 @@ def row_for_record(
         for key in ("answerCount", "articlesCount", "pinsCount", "questionCount"):
             if key in page_counts and page_counts[key] is not None:
                 author[key] = page_counts[key]
+    if platform_key == "weibo":
+        nested = record.get("author_json")
+        verify = nested.get("weibo_verify") if isinstance(nested, dict) else None
+        if isinstance(verify, dict):
+            kept = {
+                key: verify[key]
+                for key in ("verified", "verified_type", "verified_type_ext", "verified_reason")
+                if key in verify
+            }
+            if kept:
+                author["weibo_verify"] = kept
     return {
         "platform_key": platform_key,
         "platform_post_id": post_id_for_record(platform_key, record),
@@ -608,7 +639,7 @@ def row_for_record(
         "author_display_name": author["nickname"],
         "author_platform_id": author["creator_hash"],
         "author_profile_url": first_value(record, "author_profile_url", "user_link", "profile_url", "user_url"),
-        "author_description": first_value(record, "author_desc", "user_desc"),
+        "author_description": first_value(record, "author_desc", "user_desc", "author_description"),
         "author_followers_count": author["followers_count"],
         "author_following_count": author["following_count"],
         "author_posts_count": author["posts_count"],

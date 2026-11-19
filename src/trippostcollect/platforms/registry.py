@@ -50,21 +50,21 @@ class WebSite:
 SITES: dict[str, WebSite] = {
     "weibo": WebSite(
         key="weibo",
-        name="Weibo mobile",
-        default_url="https://m.weibo.cn/search?containerid=100103type%3D1%26q%3D%E9%9D%92%E5%B2%9B%E6%97%85%E6%B8%B8",
-        login_url="https://passport.weibo.cn/signin/login?entry=mweibo&r=https%3A%2F%2Fm.weibo.cn%2Fsearch%3Fcontainerid%3D100103type%253D1%2526q%253D%25E9%259D%2592%25E5%25B2%259B%25E6%2597%2585%25E6%25B8%25B8",
-        cookie_domains=("weibo.cn", "weibo.com", "sina.com.cn"),
-        login_hosts=("passport.weibo.cn", "passport.weibo.com"),
+        name="Weibo",
+        default_url="https://s.weibo.com/weibo?q=%E9%9D%92%E5%B2%9B%E6%97%85%E6%B8%B8&nodup=1",
+        login_url="https://passport.weibo.com/sso/signin",
+        cookie_domains=("weibo.com",),
+        login_hosts=("passport.weibo.com",),
         recommended_mode="dynamic",
-        mobile_context=True,
+        mobile_context=False,
         default_wait_ms=6000,
         min_delay_seconds=120,
         max_requests_per_session=15,
         daily_request_budget=40,
         cooldown_minutes=60,
         account_risk_level="high",
-        content_focus="public search posts, post details, author metrics",
-        notes="Mobile web is the most useful surface for public search/post data.",
+        content_focus="desktop search posts, post details, author metrics",
+        notes="Desktop search at s.weibo.com is the page-state source. Persistent profile holds the login.",
     ),
     "xhs": WebSite(
         key="xhs",
@@ -152,6 +152,14 @@ def site_keys(include_no_login: bool = True) -> list[str]:
         for key, site in SITES.items()
         if include_no_login or site.login_required
     ]
+
+
+async def read_weibo_config_uid(context, page) -> dict[str, bool]:
+    """首页 ``$CONFIG.uid`` 的存在与真值。实现留在微博平台，避免应用层直接导入平台包。"""
+
+    from trippostcollect.platforms.weibo.search_page import read_homepage_uid
+
+    return await read_homepage_uid(context, page)
 
 
 def get_site(key: str) -> WebSite:

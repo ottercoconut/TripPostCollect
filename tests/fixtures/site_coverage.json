@@ -131,7 +131,7 @@
        ]
       },
       {
-       "function": "tests/platforms/weibo/test_weibo_offline_faults.py::test_top_refresh_precedes_saved_frontier",
+       "function": "tests/platforms/weibo/test_weibo_desktop_search.py::test_next_click_advances_and_disabled_last_page_sets_page_cap",
        "lane": "component"
       },
       {
@@ -1353,23 +1353,23 @@
      "status": "covered",
      "entries": [
       {
-       "function": "tests/test_login_warmup.py::test_weibo_login_accepts_current_mobile_session",
+       "function": "tests/test_login_warmup.py::test_weibo_login_accepts_truthy_config_uid",
        "lane": "component"
       },
       {
-       "function": "tests/test_login_warmup.py::test_weibo_login_rejects_desktop_cookie_without_mobile_api",
+       "function": "tests/test_login_warmup.py::test_weibo_login_rejects_missing_or_false_config_uid",
        "lane": "component"
       },
       {
-       "function": "tests/test_login_warmup.py::test_weibo_login_uses_desktop_login_and_mobile_verification",
+       "function": "tests/test_login_warmup.py::test_weibo_login_uses_desktop_home_and_passport",
        "lane": "component"
       },
       {
-       "function": "tests/test_login_warmup.py::test_weibo_desktop_login_requires_sso_or_changed_session",
+       "function": "tests/test_login_warmup.py::test_weibo_config_uid_script_reports_exists_and_truthy_only",
        "lane": "component"
       },
       {
-       "function": "tests/platforms/weibo/test_weibo_offline_drive.py::test_warmup_requires_mobile_login_and_uid",
+       "function": "tests/platforms/weibo/test_weibo_offline_drive.py::test_warmup_requires_desktop_config_uid",
        "lane": "component"
       },
       {
@@ -1722,27 +1722,27 @@
      "status": "covered",
      "entries": [
       {
-       "function": "tests/platforms/weibo/test_weibo_offline_drive.py::test_drive_requests_artifacts_and_events",
+       "function": "tests/platforms/weibo/test_weibo_desktop_search.py::test_non_numeric_mid_is_invalid_before_detail",
        "lane": "component"
       },
       {
-       "function": "tests/platforms/weibo/test_weibo_offline_drive.py::test_entry_assembly_matches_direct_construction",
+       "function": "tests/platforms/weibo/test_weibo_desktop_search.py::test_later_page_without_pager_or_cards_is_invalid",
        "lane": "component"
       },
       {
-       "function": "tests/platforms/weibo/test_weibo_offline_faults.py::test_search_transport_error_exhausts_retry_budget_and_reraises",
+       "function": "tests/platforms/weibo/test_weibo_desktop_search.py::test_known_ids_are_skipped_before_detail",
        "lane": "component"
       },
       {
-       "function": "tests/platforms/weibo/test_weibo_offline_faults.py::test_search_transport_failure_is_runtime_failed_not_exhaustion",
+       "function": "tests/platforms/weibo/test_weibo_desktop_search.py::test_no_results_stops_without_opening_details",
        "lane": "component"
       },
       {
-       "function": "tests/platforms/weibo/test_weibo_offline_faults.py::test_search_platform_rejection_blocks_run_without_retry",
+       "function": "tests/test_network_errors_issue129.py::test_weibo_long_text_detail_network_failure_is_runtime_blocking",
        "lane": "component"
       },
       {
-       "function": "tests/platforms/weibo/test_weibo_offline_faults.py::test_long_text_detail_transport_error_stops_run_after_three_attempts",
+       "function": "tests/test_network_errors_issue129.py::test_weibo_specified_note_network_failure_is_not_swallowed",
        "lane": "component"
       }
      ]
@@ -2003,14 +2003,14 @@
      "status": "covered",
      "entries": [
       {
-       "file": "tests/platforms/weibo/test_weibo_empty_search.py",
+       "file": "tests/platforms/weibo/test_weibo_desktop_search.py",
        "lane": "component",
        "min_count": 1
       },
       {
        "file": "tests/platforms/weibo/test_weibo_image_download.py",
        "lane": "component",
-       "min_count": 16
+       "min_count": 11
       },
       {
        "file": "tests/platforms/weibo/test_weibo_no_user_info.py",

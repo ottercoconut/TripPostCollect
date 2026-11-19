@@ -161,8 +161,6 @@ def worker_config(*, environ: Mapping[str, str] = os.environ) -> SimpleNamespace
         CRAWLER_MAX_SLEEP_SEC=2,
         DISABLE_SSL_VERIFY=False,
         # 四站配置：原 xhs/dy/weibo/zhihu_config 的同名键。
-        WEIBO_SEARCH_TYPE="default",
-        ENABLE_WEIBO_FULL_TEXT=True,
         XHS_SPECIFIED_NOTE_URL_LIST=[],
         DY_SPECIFIED_ID_LIST=[],
         WEIBO_SPECIFIED_ID_LIST=[],

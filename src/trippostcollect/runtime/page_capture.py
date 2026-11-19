@@ -728,6 +728,44 @@ class PageCaptureChannel:
         )
         return value, visit_id
 
+    def record_dom_visit(
+        self,
+        page: Any,
+        *,
+        rule: str,
+        stage: str,
+        subject_id: str | None,
+        trigger: str | None,
+        outcome: str = "ok",
+        **audit: Any,
+    ) -> str:
+        """DOM 脚本已由平台模块执行后，按页面状态写一条访问。规则名是登记过的 DOM 脚本名。"""
+
+        self._raise_if_faulted()
+        if not rule:
+            raise ValueError("record_dom_visit requires a rule name")
+        role = self.role_of(page)
+        if role is None:
+            raise ValueError("record_dom_visit requires a page attached to the capture channel")
+        seq = self.next_seq()
+        route, query_keys = route_of(getattr(page, "url", ""))
+        return self._write_visit(
+            seq=seq,
+            page_role=role,
+            at=self._clock(),
+            stage=stage,
+            source="page_state",
+            rule=rule,
+            endpoint=None,
+            status=None,
+            outcome=outcome,
+            route=route,
+            query_keys=list(query_keys),
+            subject_id=subject_id,
+            trigger=trigger,
+            **audit,
+        )
+
     # 等待截获 -----------------------------------------------------------------
 
     def _rule(self, name: str) -> CaptureRule:

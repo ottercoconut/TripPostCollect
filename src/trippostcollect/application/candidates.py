@@ -41,6 +41,8 @@ class AdaptiveAccumulator:
     run_only_skipped_identities: set[str] = field(default_factory=set)
     # 来源耗尽停止事件指向的访问账本行（仅受访问门禁约束的平台提供）。
     last_source_visit_id: str | None = None
+    # 微博搜索页结束标记附带的分页原文、最大页和是否停在平台 50 页上限。
+    page_audit: dict[str, Any] | None = None
     _batch_new_before: int = 0
     _batch_candidate_before: int = 0
     event_sink: Callable[[str, dict[str, Any]], None] = field(
@@ -260,8 +262,17 @@ class AdaptiveAccumulator:
         batch_complete: bool = True,
         discovery_phase: str = "frontier",
         source_visit_id: str | None = None,
+        source_page_info: str | None = None,
+        source_max_page: int | None = None,
+        page_cap_reached: bool | None = None,
     ) -> None:
         self.last_source_visit_id = source_visit_id
+        if page_cap_reached is not None:
+            self.page_audit = {
+                "source_page_info": "" if source_page_info is None else str(source_page_info),
+                "source_max_page": source_max_page,
+                "page_cap_reached": bool(page_cap_reached),
+            }
         self._record_source(
             source_page=source_page,
             source_offset=source_offset,
@@ -339,4 +350,6 @@ class AdaptiveAccumulator:
         result["candidate_identities"] = sorted(self.seen_candidate_identities)
         if self.last_source_visit_id:
             result["source_visit_id"] = self.last_source_visit_id
+        if self.page_audit:
+            result.update(self.page_audit)
         return result

@@ -198,7 +198,7 @@ def _authoritative_values(platform_key: str, record: dict[str, Any]) -> tuple[st
         return "image_urls", _sequence(record.get("image_urls"))
     if platform_key == "weibo":
         provenance = str(record.get("image_list_source") or "")
-        if provenance and provenance != "mblog.pics":
+        if provenance and provenance not in {"mblog.pics", "pic_infos"}:
             return "image_list", []
         return "image_list", _sequence(record.get("image_list"))
     if platform_key == "xhs":

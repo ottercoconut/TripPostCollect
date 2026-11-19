@@ -75,7 +75,7 @@ def convert_str_cookie_to_dict(cookie_str: str) -> Dict:
 def platform_cookie_url(platform_key: str) -> str:
     return {
         "bilibili": "https://www.bilibili.com/",
-        "weibo": "https://m.weibo.cn/",
+        "weibo": "https://weibo.com/",
         "xhs": "https://www.xiaohongshu.com/",
         "douyin": "https://www.douyin.com/",
         "zhihu": "https://www.zhihu.com/",

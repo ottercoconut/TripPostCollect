@@ -76,6 +76,7 @@ SQLite 字段或图片关系中，也不保留 URL-only 参考关系。
 | `posts_count` | integer/null | 作者作品或发帖总数 |
 | `liked_count` | integer/null | 平台展示的作者累计获赞等作者级指标 |
 | `answerCount`、`articlesCount`、`pinsCount`、`questionCount` | integer | 仅知乎：作者页原值，缺键不写；`posts_count` 为前两者之和 |
+| `weibo_verify` | object | 仅微博（#211）：详情页 `sideUser` 的认证原值 `verified`、`verified_type`、`verified_type_ext`、`verified_reason`，缺键不写；`author_verified` / `author_verified_text` 的判定口径待定，决定前两列为空 |
 
 顶层作者列用于 SQL 查询，`author_json` 保留观察状态、来源和平台补充信息。两者冲突时必须核对
 导入记录，不能任意选择其一。
@@ -87,7 +88,7 @@ SQLite 字段或图片关系中，也不保留 URL-only 参考关系。
 | `post_likes_count` | INTEGER | 是 | 点赞或赞同数 |
 | `post_favorites_count` | INTEGER | 是 | 收藏数 |
 | `post_comments_count` | INTEGER | 是 | 评论数量；不包含评论正文 |
-| `post_shares_count` | INTEGER | 是 | 分享数量。转发与分享是同一种互动，统一记在这一列；微博 `mblog.reposts_count` 经 `shared_count` 写入 |
+| `post_shares_count` | INTEGER | 是 | 分享数量。转发与分享是同一种互动，统一记在这一列；微博 `reposts_count` 经 `shared_count` 写入 |
 | `metrics_json` | TEXT/JSON | 否 | 互动指标结构化对象 |
 
 `metrics_json` 使用 `liked_count`、`favorites_count`、`comments_count` 和 `shares_count`

@@ -51,10 +51,10 @@ PLATFORMS: dict[str, dict[str, Any]] = {
     "weibo": {
         "code": "wb",
         "label": "微博",
-        "urls": ["https://m.weibo.cn", "https://www.weibo.com"],
-        "verify_url": "https://m.weibo.cn",
-        "login_url": "https://passport.weibo.com/sso/signin?entry=miniblog&source=miniblog",
-        "required": "m.weibo.cn /api/config login=true with a non-empty uid",
+        "urls": ["https://weibo.com/"],
+        "verify_url": "https://weibo.com/",
+        "login_url": "https://passport.weibo.com/sso/signin",
+        "required": "https://weibo.com/ window.$CONFIG.uid exists and is truthy",
     },
     "bilibili": {
         "code": "bili",
@@ -239,30 +239,12 @@ async def zhihu_api_check(page: Page) -> dict[str, Any]:
     return project_login_api_result(result, success_keys=("uid", "name"))
 
 
-async def weibo_api_check(page: Page) -> dict[str, Any]:
-    try:
-        result = await page.evaluate(
-            """
-            async () => {
-              try {
-                const res = await fetch('https://m.weibo.cn/api/config', {credentials: 'include'});
-                const payload = await res.json();
-                const data = payload && payload.data || {};
-                return {
-                  ok: res.ok && payload && payload.ok === 1,
-                  status: res.status,
-                  login: data.login === true,
-                  uid: data.uid || null
-                };
-              } catch (error) {
-                return {ok: false, login: false, error_name: error && error.name};
-              }
-            }
-            """
-        )
-    except Exception as exc:
-        result = {"ok": False, "login": False, "error_name": type(exc).__name__}
-    return project_login_api_result(result, success_keys=("login", "uid"))
+async def read_weibo_config_uid(context: BrowserContext, page: Page) -> dict[str, bool]:
+    """用登记的状态脚本读首页 ``$CONFIG.uid``。报告只保留是否存在、是否为真。"""
+
+    from trippostcollect.platforms.registry import read_weibo_config_uid as read_uid
+
+    return await read_uid(context, page)
 
 
 async def bilibili_api_check(page: Page) -> dict[str, Any]:
@@ -296,8 +278,7 @@ async def bilibili_api_check(page: Page) -> dict[str, Any]:
 
 async def current_state(context: BrowserContext, page: Page, platform_key: str) -> dict[str, Any]:
     urls = PLATFORMS[platform_key]["urls"]
-    cookie_urls = [PLATFORMS[platform_key]["verify_url"]] if platform_key == "weibo" else urls
-    cookies = cookie_dict(await context.cookies(cookie_urls))
+    cookies = {} if platform_key == "weibo" else cookie_dict(await context.cookies(urls))
     local_storage = await safe_local_storage(page)
     api: dict[str, Any] = {}
 
@@ -317,18 +298,11 @@ async def current_state(context: BrowserContext, page: Page, platform_key: str) 
             "api_uid": api.get("uid"),
         }
     elif platform_key == "weibo":
-        api = await weibo_api_check(page)
-        current_cookie_ok = bool(cookies.get("SUB") and cookies.get("MLOGIN"))
-        ok = bool(api.get("ok") and api.get("login") and api.get("uid"))
+        api = await read_weibo_config_uid(context, page)
+        ok = bool(api.get("exists") and api.get("truthy"))
         markers = {
-            "SSOLoginState": bool(cookies.get("SSOLoginState")),
-            "WBPSESS": bool(cookies.get("WBPSESS")),
-            "SUB": bool(cookies.get("SUB")),
-            "MLOGIN": bool(cookies.get("MLOGIN")),
-            "current_cookie_pair": current_cookie_ok,
-            "api_ok": api.get("ok"),
-            "api_login": api.get("login"),
-            "api_uid": api.get("uid"),
+            "uid_exists": api["exists"],
+            "uid_truthy": api["truthy"],
         }
     elif platform_key == "bilibili":
         api = await bilibili_api_check(page)
@@ -351,29 +325,6 @@ async def current_state(context: BrowserContext, page: Page, platform_key: str) 
         "api": api,
         "url": page.url,
     }
-
-
-async def weibo_desktop_login_state(context: BrowserContext) -> dict[str, Any]:
-    cookies = cookie_dict(
-        await context.cookies(
-            [
-                "https://weibo.com",
-                "https://www.weibo.com",
-                "https://passport.weibo.com",
-            ]
-        )
-    )
-    return {
-        "SSOLoginState": cookies.get("SSOLoginState"),
-        "WBPSESS": cookies.get("WBPSESS"),
-    }
-
-
-def weibo_desktop_login_completed(initial: dict[str, Any], current: dict[str, Any]) -> bool:
-    if current.get("SSOLoginState"):
-        return True
-    current_session = current.get("WBPSESS")
-    return bool(current_session and current_session != initial.get("WBPSESS"))
 
 
 async def warmup_one(playwright, platform_key: str, batch_dir: Path, args: argparse.Namespace) -> dict[str, Any]:
@@ -404,9 +355,6 @@ async def warmup_one(playwright, platform_key: str, batch_dir: Path, args: argpa
     last_verify_refresh = started
     login_page: Page | None = None
     login_nav_error = ""
-    desktop_login_initial: dict[str, Any] = {}
-    desktop_login_state: dict[str, Any] = {}
-    desktop_login_detected = False
     state: dict[str, Any] = {}
     initial_state: dict[str, Any] = {}
     while time.monotonic() - started < args.timeout_seconds:
@@ -421,25 +369,15 @@ async def warmup_one(playwright, platform_key: str, batch_dir: Path, args: argpa
                 except PlaywrightTimeoutError as exc:
                     login_nav_error = f"{type(exc).__name__}: {exc}"
                 await login_page.bring_to_front()
-                if platform_key == "weibo":
-                    desktop_login_initial = await weibo_desktop_login_state(context)
         if state["ok"]:
-            if platform_key == "weibo" and login_page is not None:
-                desktop_login_detected = True
-                if not desktop_login_state:
-                    desktop_login_state = await weibo_desktop_login_state(context)
             break
         now = time.monotonic()
-        if platform_key == "weibo" and login_page is not None and not desktop_login_detected:
-            desktop_login_state = await weibo_desktop_login_state(context)
-            if weibo_desktop_login_completed(desktop_login_initial, desktop_login_state):
-                desktop_login_detected = True
-                try:
-                    await login_page.goto(platform["verify_url"], wait_until="domcontentloaded", timeout=30_000)
-                    await page.reload(wait_until="domcontentloaded", timeout=30_000)
-                except PlaywrightTimeoutError as exc:
-                    nav_error = f"{type(exc).__name__}: {exc}"
-                last_verify_refresh = now
+        if platform_key == "weibo" and login_page is not None:
+            try:
+                await page.reload(wait_until="domcontentloaded", timeout=30_000)
+            except PlaywrightTimeoutError as exc:
+                nav_error = f"{type(exc).__name__}: {exc}"
+            last_verify_refresh = now
         if platform.get("verify_url") and login_page is not None and now - last_verify_refresh >= 10:
             try:
                 await page.reload(wait_until="domcontentloaded", timeout=30_000)
@@ -452,7 +390,10 @@ async def warmup_one(playwright, platform_key: str, batch_dir: Path, args: argpa
         await page.wait_for_timeout(2_000)
 
     elapsed = round(time.monotonic() - started, 2)
-    session_cookies = await context.cookies(platform["urls"]) if state.get("ok") else []
+    writes_cookie_snapshot = platform_key != "weibo"
+    session_cookies = (
+        await context.cookies(platform["urls"]) if state.get("ok") and writes_cookie_snapshot else []
+    )
     result = {
         "platform": platform_key,
         "label": platform["label"],
@@ -469,20 +410,19 @@ async def warmup_one(playwright, platform_key: str, batch_dir: Path, args: argpa
         "nav_error": nav_error,
         "login_url": platform.get("login_url"),
         "login_nav_error": login_nav_error,
-        "desktop_login_detected": desktop_login_detected,
-        "desktop_login_state": {key: bool(value) for key, value in desktop_login_state.items()},
         "state": state,
         "verified_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
 
     if result["ok"] and args.no_close_on_success:
-        result["cookie_snapshot"] = write_cookie_snapshot(
-            platform_key,
-            session_cookies,
-            source="session",
-            state=state,
-            user_agent=await browser_user_agent(page),
-        )
+        if writes_cookie_snapshot:
+            result["cookie_snapshot"] = write_cookie_snapshot(
+                platform_key,
+                session_cookies,
+                source="session",
+                state=state,
+                user_agent=await browser_user_agent(page),
+            )
         print("[login] --no-close-on-success enabled; press Ctrl+C when you want to close this browser.", flush=True)
         try:
             while True:
@@ -490,7 +430,7 @@ async def warmup_one(playwright, platform_key: str, batch_dir: Path, args: argpa
         except KeyboardInterrupt:
             pass
 
-    if result["ok"] and args.skip_reopen_verify and not args.no_close_on_success:
+    if result["ok"] and args.skip_reopen_verify and not args.no_close_on_success and writes_cookie_snapshot:
         result["cookie_snapshot"] = write_cookie_snapshot(
             platform_key,
             session_cookies,
@@ -510,10 +450,14 @@ async def warmup_one(playwright, platform_key: str, batch_dir: Path, args: argpa
         except PlaywrightTimeoutError as exc:
             verify_nav_error = f"{type(exc).__name__}: {exc}"
         verify_state = await current_state(verify_context, verify_page, platform_key)
-        verify_cookies = await verify_context.cookies(platform["urls"]) if verify_state.get("ok") else []
+        verify_cookies = (
+            await verify_context.cookies(platform["urls"])
+            if verify_state.get("ok") and writes_cookie_snapshot
+            else []
+        )
         result["persisted_ok"] = bool(verify_state.get("ok"))
         result["ok"] = bool(result["session_ok"] and result["persisted_ok"])
-        if result["ok"]:
+        if result["ok"] and writes_cookie_snapshot:
             result["cookie_snapshot"] = write_cookie_snapshot(
                 platform_key,
                 verify_cookies,

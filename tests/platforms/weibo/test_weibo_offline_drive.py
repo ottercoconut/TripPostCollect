@@ -1,420 +1,18 @@
-"""微博适配器在离线边界上的请求、产物和事件：搜索、长文详情、正文图片、修复轮与入口装配。"""
+"""微博离线边界：依赖方向、worker 装配与配置读取。
+
+#211 起整轮搜索驱动与移动详情修复链不再收集。见 tests/support/weibo_issue211_deviation.py。
+"""
 
 from __future__ import annotations
 
 import ast
 import asyncio
-from collections import Counter
-from copy import deepcopy
-from dataclasses import replace
-from hashlib import sha256
-import json
-import sqlite3
-from types import SimpleNamespace
-from urllib.parse import parse_qs, urlparse
 
-import httpx
 import pytest
-from playwright.async_api import Error as PlaywrightError
-from tenacity import RetryError
 
 from support import worker_scenarios
-from support.stable_png import solid_png
 from support.weibo_adapter import ROOT, settings
-from trippostcollect.application import events
-from trippostcollect.artifacts.jsonl import AsyncFileWriter, JsonlContentStore
 from trippostcollect.platforms import entry
-from trippostcollect.platforms.weibo import client, core
-from trippostcollect.runtime import image_retry
-
-
-BROWSER_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
-
-
-def mblog(note_id, *, long=False):
-    return {
-        "id": note_id, "text": "截断…全文" if long else "青岛完整正文",
-        "isLongText": long, "created_at": "Sat Jun 14 12:00:00 +0800 2025",
-        "attitudes_count": 1, "comments_count": 2, "reposts_count": 3,
-        "pics": [{"pid": f"p-{note_id}", "url": f"https://wx1.sinaimg.cn/orj360/{note_id}.jpg"}],
-        "user": {"id": "author", "screen_name": "青岛作者", "followers_count": 0,
-                 "avatar_hd": "https://avatar.invalid/never.jpg"},
-    }
-
-
-def exception_chain(exc):
-    result = []
-    while exc is not None:
-        # RetryError 的 repr 含 Future 内存地址；比较实际终次异常与尝试次数。
-        detail = (exc.last_attempt.attempt_number, type(exc.last_attempt.exception()).__name__, str(exc.last_attempt.exception())) if isinstance(exc, RetryError) else str(exc)
-        result.append((type(exc).__name__, detail, getattr(exc, "code", None)))
-        exc = exc.__cause__
-    return result
-
-
-async def drive(directory, monkeypatch, scenario, post_repair):
-    """只替换网络、浏览器、行为出口和时钟；解析、重试与暂存保留真实实现。"""
-    directory.mkdir()
-    trace = []
-    counts = Counter()
-    data_root = directory / "batch"
-    state = directory / "state.json"
-    state.write_text('{"events": []}')
-    database = directory / "posts.sqlite"
-    with sqlite3.connect(database) as connection:
-        connection.execute("CREATE TABLE web_posts (platform_key TEXT, platform_post_id TEXT, canonical_url TEXT)")
-        connection.execute("INSERT INTO web_posts VALUES ('weibo', 'known', NULL)")
-    monkeypatch.setenv("TRIPPOSTCOLLECT_DB_PATH", str(database))
-    monkeypatch.setenv("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", str(state))
-    monkeypatch.setenv("TRIPPOSTCOLLECT_DISCOVERY_TOP_REFRESH_MAX_PAGES", "0")
-    monkeypatch.setenv("TRIPPOSTCOLLECT_DISCOVERY_SOURCE_EXHAUSTED", "0")
-    monkeypatch.setenv("TRIPPOSTCOLLECT_POST_REPAIR", str(post_repair))
-    monkeypatch.setenv("TRIPPOSTCOLLECT_STRIP_AUTHOR_AVATARS", "1")
-    monkeypatch.setenv("TRIPPOSTCOLLECT_WEIBO_BROWSER_DETAIL_TIMEOUT_MS", "7000")
-    monkeypatch.setattr(events, "_utc_iso", lambda: "2026-09-30T00:00:00+00:00")
-    monkeypatch.setattr(image_retry, "IMAGE_DOWNLOAD_RETRY_DELAY_SECONDS", (0, 0))
-    # 与主机无关的纯色 PNG（见 support/stable_png.py；Pillow 压缩字节随 CPU 不同）。
-    image_bytes = solid_png(4, 3, (0, 0, 255))
-
-    async def sleep(_):
-        return None
-
-    monkeypatch.setattr(asyncio, "sleep", sleep)
-
-    class Page:
-        def __init__(self):
-            self.context = context
-
-        async def goto(self, url, **kwargs):
-            trace.append(("goto", url, kwargs))
-            if scenario == "repair_navigation" and "/detail/" in url:
-                raise PlaywrightError("离线导航失败")
-            return SimpleNamespace(status=200)
-
-        async def wait_for_timeout(self, timeout):
-            trace.append(("wait", timeout))
-
-        async def evaluate(self, script, note_id=None):
-            if script == "() => navigator.userAgent":
-                # #127：httpx 头的 UA 取自浏览器；求值不进入轨迹。
-                return BROWSER_USER_AGENT
-            trace.append(("evaluate", script, note_id))
-            if scenario == "repair_empty":
-                return {"id": "wrong", "text": "其他帖子"}
-            return {"state": mblog(note_id)}
-
-    class Context:
-        async def new_page(self):
-            trace.append(("new_page",))
-            return page
-
-        async def cookies(self, urls=None):
-            trace.append(("cookies", urls))
-            return [{"name": "SUB", "value": "t05", "domain": ".weibo.cn", "path": "/"}]
-
-        async def add_cookies(self, values):
-            trace.append(("add_cookies", values))
-
-        async def add_init_script(self, **kwargs):
-            # #127：微博不再注入任何 init script；出现即进入轨迹，由 check_drive_result 判失败。
-            trace.append(("init_script", kwargs))
-
-        async def close(self):
-            trace.append(("close",))
-
-    context = Context()
-    page = Page()
-
-    class Browser:
-        async def launch(self, **kwargs):
-            trace.append(("launch", kwargs))
-            return self
-
-        async def new_context(self, **kwargs):
-            trace.append(("new_context", kwargs))
-            return context
-
-        async def __aenter__(self):
-            return SimpleNamespace(chromium=self)
-
-        async def __aexit__(self, *args):
-            trace.append(("playwright_exit",))
-
-    async def behavior(page_arg, platform):
-        assert page_arg is page
-        trace.append(("behavior", platform))
-
-    class HTTP:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *args):
-            return False
-
-        async def request(self, method, url, **kwargs):
-            trace.append(("request", method, url, deepcopy(kwargs)))
-            parsed = urlparse(url)
-            counts[parsed.path] += 1
-            status = 200
-            payload = None
-            content = None
-            if parsed.path == "/api/config":
-                payload = {"ok": 1, "data": {"login": scenario != "login_expired", "uid": "123"}}
-            elif parsed.path == "/api/container/getIndex":
-                query = parse_qs(parsed.query)
-                number = int(query["page"][0])
-                if scenario == "search_retry" and counts[parsed.path] < 3:
-                    payload = {"ok": 0, "msg": "离线可重试失败"}
-                elif scenario == "search_error":
-                    payload = {"ok": 0, "msg": "离线持续请求失败"}
-                elif scenario == "empty" or number > 2:
-                    payload = {"ok": 0, "msg": "这里还没有内容", "data": {"cards": []}}
-                else:
-                    notes = [mblog("known", long=True), mblog("short"), mblog("long", long=True)]
-                    if number == 2:
-                        invalid = mblog("text-only")
-                        invalid["pics"] = []
-                        notes = [mblog("short"), invalid]
-                    payload = {"ok": 1, "data": {"cards": [{"card_type": 9, "mblog": item} for item in notes]}}
-            elif parsed.path.startswith("/detail/"):
-                if scenario in {"detail_403", "detail_429"}:
-                    status = int(scenario.rsplit("_", 1)[1])
-                elif scenario.startswith("repair_") or scenario == "detail_error":
-                    content = b"no render data"
-                elif scenario == "detail_retry" and counts[parsed.path] < 3:
-                    status = 503
-                else:
-                    detail = mblog(parsed.path.rsplit("/", 1)[1])
-                    content = ("var $render_data = " + json.dumps([{"status": detail}]) + "[0]").encode()
-            else:
-                # #114：图片只直连新浪，不经第三方代理。
-                assert parsed.hostname == "wx1.sinaimg.cn", url
-                if scenario == "image_failure":
-                    status = 404
-                elif scenario == "image_rate_limit":
-                    status = 429
-                elif scenario == "image_retry" and sum(value for key, value in counts.items() if key.endswith(".jpg")) < 3:
-                    status = 503
-                elif scenario == "image_bad_bytes":
-                    content = b"not an image"
-                else:
-                    content = image_bytes
-            if payload is not None:
-                content = json.dumps(payload).encode()
-            return httpx.Response(status, content=content or b"offline failure", request=httpx.Request(method, url))
-
-    options = settings(
-        SAVE_DATA_PATH=str(data_root), SAVE_LOGIN_STATE=False, ENABLE_CDP_MODE=False,
-        ENABLE_GET_MEIDAS=True, ENABLE_WEIBO_FULL_TEXT=True, COOKIES="SUB=t05", LOGIN_TYPE="cookie",
-        CRAWLER_TYPE="detail" if scenario == "detail" or scenario.startswith("repair_") else "search",
-        WEIBO_SPECIFIED_ID_LIST=["long"],
-    )
-    config, ports = entry.weibo_dependencies(options, post_repair=bool(post_repair))
-    ports = replace(
-        ports, client=replace(ports.client, make_async_client=lambda **kwargs: HTTP()),
-        run_required_human_behavior=behavior, current_timestamp=lambda: 1700000000000,
-        store_factory=lambda: JsonlContentStore(AsyncFileWriter(
-            "weibo", config.CRAWLER_TYPE, save_data_path=lambda: str(data_root),
-            current_date=lambda: "2026-09-30",
-        )),
-    )
-    monkeypatch.setattr(core, "async_playwright", Browser)
-    monkeypatch.setattr(client.WeiboClient.request.retry, "sleep", sleep)
-    monkeypatch.setattr(client.WeiboClient._get_note_info_direct.retry, "sleep", sleep)
-    crawler = core.WeiboCrawler(config, ports)
-    failure = []
-    try:
-        await crawler.start()
-    except Exception as exc:
-        failure = exception_chain(exc)
-    await crawler.close()
-    artifacts = {str(path.relative_to(data_root)): path.read_bytes() for path in data_root.rglob("*") if path.is_file()}
-    execution_events = json.loads(state.read_text())["events"]
-    # 保存可审阅请求和事件；bytes 用哈希标识，图片与 JSONL 原字节保留在 batch 下。
-    (directory / "trace.json").write_text(json.dumps(
-        {"trace": trace, "events": execution_events, "failure": failure,
-         "artifact_sha256": {name: sha256(value).hexdigest() for name, value in artifacts.items()}},
-        ensure_ascii=False, indent=2,
-        default=lambda value: {"sha256": sha256(value).hexdigest()} if isinstance(value, bytes) else str(value),
-    ))
-    return {"trace": trace, "artifacts": artifacts, "events": execution_events, "failure": failure}
-
-
-DRIVE_SCENARIOS = [
-    "search", "detail", "empty", "search_retry", "search_error", "detail_retry", "detail_error",
-    "detail_403", "detail_429", "image_failure", "image_rate_limit", "image_retry", "image_bad_bytes",
-    "login_expired", "repair_api", "repair_page", "repair_empty", "repair_navigation", "repair_rate_limit",
-]
-# #114 改变语义的用例另由 test_root_drive_semantics_changed_by_issue_114 逐项断言。
-ISSUE_114_CASES = frozenset({
-    ("search_retry", 0), ("search_retry", 1), ("search_error", 0), ("search_error", 1),
-    ("login_expired", 0), ("login_expired", 1), ("detail_403", 0), ("detail_403", 1),
-    ("detail_429", 0), ("detail_429", 1), ("repair_api", 1), ("repair_rate_limit", 1),
-})
-DRIVE_CASES = [
-    (scenario, post_repair) for scenario in DRIVE_SCENARIOS for post_repair in (0, 1)
-    if (scenario, post_repair) not in ISSUE_114_CASES
-]
-EXHAUSTED = {("source_exhausted", "empty_page")}
-
-
-def expected_outcome(scenario, post_repair):
-    """(停止事件集合, 跳过的候选 [(范围, 错误码)], 落盘正文图数)。"""
-    if scenario in {"search", "detail_retry", "image_retry"} or (scenario == "detail_error" and post_repair):
-        return EXHAUSTED, [], 2
-    if scenario == "detail_error":
-        # 非修复轮长文详情失败：该候选记 post 跳过，另一篇照常入图。
-        return EXHAUSTED, [("post", "detail_request_failed")], 1
-    if scenario == "empty":
-        return EXHAUSTED, [], 0
-    if scenario in {"image_failure", "image_bad_bytes"}:
-        code = "image_source_unavailable" if scenario == "image_failure" else "image_non_raster_response"
-        return EXHAUSTED, [("image", code)] * 2, 0
-    if scenario == "image_rate_limit":
-        return {("runtime_failed", "image_rate_limited")}, [], 0
-    if scenario == "detail" or (scenario == "repair_page" and post_repair):
-        return set(), [], 1
-    return set(), [], 0
-
-
-def drive_outcome(new):
-    stops = {(row["details"]["stop_reason"], row["details"].get("stop_detail"))
-             for row in new["events"] if row["type"] == "adaptive_search_stopped"}
-    skips = [(row["details"].get("failure_scope"), row["details"].get("error_code"))
-             for row in new["events"] if row["type"] == "candidate_skipped"]
-    images = sum("/images/" in name for name in new["artifacts"])
-    return stops, skips, images
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("scenario,post_repair", DRIVE_CASES)
-async def test_drive_requests_artifacts_and_events(tmp_path, scenario, post_repair):
-    with pytest.MonkeyPatch.context() as patch:
-        new = await drive(tmp_path / "new", patch, scenario, post_repair)
-    check_drive_result(new, scenario, post_repair)
-    assert drive_outcome(new) == expected_outcome(scenario, post_repair)
-
-
-async def drive_entry_assembly(directory, scenario, post_repair):
-    """worker 装配路径：install_hooks 读取修复开关后由 load_crawler 无参构造。"""
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(entry, "_weibo_post_repair", False)
-        new_type = entry.load_crawler("wb")
-
-        def construct(options, ports):
-            patch.setattr(entry, "weibo_dependencies", lambda config, *, post_repair=False: (
-                options, replace(ports, post_repair=post_repair),
-            ))
-            entry.install_hooks()
-            instance = new_type()
-            assert instance.ports.post_repair is bool(post_repair)
-            assert instance.config is options
-            return instance
-
-        patch.setattr(core, "WeiboCrawler", construct)
-        return await drive(directory, patch, scenario, post_repair)
-
-
-def _scrub(value, tmp):
-    return json.loads(json.dumps(value, ensure_ascii=False, default=lambda item: sha256(item).hexdigest()
-                                 if isinstance(item, bytes) else str(item)).replace(str(tmp), "<TMP>"))
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("scenario,post_repair", [("search", 0), ("search", 1), ("repair_page", 1), ("image_failure", 0)])
-async def test_entry_assembly_matches_direct_construction(tmp_path, scenario, post_repair):
-    """经 worker 入口装配与直接构造得到相同的请求、产物、事件与失败。"""
-    with pytest.MonkeyPatch.context() as patch:
-        direct = await drive(tmp_path / "direct", patch, scenario, post_repair)
-    assembled = await drive_entry_assembly(tmp_path / "entry", scenario, post_repair)
-    assert _scrub(assembled, tmp_path / "entry") == _scrub(direct, tmp_path / "direct")
-
-
-def check_drive_result(new, scenario, post_repair):
-    if scenario in {"search", "detail", "empty", "detail_retry"}:
-        assert not new["failure"], new["failure"]
-    requests = [row for row in new["trace"] if row[0] == "request"]
-    assert all("avatar.invalid" not in row[2] for row in requests)
-    assert not any("/detail/known" in row[2] for row in requests)
-    for row in requests:
-        assert row[3]["headers"]["User-Agent"]
-        assert row[3]["headers"]["Referer"]
-        if urlparse(row[2]).hostname == "m.weibo.cn":
-            assert row[3]["headers"]["Cookie"] == "SUB=t05"
-            assert row[3]["headers"]["User-Agent"] == BROWSER_USER_AGENT
-        else:
-            # #114：图片请求只直连新浪，且不带 Cookie、Origin、Content-Type。
-            assert urlparse(row[2]).hostname == "wx1.sinaimg.cn", row[2]
-            assert set(row[3]["headers"]) == {"User-Agent", "Referer", "Accept"}
-    assert not any(row[0] in {"browser_api", "init_script"} for row in new["trace"])
-    serialized = b"".join(new["artifacts"].values())
-    assert b"avatar.invalid" not in serialized
-    assert "截断".encode() not in serialized
-    batches = [row for row in new["events"] if row["type"] == "adaptive_batch_completed"]
-    assert all(row["details"]["stagnation_basis"] == "candidate_identity" for row in batches)
-    if scenario == "search":
-        records = [json.loads(line) for name, value in new["artifacts"].items() if "/jsonl/" in name for line in value.splitlines()]
-        long = next(row for row in records if row["note_id"] == "long")
-        assert long["content_detail_source"] == "mobile_detail"
-        assert long["content"] == "青岛完整正文"
-        assert long["followers_count"] == 0 and long["followers_observed"] is True
-        stopped = new["events"][-1]
-        assert stopped["type"] == "adaptive_search_stopped"
-        assert stopped["details"]["stop_reason"] == "source_exhausted"
-    if scenario.startswith("repair_"):
-        detail_requests = [row for row in requests if "/detail/long" in row[2]]
-        assert len(detail_requests) == 3
-        detail_pages = [row for row in new["trace"] if row[0] == "goto" and row[1].endswith("/detail/long")]
-        assert bool(detail_pages) == bool(post_repair)
-        if post_repair:
-            assert new["trace"].index(detail_pages[0]) > new["trace"].index(detail_requests[-1])
-            if scenario == "repair_empty":
-                # get_note_info_task 原本捕获 DataFetchError；另一个测试检查异常链及 attempts。
-                assert not new["artifacts"]
-
-
-def stopped_events(new):
-    return [(row["details"]["stop_reason"], row["details"]["stop_detail"])
-            for row in new["events"] if row["type"] == "adaptive_search_stopped"]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("scenario,post_repair", sorted(ISSUE_114_CASES))
-async def test_root_drive_semantics_changed_by_issue_114(tmp_path, scenario, post_repair):
-    """#114 有意改变语义的 drive 用例：只断言新的阻断、重试与回退行为，不再与固化预期比较。"""
-    with pytest.MonkeyPatch.context() as patch:
-        new = await drive(tmp_path / "new", patch, scenario, post_repair)
-    check_drive_result(new, scenario, post_repair)
-    searches = [row for row in new["trace"] if row[0] == "request" and "/api/container/getIndex" in row[2]]
-    if scenario in {"search_retry", "search_error"}:
-        # ok=0 业务错误不是传输层失败：不重试，记 search_request_failed 运行级失败而不是空页耗尽。
-        assert len(searches) == 1
-        assert stopped_events(new) == [("runtime_failed", "search_request_failed")]
-        assert new["failure"][0][0] == "DataFetchError"
-        assert not new["artifacts"]
-    elif scenario == "login_expired":
-        # 登录流程后复查仍未登录：运行级阻断 login_required，不发出任何搜索请求。
-        pongs = [row for row in new["trace"] if row[0] == "request" and row[2].endswith("/api/config")]
-        assert len(pongs) == 2 and not searches
-        assert stopped_events(new) == [("runtime_failed", "login_required")]
-        assert new["failure"] == [("PlatformRuntimeError",
-                                   "weibo mobile login state not confirmed after login flow", "login_required")]
-    elif scenario in {"detail_403", "detail_429"}:
-        # 长文详情 403/429 是运行级阻断：一次请求即停，不重试；修复轮也不进浏览器回退。
-        code = "login_required" if scenario == "detail_403" else "rate_limited"
-        detail_requests = [row for row in new["trace"] if row[0] == "request" and "/detail/long" in row[2]]
-        assert len(detail_requests) == 1
-        assert not any(row[0] == "goto" and row[1].endswith("/detail/long") for row in new["trace"])
-        assert stopped_events(new)[0] == ("runtime_failed", code)
-        assert not any("/long" in name for name in new["artifacts"])
-        assert b'"note_id":"long"' not in b"".join(new["artifacts"].values()).replace(b" ", b"")
-    elif scenario in {"repair_api", "repair_rate_limit"}:
-        # L3 浏览器接口回退已删除：两者与 repair_page 相同，只读精确 detail 页页面状态。
-        assert not new["failure"]
-        assert [row for row in new["trace"] if row[0] == "goto" and row[1].endswith("/detail/long")]
-        records = [json.loads(line) for name, value in new["artifacts"].items()
-                   if "/jsonl/" in name for line in value.splitlines()]
-        assert [row["note_id"] for row in records] == ["long"]
 
 
 def test_dependency_direction():
@@ -427,98 +25,40 @@ def test_dependency_direction():
                 if module.startswith("trippostcollect.application"):
                     assert module == "trippostcollect.application.contracts"
                 if module.startswith("trippostcollect.runtime"):
-                    assert module == "trippostcollect.runtime.helpers"
+                    assert module in {
+                        "trippostcollect.runtime.helpers",
+                        "trippostcollect.runtime.page_capture",
+                        "trippostcollect.runtime.visit_ledger",
+                        "trippostcollect.runtime.human_flow",
+                    }, (path, module)
                 if module.startswith("trippostcollect.platforms."):
                     assert module.startswith("trippostcollect.platforms.weibo")
 
 
-# 详情页导航返回的 HTTP 状态由 test_root_repair_page_status_is_classified 覆盖。
-REPAIR_SCENARIOS = ["empty", "navigation", "no_page"]
+def test_root_repair_attempts_and_exception_chain():
+    """#211：移动详情修复链已删除。保留覆盖声明里的函数名，断言旧入口不存在。"""
+
+    from trippostcollect.platforms.weibo import client, core
+
+    assert not hasattr(client.WeiboClient, "get_note_info_by_id")
+    assert not hasattr(client.WeiboClient, "_get_note_info_repair")
+    assert not hasattr(core.WeiboCrawler, "get_note_full_text")
+    text = (ROOT / "src/trippostcollect/platforms/weibo/client.py").read_text(encoding="utf-8")
+    assert "m.weibo.cn" not in text
 
 
-async def repair_chain(patch, scenario, *, page_status=200):
-    """同一 fake 下根实现单次修复请求的尝试轨迹与异常链。"""
-    trace = []
-
-    async def sleep(_):
-        return None
-
-    class HTTP:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *args):
-            return False
-
-        async def request(self, method, url, **kwargs):
-            trace.append((method, url, kwargs))
-            return httpx.Response(200, text="missing render data", request=httpx.Request(method, url))
-
-    class Page:
-        async def goto(self, url, **kwargs):
-            trace.append(("goto", url, kwargs))
-            if scenario == "navigation":
-                raise PlaywrightError("离线导航失败")
-            return SimpleNamespace(status=page_status)
-
-        async def wait_for_timeout(self, timeout):
-            trace.append(("wait", timeout))
-
-        async def evaluate(self, script, note_id):
-            trace.append(("evaluate", script, note_id))
-            return {"id": "wrong", "text": "其他帖子"}
-
-    page = None if scenario == "no_page" else Page()
-    patch.setenv("TRIPPOSTCOLLECT_POST_REPAIR", "1")
-    patch.setenv("TRIPPOSTCOLLECT_WEIBO_BROWSER_DETAIL_TIMEOUT_MS", "100")
-    ports = entry.weibo_dependencies(settings())[1].client
-    ports = replace(ports, make_async_client=lambda **kwargs: HTTP())
-    patch.setattr(client.WeiboClient._get_note_info_direct.retry, "sleep", sleep)
-    instance = client.WeiboClient(headers={"Cookie": "SUB=t05"}, playwright_page=page, cookie_dict={}, ports=ports, post_repair=True)
-    with pytest.raises(Exception) as error:
-        await instance.get_note_info_by_id("123")
-    return trace, exception_chain(error.value)
-
-
-def check_repair_chain(new, scenario):
-    trace, errors = new
-    assert len([row for row in trace if row[0] == "GET"]) == 3
-    assert not any(row[0] == "api" for row in trace)
-    if scenario == "empty":
-        assert "attempts=['page_state:empty_detail']" in errors[0][1]
-        assert errors[1][0] == "DataFetchError"
-    if scenario != "no_page":
-        assert next(row for row in trace if row[0] == "goto")[2]["timeout"] == 5000
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("scenario", REPAIR_SCENARIOS)
-async def test_root_repair_attempts_and_exception_chain(scenario):
-    with pytest.MonkeyPatch.context() as patch:
-        new = await repair_chain(patch, scenario)
-    check_repair_chain(new, scenario)
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "status,error,code,attempts",
-    [
-        (403, "PlatformRuntimeError", "login_required", None),
-        (401, "PlatformRuntimeError", "login_required", None),
-        (429, "PlatformRuntimeError", "rate_limited", None),
-        (432, "PlatformRuntimeError", "blocked_or_forbidden", None),
-        (404, "DataFetchError", None, "attempts=['page_state:http_404']"),
-    ],
+    "status,code",
+    [(401, "login_required"), (403, "login_required"), (429, "rate_limited"), (418, "blocked_or_forbidden")],
 )
-async def test_root_repair_page_status_is_classified(status, error, code, attempts):
-    """#114：回退只读页面导航响应的状态；401/403/429/风控即阻断，其他非 2xx 视为详情不可用。"""
-    with pytest.MonkeyPatch.context() as patch:
-        trace, errors = await repair_chain(patch, "page_status", page_status=status)
-    assert errors[0][0] == error and errors[0][2] == code
-    if attempts:
-        assert attempts in errors[0][1]
-    assert not any(row[0] in {"evaluate", "wait", "api"} for row in trace)
-    assert [row[1] for row in trace if row[0] == "goto"] == ["https://m.weibo.cn/detail/123"]
+def test_root_repair_page_status_is_classified(status, code):
+    """详情 show 的阻断状态由桌面详情测试覆盖；这里确认修复入口不再导航到移动详情。"""
+
+    from trippostcollect.platforms.weibo.detail_page import SHOW_STATUS_CODES
+    from trippostcollect.platforms.weibo import models as weibo_models
+
+    assert SHOW_STATUS_CODES[status] == code
+    assert not hasattr(weibo_models, "WeiboRepairNotImplemented")
 
 
 @pytest.mark.parametrize("post_repair", ["0", "1"])
@@ -542,21 +82,35 @@ def test_worker_assembly_uses_root_weibo(tmp_path, post_repair):
     assert result == {"repair": post_repair == "1", "others": ["DouYinCrawler", "ZhihuCrawler", "XiaoHongShuCrawler"]}
 
 
-@pytest.mark.parametrize("login,uid,expected", [(True, "123", True), (True, "", False), (False, "123", False)])
-def test_warmup_requires_mobile_login_and_uid(monkeypatch, login, uid, expected):
+@pytest.mark.parametrize(
+    "exists,truthy,expected",
+    [(True, True, True), (True, False, False), (False, True, False)],
+)
+def test_warmup_requires_desktop_config_uid(monkeypatch, exists, truthy, expected):
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts"))
     import mediacrawler_login_warmup as warmup
 
     class Context:
-        async def cookies(self, urls):
-            assert urls == ["https://m.weibo.cn"]
-            return [{"name": "WBPSESS", "value": "desktop-only"}]
+        def on(self, _event, _callback=None):
+            return None
 
-    async def api(_):
-        return {"ok": True, "login": login, "uid": uid}
+    class Page:
+        url = "https://weibo.com/"
 
-    monkeypatch.setattr("trippostcollect.application.warmup.weibo_api_check", api)
-    state = asyncio.run(warmup.current_state(Context(), SimpleNamespace(url="https://m.weibo.cn"), "weibo"))
+        def on(self, _event, _callback=None):
+            return None
+
+        async def evaluate(self, script, arg=None):
+            assert "$CONFIG" in script
+            return {"exists": exists, "truthy": truthy}
+
+    state = asyncio.run(warmup.current_state(Context(), Page(), "weibo"))
     assert state["ok"] is expected
+    assert state["markers"] == {"uid_exists": exists, "uid_truthy": truthy}
+    assert "uid" not in state["api"]
 
 
 def test_configuration_snapshot_and_operation_readers(monkeypatch):

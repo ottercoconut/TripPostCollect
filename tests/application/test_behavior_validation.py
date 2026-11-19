@@ -139,9 +139,9 @@ def test_gated_platform_without_visit_results_fails_closed(monkeypatch):
 
 
 def test_ungated_platforms_are_unchanged():
-    records = [platform_record("weibo", url="https://s.weibo.com/weibo?q=%E9%9D%92%E5%B2%9B%E6%97%85%E6%B8%B8")]
-    result = collect_behavior_validation(records, ["weibo"], KEYWORD, content_visits={"xhs": visits(ok=False)})
-    assert result["platforms"]["weibo"]["content_visit_ok"] is None
+    records = [platform_record("douyin", url="https://www.douyin.com/search/%E9%9D%92%E5%B2%9B%E6%97%85%E6%B8%B8")]
+    result = collect_behavior_validation(records, ["douyin"], KEYWORD, content_visits={"xhs": visits(ok=False)})
+    assert result["platforms"]["douyin"]["content_visit_ok"] is None
     assert result["behavior_ok"] is True and result["content_visit_ok"] is None
 
 
@@ -156,8 +156,8 @@ def test_formal_validation_records_content_visit_ok():
     assert gated["content_visit_ok"] is False and gated["behavior_evidence_ok"] is False
     assert gated["completion_met"] is False and gated["stop_reason"] == "behavior_evidence_failed"
     plain = collect_behavior_validation(
-        [platform_record("weibo", url="https://s.weibo.com/weibo?q=%E9%9D%92%E5%B2%9B%E6%97%85%E6%B8%B8")],
-        ["weibo"], KEYWORD,
+        [platform_record("douyin", url="https://www.douyin.com/search/%E9%9D%92%E5%B2%9B%E6%97%85%E6%B8%B8")],
+        ["douyin"], KEYWORD,
     )
     gated = apply_formal_completion_gates(base, content_validation=content, image_materialization=images,
                                           behavior_validation=plain, download_images=True)
