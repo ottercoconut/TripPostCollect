@@ -1,91 +1,197 @@
 # 微博
 
-微博正式抓取服从[正式抓取执行契约](../formal-crawl-contract.md)。本文只维护移动端登录、长文、候选
-发现诊断和图片字段差异。
+微博正式抓取服从[正式抓取执行契约](../formal-crawl-contract.md)。本文只维护微博的登录、搜索分页、详情、
+作者、字段和图片差异。微博自 #211 起改为桌面站页面取数（L1），并纳入真实访问门禁；`m.weibo.cn` 移动接口、
+浏览器外搜索与详情请求、移动详情 `$render_data` 读取已全部删除。
 
-## 登录与入口
+## 入口与登录
 
 - 正式入口：`crawl_runner.py` 经 `mediacrawler_crawl.py` 启动根包 worker（`trippostcollect.platforms.entry`）
   执行微博搜索，实现位于 `src/trippostcollect/platforms/weibo/`。
-- warmup 用后台移动页验证 `/api/config`；失效时把桌面
-  `passport.weibo.com/sso/signin` 登录页置前。人工完成 SSO 后回到移动端刷新 Cookie。
-- 关闭重开 profile 后，只有移动接口同时返回 `login=true` 和有效 `uid` 才成功；`WBPSESS` 不能
-  单独作为登录证据。
-- 行为阶段必须在本轮真实关键词移动搜索页完成并刷新移动端 Cookie。
-- 启动浏览器时不强制 User-Agent，同一持久 profile 登录与抓取时的浏览器 UA 一致；标准模式持久 profile
-  与 warmup 共用同一套启动配置（沙箱开启、`zh-CN` 与 `Asia/Shanghai`），首页在持久 context 自带的第一页
-  打开（#136）；不做 viewport 设备模拟，按原生窗口 1450×900 启动，`screen` 与 DPR 由浏览器给出真实值（#139）；`m.weibo.cn` 接口与图片请求头的 `User-Agent` 从 `navigator.userAgent` 读取，
-  不再用固定 iPhone Safari（#127）。桌面 UA 下 `/api/config` 已由 warmup 验证；`/api/container/getIndex`
-  在桌面 UA 下的 `cards` 结构待正式轮实证，结构不同或被拒只会运行级停止，不写错误数据。
-- worker 启动时先用 `/api/config` 确认移动端登录；未确认时执行登录流程并刷新移动端 Cookie，之后必须
-  再确认一次。仍未登录即记 `adaptive_search_stopped(runtime_failed, login_required)` 并结束，不发出
-  任何搜索请求，不能把未登录状态下的空结果当作来源耗尽。
+- 浏览器沿用标准模式持久 profile `data/runtime/platform_sessions/weibo/profile`，与 warmup 共用
+  `launch_profile_context`：不强制 User-Agent，原生窗口 1450×900，`zh-CN` 与 `Asia/Shanghai`，沙箱开启，
+  不做 viewport 设备模拟（#136、#139）。持久 profile 是登录态的唯一权威来源，worker 不向浏览器注入 Cookie。
+- 登录确认只读页面状态：worker 打开 `https://weibo.com/`，经已登记的状态脚本读取 `window.$CONFIG.uid`。
+  值存在且为真（非 0 数字或非空字符串）才算已登录，访问账本记为 `page_state`。读不到、为假，或页面落到
+  `passport.weibo.com`（含访客页 `visitor`），即以 `runtime_failed/login_required` 运行级阻断结束，不发起
+  任何搜索，也不在本轮登录；操作人先运行 `scripts/login_warmup.py --targets weibo` 再重跑。
+- warmup 用同一判定：首页 `$CONFIG.uid` 为真即成功；否则把桌面 `passport.weibo.com/sso/signin` 登录页
+  置前，人工完成登录后关闭重开 profile，再读一次首页 `$CONFIG.uid`，为真才算成功。
+- 行为阶段在本轮关键词的桌面搜索页完成（见“搜索”）。
+- 页面落到安全验证（验证码、滑块、“安全验证”一类可见特征）是 `captcha_detected`；可见“访问频繁”
+  “操作过于频繁”一类提示是 `rate_limited`。这两组 URL 与可见特征写在平台代码的常量里。截至 #211 侦察
+  尚未实际遇到，属于待实测的假设。
 
-## 请求失败分类
+## 搜索
 
-- 移动接口（`/api/config`、搜索、长文详情）返回 401/403 记 `login_required`，429 记 `rate_limited`，
-  418/432 风控拦截记 `blocked_or_forbidden`；这些都是运行级阻断，不重试，也不再在每次失败后跳转
-  首页刷新 Cookie。
-- 只有传输层异常（超时、连接错误）和 5xx 才在原预算内重试（搜索 5 次/3 秒，详情 3 次/1 秒），
-  用尽后原样上抛。搜索阶段的任何失败都写 `runtime_failed`（阻断写对应错误码，传输层失败写
-  `network_unreachable`，其余写 `search_request_failed`），不得当作空页。
-- 重试用尽后仍是传输层失败（DNS、连接失败、超时、连接重置）是网络整体故障，与候选无关（#129）：
-  长文详情不再落入 `unexpected_detail_failure` 候选跳过，而是以 `runtime_failed/network_unreachable`
-  停止本轮，不写 `candidate_skipped`、不进 seen；指定帖子详情也不把它吞成空结果。runner 记为
-  `network_timeout` 并等待 900 秒重试。正文图片下载仍按 `image_download_retryable`。
-- 日志与异常只记状态码、`ok`、`msg` 与响应长度，不写响应原文；微博响应含 `avatar_hd`、
-  `profile_image_url` 等头像字段。
+- 搜索只读本轮搜索页自身的页面内容。worker 导航到 `https://s.weibo.com/weibo?q=<关键词>&nodup=1`，
+  即页面上“查看全部搜索结果”的入口（不省略相似结果），并在该页完成行为阶段。
+- 搜索结果由服务端渲染在 HTML 里，页面没有返回结果列表的 JSON 接口。每页经已登记的 DOM 脚本读取
+  （访问账本记为 `page_state`），读取以下内容：
+  - 卡片：`div.card-wrap[action-type="feed_list_item"][mid]`，`mid` 必须是纯数字；
+  - 每张卡片的详情链接：`div.from a` 的 `//weibo.com/{uid}/{mblogid}`；
+  - 分页控件 `div.m-page2`：当前页 `li.cur`、`span.page-info`（如“共50页/500条”）、页码链接的最大页，
+    以及 `a.next` 是否带 `disabled`。
+- 用户卡、热门话题卡等不带 `mid` 的卡片不是候选。
+- 翻页：先写一段翻页停顿，用 `social_high_risk` 的真人分段滚动到页面底部，再真实点击
+  `div.m-page2 a.next`。页面在同一标签内跳到 `&page=N`，然后重新读取。不拼接页码地址，也不跳页。
+- 搜索访问写入访问账本，每条带以下字段：
+  - 连续 `search_page`（从 1 起）；
+  - `is_target=true`；
+  - `has_more`：`a.next` 未禁用为 true，末页为 false；
+  - `search_session`；
+  - `filter_signature=nodup=1`。
 
-## 字段来源
+## 来源耗尽与发现记忆
 
-- 普通微博正文来自完整搜索 `mblog.text`，保存
-  `content_detail_status=detail_observed`、`content_detail_source=search_mblog_complete`。正文写出前先把
-  `<br>` 转为换行，再去标签，最后还原 HTML 实体。
-- 发帖时间只来自 `mblog.created_at`（RFC 2822），换算为 Unix 时间戳与上海时区时间；缺失或无法解析时
-  该候选写 `candidate_skipped(error_code=created_at_unparseable)`，不写出记录，搜索继续。
-- `isLongText=true` 必须请求移动详情并使用 `content_detail_source=mobile_detail`；详情候选级失败
-  有限重试后写 `candidate_skipped(failure_scope=post)`，不得保存截断搜索文本。
-- 正文图片只来自 `mblog.pics` 归一后的 `image_list`，来源键为 `image_list`；头像、用户对象图片、
-  封面和视频缩略图不进入正文候选。
-- 作者粉丝来自 `mblog.user` 的明确粉丝字段，保存
-  `followers_observed=true`、`author_followers_source=search_author`。原始字段明确为 0 时才接受 0。
-- 互动计数为点赞、评论和分享。转发与分享是同一种互动：`mblog.reposts_count` 经 `shared_count`
-  写入 `post_shares_count`，不另存转发列。
-- 作者平台 ID 保存 `mblog.user.id` 原始值（整数归一为字符串，写在 `creator_hash` 键），昵称保存
-  `screen_name` 原文；头像、性别、主页、签名和 IP 归属地不写出。
-- 去重键为微博 ID；没有正文图片的记录不是有效图文。
+- 来源耗尽只认搜索页自身的结束标记，以 `source_exhausted` 停止：
 
-有 `pid` 时图片稳定资产键为 `weibo:pid:<pid>`，否则回退到规范 URL 哈希。平台层复用移动搜索会话
-下载并写 staging/manifest，通用重试、失败分类、根项目复验和事务见
-[正式契约](../formal-crawl-contract.md)与[数据持久化](../data-persistence.md)。
+  | `stop_detail` | 条件 |
+  |---|---|
+  | `next_disabled` | 当前页有卡片，且 `div.m-page2 a.next` 带 `disabled` |
+  | `single_page` | 第 1 页有卡片，且没有分页控件 |
+  | `no_results` | 第 1 页没有卡片，且页面显示“找到0条结果” |
 
-图片请求只直连新浪图床：先请求 `large` 规格，失败或超限时退回平台原始地址。请求头只含浏览器
-User-Agent（与接口请求同一 `navigator.userAgent`）、`Referer: https://m.weibo.cn/` 和图片 Accept，不带登录 Cookie、Origin 或 Content-Type，
-也不经任何第三方图片代理。
+  停止事件带最后一页的 `source_visit_id`，并记录：
+  - `source_page_info` 原文；
+  - `source_max_page`；
+  - `page_cap_reached`：最大页是否为 50。
+- 其他情况一律写 `runtime_failed/search_page_invalid`，不推断为耗尽：
+  - 第 2 页及以后没有分页控件或没有卡片；
+  - 第 1 页没有卡片却没有“找到0条结果”；
+  - 卡片 `mid` 不是纯数字；
+  - 点击下一页后页码没有前进。
+- 每个查询最多 50 页（`page-info` 为“共50页/500条”，第 50 页的 `a.next` 带 `disabled`）。这是平台的翻页
+  上限，不等于该关键词的内容已经取尽。是否把达到上限的末页接受为来源耗尽，或改为按时间窗切分查询，
+  待操作人在 #211 决定。决定之前，实现按上表停止，并用 `page_cap_reached=true` 标出上限情形。
+- 每轮从搜索第一页翻到结束标记。已处理 ID 在打开详情前滑过，包括以下来源：
+  - 数据库已有 ID；
+  - 累计摘要中的有效 ID；
+  - 持久已处理候选；
+  - 人工排除；
+  - 本轮已见 ID。
+- 不按保存页码恢复深层前沿，也不做顶部有限刷新。runner 不把 checkpoint 转成 `--start-page`、
+  `--top-refresh-max-pages` 或 `--discovery-source-exhausted`；child 收到这些参数直接以
+  `weibo_full_scan_rejects_resume_args` 报错。运行级失败时，未完成的累计摘要仍经 `--resume-summary` 合并，
+  下一轮取得结束标记后一次性入库。checkpoint 仍写入本轮最后页码与停止原因，供审计，不作续跑起点。
+- 查询指纹仍按平台与关键词计算，#211 之前积累的已处理 ID（同为数字 mid）继续有效。旧 checkpoint
+  中的深层页码不再使用。
+- 批次使用 `stagnation_basis=candidate_identity` 记录诊断计数（本页是否出现未知 mid）；该计数不触发停止。
 
-## 发现与批次诊断
+## 详情
 
-只有搜索响应的原始 `cards` 为空（含平台“这里还没有内容”空页），或页面没有微博卡片且带“暂无内容”
-这类明确无内容标记时，才写 `source_exhausted(empty_page)`。有卡片但都不是 `card_type=9`（话题、
-用户卡、推荐卡）是正常页，按批次记录后继续翻页。
+- 每条未知候选都在搜索页真实点击卡片的时间链接，在新标签打开 `https://weibo.com/{uid}/{mblogid}`。
+  点击前写一段 `search_results` 停顿。
+- 详情数据是新标签页面自身请求 `/ajax/statuses/show?id=…&isGetLongText=true` 的响应（被动截获，
+  `page_response`）。只接受 `idstr`（或 `mid`）与卡片 `mid` 完全一致的那一条，同页评论、推荐等响应里的
+  其他微博对象不参与。
+- 详情标签停留随机 5–9 秒（账本阶段 `note_detail`），然后关闭，回到搜索页。
+- 正文取 `longText.content`，没有该键或为空时取 `text_raw`，结果必须非空；来源为
+  `content_detail_source=desktop_detail`，并写 `content_detail_status=detail_observed`。
+  - 侦察实例中，带 `longText` 的长文，其 `longText.content` 与 `text_raw` 等长，都是全文。
+  - `continue_tag` 只是列表页的截断标记，不参与取值。
+  - `isLongText=true` 但没有 `longText` 的实例是多图微博，`text_raw` 已是全文。
+  - HTML 形式的 `text` 不使用。
+- 转发微博只取本条自身的 `text_raw` / `longText` 与 `pic_infos`，不合并 `retweeted_status` 的正文或图片。
+- 发帖时间只来自 `created_at`（如 `Tue Aug 11 11:09:54 +0800 2026`），换算为 Unix 时间戳与上海时区时间。
+  缺失或无法解析时，该候选写 `candidate_skipped(error_code=created_at_unparseable)`，不写出记录，搜索继续。
+- 互动计数取 `attitudes_count`（点赞）、`comments_count`（评论）、`reposts_count`（转发即分享，经
+  `shared_count` 写入 `post_shares_count`，不另存转发列）。缺键为 NULL，不补 0；键上的 0 照记为 0。
+  缺任一项按字段 profile 判为不合格。微博没有收藏计数（`favorited` 只表示当前账号是否收藏），
+  `post_favorites_count` 为 NULL。
+- 有 `page_info.object_type=video`、且没有 `pic_infos` 的视频微博按视频跳过：计为已处理候选，进入候选
+  记忆，不写项目 JSONL。
+- 去重键为数字 mid（`idstr`）。`note_url` 写成 `https://weibo.com/{uid}/{mblogid}`；`mblogid` 另存，不作为 ID。
+- 详情候选级失败按 3 次、间隔 1 秒有限重试，然后写 `candidate_skipped` 并进入已处理记忆。候选级失败包括：
+  - 找不到卡片时间链接；
+  - 新标签没打开；
+  - 等待 15 秒仍截获不到匹配的 `statuses/show`；
+  - 正文为空。
 
-综合搜索的批次停滞计数按“是否出现未知微博 ID”计算，而不是本页是否有有效图文。批次证据使用
-`stagnation_basis=candidate_identity`；该计数只用于诊断，不触发停止。纯文本或视频页仍继续扫描，
-正式完成只接受平台明确返回的来源耗尽证据。
+  以下是运行级阻断，不写 seen：
+  - 详情标签落到登录、访客或安全验证页；
+  - `statuses/show` 返回 401/403（`login_required`）、429（`rate_limited`）或 418/432（`blocked_or_forbidden`）；
+  - page/context 被关闭。
+- 搜索和详情都不走浏览器外 HTTP，因此不再产生 `network_unreachable`；正文图片下载仍按
+  `image_download_retryable`。
+- 日志只记录 mid、计数和状态码；不打印整条记录、`statuses/show` 或 `sideUser` 原始响应。头像只在内存中
+  用于排除，不进入 `model_dump` 和项目 JSONL。
 
-有 checkpoint 时先刷新顶部，再从保存页码继续。数据库、累计摘要、seen、人工排除和本轮已见 ID
-在长文详情与图片请求前过滤；完整页保存下一页，页中途停止保存当前页，顶部刷新不推进深层位置。
+## 作者
 
-微博来源耗尽轮常因正文图片数量大而长时间运行。统一的 1200 秒无持久进展看门狗只限制 execution
-state、内容 JSONL、图片 manifest 和行为证据同时无变化的持续时间，不限制整轮总时长；持续完成候选或
-图片时不得仅因累计运行时长结束进程。触发 `no_progress_timeout` 时只保留最后完整批次的安全恢复位置，旧 staging
-不得导入，账号健康状态也不得据此改变。
+- 作者资料来自同一详情标签页面自身请求的 `/ajax/side/cards/sideUser?id={uid}`（被动截获，`page_response`），
+  不另开作者页。侦察中该响应与作者页 `/ajax/profile/info` 的 `user` 逐项一致。只接受 `data.user.id` 与
+  `statuses/show` 的 `user.id` 一致的那一条。
+- 字段映射：
 
-历史库中缺少 `content_detail_status=detail_observed` 的既有记录，从根项目
-`scripts/repair_post_details.py --platform weibo` 分批修复。清单把既有微博 ID 与
-`https://m.weibo.cn/detail/<id>` 严格绑定；detail 模式先在本轮青岛关键词移动搜索页完成人类行为
-证据，再从移动详情标记 `content_detail_source=mobile_detail` 并下载 `mblog.pics` 正文图。旧式
-`$render_data` 不存在时，修复入口打开同一登录浏览器中的精确 detail 页，先看导航响应状态
-（401/403 记 `login_required`，429 记 `rate_limited`，其他非 2xx 视为该条详情不可用），再读取结构化
-页面状态，仍要求目标 ID 完全一致且正文非空；不调用 Playwright `page.request` 等请求接口。
-该入口不写搜索 checkpoint，完成含义只覆盖清单中的旧行。
+  | 来源 | 写入 | 说明 |
+  |---|---|---|
+  | `id` | `creator_hash` 键（作者平台 ID） | 整数归一为字符串 |
+  | `screen_name` | 昵称 | 原文 |
+  | `followers_count` | 粉丝 | int；`followers_observed=true`、`author_followers_source=detail_side_user`；缺键时只认 `followers_count_str` 为纯数字，“万”字串不换算，视为缺失 |
+  | `friends_count` | `author_following_count` | |
+  | `statuses_count` | `author_posts_count` | |
+  | `description` | `author_description` | |
+
+  `author_profile_url` 写成 `https://weibo.com/u/{uid}`。以上各项缺键都为 NULL，不补 0；键上的 0 照记为 0。
+- 认证原值 `verified`、`verified_type`、`verified_type_ext`、`verified_reason` 写入 `author_json.weibo_verify`。
+  `author_verified` 与 `author_verified_text` 的判定口径待操作人在 #211 决定。决定之前这两列为 NULL；
+  决定后可从 `author_json` 离线回填，不需重访。侦察到的原值：
+
+  | 作者类型 | `verified` | `verified_type` | `verified_type_ext` | `verified_reason` |
+  |---|---|---|---|---|
+  | 机构 | true | 1 | 0 | 机构名称 |
+  | 个人 | true | 0 | 0 或 2 | 认证说明 |
+  | 无认证 | false | -1 | — | 空 |
+- 头像（`avatar_hd`、`avatar_large`、`profile_image_url`）、性别（`gender`）、所在地（`location`）、生日、公司
+  和 `status_total_counter` 不采集。
+- 截获不到匹配的 `sideUser`，或其中没有用户对象，是候选级失败（`author_profile_missing`）：按 3 次、间隔
+  1 秒重新打开详情重试，然后写 `candidate_skipped` 并进入已处理记忆。
+
+## 访问门禁
+
+- 微博已纳入访问门禁（#211），每条入库记录须经 `content_visit_ok`。
+- discovery 链为 `search_results → note_detail → creator_profile → images`：
+
+  | 阶段 | 规则 | 来源 | 触发 |
+  |---|---|---|---|
+  | 搜索 | `weibo.search_cards` | `page_state` | 导航或点击下一页 |
+  | 详情 | `weibo.statuses_show` | `page_response` | `click_card` |
+  | 作者 | `weibo.side_user` | `page_response` | 与详情同一次触发 |
+  | 正文图 | `weibo.content_image` | `cdn_direct` | |
+
+  作者访问不需要单独的点击。它必须满足三点：与详情位于同一标签、晚于该次触发，且 `subject_id` 等于
+  `statuses/show` 的作者 ID。
+- repair 链为 `note_detail → creator_profile → images`：详情由 `navigate` 打开
+  `https://weibo.com/{uid}/{mid}`，作者与图片规则不变。
+- 每条入库记录带 `content_visit_refs`：`ledger_id`、`search_results`、`note_detail`、`creator_profile`、`images`。
+
+## 正文图片与资产键
+
+- 正文图只来自本条 `statuses/show` 的 `pic_infos`，按 `pic_ids` 顺序排列；`pic_infos` 里没有的 pid 跳过。
+- 每张图依次取第一个存在的规格 URL：`largest`（路径段 `large`，原尺寸）、`mw2000`、`original`
+  （`orj1080`）。`thumbnail`、`bmiddle`、`large`（`orj960`）不作为正文图。
+- `pic_infos` 的 `type` 只接受 `pic`、`gif` 与 `livephoto`（只取静态图规格），其他类型跳过。
+- 头像、用户对象图片、封面、视频缩略图和 `retweeted_status` 的图片不进入正文候选。
+- 只有 `mix_media_info`、没有 `pic_infos` 的混合媒体微博没有正文图，按缺图判为不合格。
+- 稳定资产键为 `weibo:pid:<pid>`，与 #211 之前一致，历史图片记录可以直接对上。
+- 图片请求是登记过的 CDN 直连例外，只请求 `*.sinaimg.cn`：
+  - UA 取自浏览器 `navigator.userAgent`（经已登记的状态脚本读取）；
+  - `Referer: https://weibo.com/`，并带图片 Accept；
+  - 不带 Cookie、Origin 或 Content-Type，不经第三方代理。
+- 首选规格失败或超限时，退到下一个规格。每张成功下载的正文图在访问账本以来源 `cdn_direct`、规则
+  `weibo.content_image` 登记状态码、资产键和 sha256，供门禁 R5 与 manifest 对账。
+- 平台层写 staging/manifest，根项目再执行通用字节复验、同帖 SHA-256 去重、晋升和事务，见
+  [数据持久化](../data-persistence.md)。
+
+## 历史详情修复
+
+- `scripts/repair_post_details.py --platform weibo` 只处理既有、但缺少 `content_detail_status=detail_observed`
+  的微博行。清单把既有 mid 与 `https://weibo.com/{作者平台 ID}/{mid}` 严格绑定，没有作者平台 ID 的行拒绝。
+- detail 模式先在本轮青岛关键词的桌面搜索页完成行为阶段，再按 repair 链逐条 `navigate` 打开详情页。
+  - 截获 `statuses/show` 与 `sideUser`，规则与正式抓取相同，要求目标 mid 一致且正文非空，来源标记为
+    `desktop_detail`；
+  - 再下载正文图。
+- 导航响应 401/403 记 `login_required`，429 记 `rate_limited`；其他非 2xx 视为该条详情不可用。
+- 不调用 Playwright `page.request` 等请求接口。该入口不写搜索 checkpoint，完成含义只覆盖清单中的旧行。
+- 是否用同一链路为约 3882 行历史微博回填作者简介、关注数、作品数和认证，待操作人在 #211 决定。
