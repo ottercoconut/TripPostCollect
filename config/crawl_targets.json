@@ -55,7 +55,7 @@
       "site_key": "bilibili",
       "target_url": "https://search.bilibili.com/article?keyword=%E9%9D%92%E5%B2%9B%E5%B4%82%E5%B1%B1%E6%97%85%E6%B8%B8%E6%94%BB%E7%95%A5",
       "job_kind": "mediacrawler_search",
-      "enabled": true,
+      "enabled": false,
       "priority": 50,
       "schedule_seconds": 172800,
       "max_attempts": 1,
