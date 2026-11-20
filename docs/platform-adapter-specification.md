@@ -30,7 +30,10 @@
 >   - `/aweme/v1/web/aweme/detail/` 直连详情与浏览器详情回退（`install_douyin_browser_detail_fallback`），
 >     `/user/profile/other/` 直连作者资料；
 >   - 抖音历史详情修复、作者资料回填（`profile_backfill.py`、`douyin_author_profile_worker.py`），
->     warmup 的 `LOGIN_STATUS` Cookie 判定与抖音 Cookie 快照。
+>     warmup 的 `LOGIN_STATUS` Cookie 判定与抖音 Cookie 快照；
+>   - `login.py` 与 `login_support.py`（扫码与手机号登录、滑块自动拖动、phone 内存缓存），worker 的
+>     `TRIPPOSTCOLLECT_DOUYIN_ENRICH_*`、`TRIPPOSTCOLLECT_DOUYIN_BROWSER_DETAIL_*` 等环境变量；
+>   - 只为上述代码服务的依赖 `pyexecjs`、`opencv-python`、`numpy`。
 
 > 2026-09-28 完成 P00-08 静态复核并补齐全量符号账；设计就绪 D 门禁的静态部分已满足，实施另需授权。
 > （以下为 2026-09-28 当时状态；迁移已于 T14 完成。）本文中的目标文件、类型和接口当时尚未实现。主设计保留原则与原研究，本文是目录、接口、读取时点和任务卡的唯一详细定义；
