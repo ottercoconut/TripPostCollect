@@ -16,6 +16,8 @@ import pytest
 from trippostcollect.db.bootstrap import bootstrap_connection
 from trippostcollect.db.connection import connect_db
 
+from support.formal_config import write_formal_config_all_enabled
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
@@ -210,7 +212,7 @@ def test_dry_run_freezes_and_reports_parallel_platform_schedule(
             "--db",
             str(db_path),
             "--config",
-            str(ROOT / "config" / "crawl_targets.json"),
+            str(write_formal_config_all_enabled(tmp_path)),
             "--run-root",
             str(run_root),
             "--execution-state-root",

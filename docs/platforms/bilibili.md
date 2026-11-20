@@ -11,6 +11,11 @@ B站正式能力只抓取 article/专栏图文。来源耗尽、候选失败、�
 - 单页 Opus 页面证据不代表 B站正式平台轮次。
 - 发现 checkpoint、seen、人工排除和跨次累计复用通用控制面。
 
+**临时停用（#220，2026-11-20 操作人决定）：** 正式 job `mc_bilibili_qingdao_laoshan_guide_article`
+在 `config/crawl_targets.json` 中设为 `enabled=false`，代码、数据库数据、抓取记忆和登录资料都保留。
+runner 只选 `enabled=1` 的 job，`--job-key` 显式重跑也不例外，因此停用期间该 job 不会运行；下方 dry-run
+同样选不到它。平台级总控在 #220 设计，恢复时把 `enabled` 改回 `true`。
+
 只冻结当前长期 B站 job：
 
 ```bash
