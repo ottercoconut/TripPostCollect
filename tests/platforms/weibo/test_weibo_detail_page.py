@@ -640,3 +640,83 @@ async def test_repair_stores_success_subset_and_stops_on_login(monkeypatch, tmp_
             "SELECT platform_post_id, canonical_url FROM web_posts"
         ).fetchall()
     assert found == [("525", "https://weibo.com/88/Abc12")]
+
+
+@pytest.mark.asyncio
+async def test_time_window_round_passes_visit_gate(monkeypatch, tmp_path):
+    """#217：假页面跑一轮时间窗 job，账本通过访问门禁，停止证据为来源耗尽。"""
+
+    from trippostcollect.application.collection import load_pagination_evidence
+    from trippostcollect.application.reporting import _url_contains_keyword
+    from trippostcollect.application.visit_gate import validate_content_visits
+    from trippostcollect.platforms.weibo.search_page import search_url
+    from trippostcollect.platforms.weibo.time_window import parse_time_window
+
+    window = parse_time_window(
+        {"start": "2025-07-01", "end": "2025-07-08"},
+        job_key="weibo-window",
+    )
+    monkeypatch.setenv(
+        "TRIPPOSTCOLLECT_TIME_WINDOW",
+        json.dumps({"start": "2025-07-01", "end": "2025-07-08"}, separators=(",", ":")),
+    )
+    monkeypatch.setenv("TRIPPOSTCOLLECT_TIME_WINDOW_JOB_KEY", "weibo-window")
+    page, capture, _context = _bind(monkeypatch, tmp_path)
+    capture.time_window = window
+    capture.begin_navigation()
+    page.url = search_url("青岛旅游", window)
+    assert _url_contains_keyword(page.url, "青岛旅游") is True
+    assert _url_contains_keyword(search_url("青岛旅游"), "青岛旅游") is True
+    page.plan([
+        {"url": SHOW, "json": show_body(text="青岛栈桥一日")},
+        {"url": SIDE, "json": side_body()},
+    ])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=_png(), request=request)
+
+    crawler = make_crawler(settings(
+        SAVE_DATA_PATH=str(tmp_path),
+        ENABLE_GET_MEIDAS=True,
+        CRAWLER_MAX_SLEEP_SEC=0,
+    ))
+    crawler.context_page = page
+    crawler._capture = capture
+    crawler._opened_keyword = "青岛旅游"
+    crawler.source_keyword = "青岛旅游"
+    crawler.detail_pages = WeiboDetailPages(capture, page)
+    crawler.wb_client = detail_mod_client(crawler, handler)
+    try:
+        await crawler.search()
+    finally:
+        await capture.aclose()
+
+    stopped = _events(tmp_path, "adaptive_search_stopped")
+    assert stopped[-1]["stop_reason"] == "source_exhausted"
+    assert stopped[-1]["stop_detail"] == "single_page"
+    assert stopped[-1]["page_cap_reached"] is False
+    assert stopped[-1]["time_window"] == window.audit()
+    batches = _events(tmp_path, "adaptive_batch_completed")
+    assert batches[-1]["time_window"] == window.audit()
+    evidence = load_pagination_evidence(tmp_path / "state.json")
+    assert evidence["stop_reason"] == "source_exhausted"
+    assert evidence["stop_event"]["time_window"] == window.audit()
+    assert evidence["batches"][-1]["time_window"] == window.audit()
+    searches = [
+        line for line in _visits(tmp_path)
+        if line.get("kind") == "visit" and line.get("stage") == "search_results"
+    ]
+    assert searches[0]["is_target"] is True
+    assert searches[0]["has_more"] is False
+    assert searches[0]["filter_signature"] == f"nodup=1;timescope={window.timescope}"
+    assert "timescope" in searches[0]["query_keys"]
+    record = json.loads(next((tmp_path / "weibo" / "jsonl").glob("*.jsonl")).read_text(encoding="utf-8").splitlines()[0])
+    result = validate_content_visits(
+        [record],
+        [tmp_path / "behavior.content_visits.jsonl"],
+        platform="weibo",
+        mode="discovery",
+        manifests=[tmp_path / "weibo" / "image_manifest.jsonl"],
+        stop_event=stopped[-1],
+    )
+    assert result["content_visit_ok"] is True, result

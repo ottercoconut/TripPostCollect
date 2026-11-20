@@ -57,9 +57,9 @@ const card = element(
   { "div.from a": [link] },
 );
 const cur = element({}, "2", {});
-const info = element({}, "共50页/500条", {});
+const info = element({}, input.pageInfo == null ? "共50页/500条" : input.pageInfo, {});
 const next = element({ class: "next disabled", href: "/x" }, "下一页", {});
-const pageLink = element({}, "50", {});
+const pageLink = element({}, input.pageLink == null ? "50" : input.pageLink, {});
 const pager = element({ class: "m-page2" }, "", {
   "li.cur": cur,
   "span.page-info": info,
@@ -80,7 +80,7 @@ process.stdout.write(JSON.stringify({ uidResults, ua, search, bottom }));
 """
 
 
-def run_scripts(body_text: str = "") -> dict:
+def run_scripts(body_text: str = "", **extra) -> dict:
     node, _cli = compute_driver_executable()
     payload = {
         "bodyText": body_text,
@@ -95,6 +95,7 @@ def run_scripts(body_text: str = "") -> dict:
             {"config": {"uid": "0"}},
             {"config": {}},
         ],
+        **extra,
     }
     completed = subprocess.run(
         [str(node), "-e", NODE_RUNNER],
@@ -129,6 +130,14 @@ def test_page_scripts_read_uid_flag_cards_and_pager():
     assert result["search"]["has_pager"] is True
     assert result["search"]["no_results"] is True
     assert "secret-uid" not in json.dumps(result["search"])
+
+
+def test_max_page_comes_from_pager_numbers_when_page_info_is_absent():
+    # #217：不足 50 页的时间窗页面可能没有 page-info，最大页仍从分页控件的页码读取。
+    result = run_scripts(pageInfo="", pageLink="12")
+
+    assert result["search"]["page_info"] == ""
+    assert result["search"]["max_page"] == 12
 
 
 @pytest.mark.parametrize(
@@ -496,6 +505,8 @@ async def test_next_click_advances_and_disabled_last_page_sets_page_cap(monkeypa
     ]
     batches = events_of(state_path, "adaptive_batch_completed")
     assert batches and all(item["stagnation_basis"] == "candidate_identity" for item in batches)
+    assert "time_window" not in stopped[-1]
+    assert all("time_window" not in item for item in batches)
 
 
 @pytest.mark.asyncio

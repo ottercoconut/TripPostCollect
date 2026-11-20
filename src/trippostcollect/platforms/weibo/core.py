@@ -54,6 +54,7 @@ from .search_page import (
     WeiboSearchSnapshot,
     search_url,
 )
+from .time_window import load_configured_time_window
 
 logger = logging.getLogger("TripPostCollect")
 
@@ -71,6 +72,8 @@ class WeiboCrawler:
         self._capture: WeiboPageCapture | None = None
         self.detail_pages: WeiboDetailPages | None = None
         self._opened_keyword = ""
+        self._time_window = None
+        self._time_window_loaded = False
 
     async def start(self):
         playwright_proxy_format, httpx_proxy_format = None, None
@@ -118,7 +121,7 @@ class WeiboCrawler:
         )
         if self.config.CRAWLER_TYPE != "search":
             raise PlatformRuntimeError(f"weibo {code}", code=code)
-        self.ports.accumulator().mark_runtime_failed(
+        self._accumulator().mark_runtime_failed(
             code,
             source_page=1,
             resume_page=1,
@@ -157,9 +160,10 @@ class WeiboCrawler:
         capture = self._capture
         if capture is None:
             raise RuntimeError("weibo_capture_channel_missing")
+        self._apply_time_window(capture)
         capture.begin_navigation()
         await self.context_page.goto(
-            search_url(keyword),
+            search_url(keyword, self._time_window),
             wait_until="domcontentloaded",
             timeout=30_000,
         )
@@ -169,11 +173,12 @@ class WeiboCrawler:
         """#211：每轮从搜索第一页点下一页翻到结束标记。不按保存页码恢复，也不做顶部刷新。"""
 
         logger.info("[WeiboCrawler.search] Begin search weibo keywords")
-        accumulator = self.ports.accumulator()
         discovery_phase = "frontier"
         capture = self._capture
         if capture is None:
             raise RuntimeError("weibo_capture_channel_missing")
+        self._apply_time_window(capture)
+        accumulator = self._accumulator()
         if self.detail_pages is None:
             self.detail_pages = WeiboDetailPages(capture, self.context_page)
         for raw_keyword in self.config.KEYWORDS.split(","):
@@ -375,6 +380,24 @@ class WeiboCrawler:
                 )
                 continue
             await self.update_weibo_note(record)
+
+    def _ensure_time_window(self) -> None:
+        if self._time_window_loaded:
+            return
+        self._time_window = load_configured_time_window()
+        self._time_window_loaded = True
+
+    def _apply_time_window(self, capture: WeiboPageCapture | None) -> None:
+        self._ensure_time_window()
+        if capture is not None:
+            capture.time_window = self._time_window
+
+    def _accumulator(self) -> Any:
+        self._ensure_time_window()
+        accumulator = self.ports.accumulator()
+        if self._time_window is not None:
+            accumulator.time_window = self._time_window.audit()
+        return accumulator
 
     def _unknown_candidates(self, accumulator: Any, snapshot: WeiboSearchSnapshot) -> list:
         pending: set[str] = set()

@@ -41,7 +41,7 @@
   - `is_target=true`；
   - `has_more`：`a.next` 未禁用为 true，末页为 false；
   - `search_session`；
-  - `filter_signature=nodup=1`。
+  - `filter_signature`：默认模式为 `nodup=1`；时间窗模式为 `nodup=1;timescope=custom:<起>:<止>`。
 
 ## 来源耗尽与发现记忆
 
@@ -60,7 +60,7 @@
   停止事件带最后一页的 `source_visit_id`，并记录：
   - `source_page_info` 原文；
   - `source_max_page`；
-  - `page_cap_reached`：最大页是否为 50。
+  - `page_cap_reached`：是否停在平台 50 页上限，判定见下文。
 
   `single_page` 没有分页控件，`source_max_page` 为空，`page_cap_reached` 为 false。
 - 其他情况一律写 `runtime_failed/search_page_invalid`，不推断为耗尽：
@@ -69,10 +69,12 @@
   - 出现无结果标记的同时有分页控件，或出现在第 2 页及以后；
   - 卡片 `mid` 不是纯数字；
   - 点击下一页后页码没有前进。
-- 每个查询最多 50 页（`page-info` 为“共50页/500条”，第 50 页的 `a.next` 带 `disabled`）。这是平台的翻页
-  上限，不等于该关键词的内容已经取尽。是否把达到上限的末页接受为来源耗尽，或改为按时间窗切分查询，
-  待定。操作人已选定按时间窗切分的方向，待验证项见 #213；实现前仍按上表停止，并用 `page_cap_reached=true`
-  标出上限情形。
+- 每个查询最多 50 页（第 50 页的 `a.next` 带 `disabled`）。这是平台的翻页上限，不等于该关键词的内容已经
+  取尽。操作人决定（#213）：默认模式与其他平台一致，每轮全量扫描，翻到第 50 页同样按 `next_disabled`
+  来源耗尽处理，`page_cap_reached=true` 只用于审计。需要上限之外的结果时，由操作人显式配置时间窗 job，
+  见下文“时间窗模式”。
+- `page_cap_reached` 在以下任一情况为 true：分页控件读到的最大页为 50；或停在第 50 页且 `a.next`
+  带 `disabled`。不足 50 页的时间窗页面可能没有 `page-info`，最大页从分页控件的页码读取。
 - 每轮从搜索第一页翻到结束标记。已处理 ID 在打开详情前滑过，包括以下来源：
   - 数据库已有 ID；
   - 累计摘要中的有效 ID；
@@ -83,9 +85,74 @@
   `--top-refresh-max-pages` 或 `--discovery-source-exhausted`；child 收到这些参数直接以
   `weibo_full_scan_rejects_resume_args` 报错。运行级失败时，未完成的累计摘要仍经 `--resume-summary` 合并，
   下一轮取得结束标记后一次性入库。checkpoint 仍写入本轮最后页码与停止原因，供审计，不作续跑起点。
-- 查询指纹仍按平台与关键词计算，#211 之前积累的已处理 ID（同为数字 mid）继续有效。旧 checkpoint
+- 默认 job 的查询指纹仍按平台与关键词计算，#211 之前积累的已处理 ID（同为数字 mid）继续有效；
+  时间窗 job 的指纹另含 `time_window`，见下文。旧 checkpoint
   中的深层页码不再使用。
 - 批次使用 `stagnation_basis=candidate_identity` 记录诊断计数（本页是否出现未知 mid）；该计数不触发停止。
+
+## 时间窗模式（#217）
+
+默认模式不带时间窗。只有操作人在 job 参数里显式写 `time_window` 时，该 job 才按时间窗搜索。这不是
+默认行为，也不会自动生成或拆分时间窗。
+
+- 配置写在 `jobs[].params.time_window`，只含 `start` 与 `end` 两个键：
+
+  ```json
+  "params": {
+    "platform": "weibo",
+    "keyword": "青岛旅游",
+    "time_window": {"start": "2025-07-01", "end": "2025-07-08"},
+    "required_fields_profile": "image_post_with_followers_v1",
+    "followers_policy": "required"
+  }
+  ```
+
+  - 值的格式为 `YYYY-MM-DD` 或 `YYYY-MM-DD-H`（`H` 为 0–23，不补零也可），按北京时间理解。
+  - 日期形式表示当日 0 点。
+  - 区间左闭右开，即 `[start, end)`；`start` 必须早于 `end`。
+  - 其他格式、缺键、多余键或非字符串值都是配置错误。
+- 只有微博接受 `time_window`（平台登记 `supports_time_window`）。其他平台的 job 带这个参数是配置错误：
+  runner 在同步配置时和派发前都会拒绝。
+- runner 传给 child 的参数：
+  - 规范化起止 `--time-window-start` / `--time-window-end`；
+  - 配置原值 `--time-window-source`（JSON）；
+  - `--time-window-job-key`。
+
+  child 只在微博时接受这些参数，起止必须成对，并用同一解析函数重新校验，原值与规范化起止必须一致。
+- 一个 job 对应一个关键词加一个时间窗。要覆盖多个时间段，就配多个 job（通常放在 `config/one_off/` 派生
+  配置里，见运行手册“一次性配置”）。
+- 搜索入口：
+
+  ```text
+  https://s.weibo.com/weibo?q=<关键词>&typeall=1&suball=1&timescope=custom:<起>:<止>&nodup=1
+  ```
+
+  起止统一写成小时形式 `YYYY-MM-DD-H`，例如上例为 `custom:2025-07-01-0:2025-07-08-0`。
+  job 的 `target_url` 写成同一地址，作为配置记录。行为证据的目标页核对（`target_url_ok`）只检查搜索页
+  地址中是否含关键词，不比对 `timescope` 等查询参数。
+- 统一用小时形式的原因（2026-11-20 侦察，#217）：
+  - 平台的日期形式 `custom:D:D` 包含终点当天，而小时形式的终点不含；只用小时形式才能得到左闭右开。
+  - `custom:D-0:(D+1)-0` 与日窗 `custom:D:D` 结果相同。
+  - 相邻小时窗、相邻日窗都没有重叠，并集等于大窗口。
+  - 加不加 `nodup=1`、`typeall=1&suball=1`，结果与顺序都相同。保留 `nodup=1`，与默认模式的过滤口径一致。
+- 时间窗 job 的其余流程与默认模式完全相同：
+  - 每轮从第 1 页真实点击翻页到结束标记，来源耗尽三种情形与无结果页处理不变；
+  - 详情、作者、图片与访问门禁不变。
+- 时间窗内翻满 50 页，同样按 `next_disabled` 来源耗尽处理，并带 `page_cap_reached=true`。窗口内上限之后的
+  结果不会被取到；是否把该窗口切细、另配 job，由操作人根据摘要决定。
+- `time_window` 是来源参数，计入查询指纹。每个时间窗 job 有独立的 checkpoint 与已处理候选记录；
+  没有 `time_window` 的默认 job，指纹与 #211 时完全相同。
+- 停止事件、批次诊断、child 运行摘要、runner 结果与 dry-run 计划都记录本 job 的 `time_window`：
+  - `start` / `end`：配置原值；
+  - `start_normalized` / `end_normalized`：规范化小时形式；
+  - `timescope`：地址中的值。
+
+  默认模式不写这个键。
+- 去重沿用现有机制，不为时间窗另做：
+  - 打开详情前，候选会与该平台全部已入库帖子 ID 比对（不分 job），也与本 job 的已处理候选、本轮已见 ID 比对；
+  - 入库按平台与帖子 ID 去重。
+  - 只在别的 job 中被跳过、没有入库的帖子（如无图帖、视频），会在新的时间窗 job 中再打开一次详情后跳过，
+    不会产生重复数据。
 
 ## 详情
 

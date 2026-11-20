@@ -17,6 +17,9 @@
 > **授权记录（2026-11-20）：** 操作人决定微博认证区分机构与个人（#213），授权临时解冻以同步判定口径。
 >
 > **授权记录（2026-11-20）：** 操作人授权临时解冻，同步 #215 微博无结果页判定（忽略推荐卡片）。
+>
+> **授权记录（2026-11-20）：** 操作人决定微博 50 页上限在默认模式下按来源耗尽处理，并授权临时解冻以同步
+> #217 显式时间窗模式。
 
 本文定义正式抓取的机器语义。平台参数和必需字段 profile：通用平台在
 `config/crawl_targets.json` 中配置；小红书在 `config/xhs_targets.json` 和
@@ -381,8 +384,10 @@ dry-run 只执行计划冻结，因此预期只有 `plan_frozen=completed`，后
   `source_num_pages`/`source_num_results`；微博（#211）只认搜索页分页控件的下一页按钮带 `disabled`
 （`next_disabled`）、第 1 页有卡片且没有分页控件（`single_page`），或第 1 页没有分页控件且显示“找到0条结果”或“抱歉，未找到相关结果”
 （`no_results`；此时页面附带的推荐卡片一律忽略，#215），停止事件记录 `source_page_info`、`source_max_page` 与 `page_cap_reached`。微博每个查询最多
-50 页，`page_cap_reached=true` 表示停在平台翻页上限而非内容取尽；是否接受该情形或改为时间窗切分待操作人
-在 #211 决定。
+50 页，`page_cap_reached=true` 表示停在平台翻页上限而非内容取尽。操作人决定（#213）：默认模式与其他平台
+一致，翻到第 50 页仍按 `next_disabled` 来源耗尽处理，`page_cap_reached` 只作审计。需要上限之外的结果时，由
+操作人显式配置时间窗 job（`params.time_window`，仅微博接受，#217）。每个时间窗 job 独立按同一规则判定来源
+耗尽；`time_window` 计入查询指纹，不自动拆分窗口，细则见 `platforms/weibo.md`。
   这些平台的页内空页、缺少结束标记或缺少总数一律写 `runtime_failed`。抖音每轮链上的第 1 页是例外：
   `data=[]` 与 `has_more=false` 不能单独证明耗尽；还必须由当前可见搜索页明确显示无结果，停止细节
   写为 `verified_empty_first_page`。可见页仍有作品或页面状态不明确时必须写
