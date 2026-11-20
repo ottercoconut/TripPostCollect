@@ -17,7 +17,7 @@ from trippostcollect.platforms import entry
 from trippostcollect.platforms.douyin import core as douyin_core
 from trippostcollect.platforms.douyin.client import DouYinClient
 from trippostcollect.platforms.douyin.detail_page import DouyinDetailFetchError
-from trippostcollect.platforms.douyin.models import DataFetchError, PlatformRuntimeError
+from trippostcollect.platforms.douyin.models import PlatformRuntimeError
 
 ARGUS_BODY = b"Blocked by ArgusSecurityPlugin Uifid Not Found"
 
@@ -76,110 +76,6 @@ def make_client(responder, *, cookie_dict=None, page=None):
 
 async def signed_bogus(*args):
     return "fixture-bogus"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "status, body, code",
-    [
-        (401, b"unauthorized", "login_required"),
-        (403, ARGUS_BODY, "blocked_or_forbidden"),
-        (403, b"Blocked by gateway", "blocked_or_forbidden"),
-        (429, b"too many", "rate_limited"),
-    ],
-)
-async def test_blocking_http_status_is_classified_before_decode(status, body, code):
-    client, transport = make_client(lambda request: (status, body))
-
-    with pytest.raises(PlatformRuntimeError) as raised:
-        await client.request("GET", "https://www.douyin.com/aweme/v1/web/user/profile/other/")
-
-    assert raised.value.code == code
-    assert len(transport.requests) == 1
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("status, body", [(403, b"forbidden"), (500, b"oops"), (502, b"")])
-async def test_other_non_2xx_is_retryable_transport_failure(status, body):
-    client, _ = make_client(lambda request: (status, body))
-
-    with pytest.raises(DataFetchError) as raised:
-        await client.request("GET", "https://www.douyin.com/aweme/v1/web/user/profile/other/")
-
-    assert not isinstance(raised.value, PlatformRuntimeError)
-    assert f"HTTP {status}" in str(raised.value)
-
-
-@pytest.mark.asyncio
-async def test_argus_header_only_on_detail_and_uifid_prefers_uifid(monkeypatch):
-    monkeypatch.setattr("trippostcollect.platforms.douyin.client.get_a_bogus", signed_bogus)
-
-    def responder(request):
-        if "/aweme/detail/" in request.url.path:
-            return 200, json.dumps({"aweme_detail": {"aweme_id": "1"}}).encode()
-        if "/user/profile/other/" in request.url.path:
-            return 200, json.dumps({"status_code": 0, "user": {"follower_count": 3}}).encode()
-        return 200, json.dumps({"status_code": 0, "data": [], "has_more": 0}).encode()
-
-    client, transport = make_client(
-        responder,
-        cookie_dict={"UIFID": "stable-uifid", "UIFID_TEMP": "temp-uifid", "s_v_web_id": "verify"},
-        page=Page(),
-    )
-
-    await client._get_video_by_id("1")
-    await client.get_user_info("sec-1")
-
-    by_path = {request.url.path: request for request in transport.requests}
-    detail = by_path["/aweme/v1/web/aweme/detail/"]
-    profile = by_path["/aweme/v1/web/user/profile/other/"]
-    # #124：搜索只经浏览器截获，客户端不再发搜索请求。
-    assert set(by_path) == {"/aweme/v1/web/aweme/detail/", "/aweme/v1/web/user/profile/other/"}
-    assert detail.headers["x-tt-argus"] == "1"
-    assert "x-tt-argus" not in profile.headers
-    assert "x-tt-argus" not in client.headers
-    for request in (detail, profile):
-        assert request.url.params["uifid"] == "stable-uifid"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "payload",
-    [
-        {"status_code": 2053, "user": {"follower_count": 9}},
-        {"status_code": 0},
-        {"status_code": 0, "user": None},
-        {"user": {"follower_count": 9}},
-    ],
-)
-async def test_creator_profile_without_success_envelope_is_empty(monkeypatch, payload):
-    monkeypatch.setattr("trippostcollect.platforms.douyin.client.get_a_bogus", signed_bogus)
-    client, _ = make_client(lambda request: (200, json.dumps(payload).encode()), page=Page())
-
-    assert await client.get_user_info("sec-1") == {}
-
-
-@pytest.mark.asyncio
-async def test_creator_profile_success_envelope_is_returned(monkeypatch):
-    monkeypatch.setattr("trippostcollect.platforms.douyin.client.get_a_bogus", signed_bogus)
-    payload = {"status_code": 0, "user": {"follower_count": 0}}
-    client, _ = make_client(lambda request: (200, json.dumps(payload).encode()), page=Page())
-
-    assert await client.get_user_info("sec-1") == payload
-
-
-@pytest.mark.asyncio
-async def test_media_request_uses_browser_ua_referer_and_image_accept_without_cookie():
-    client, transport = make_client(lambda request: (200, b"\x89PNG"))
-
-    assert await client.get_aweme_media("https://p3.test/body.jpeg") == b"\x89PNG"
-
-    headers = transport.requests[0].headers
-    assert headers["user-agent"] == "Mozilla/5.0 Chrome/125.0.0.0"
-    assert headers["referer"] == "https://www.douyin.com/"
-    assert headers["accept"].startswith("image/")
-    assert "cookie" not in headers
-    assert "python-httpx" not in headers["user-agent"]
 
 
 # ----------------------------- worker 搜索流程 -----------------------------

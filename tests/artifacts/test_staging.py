@@ -38,17 +38,21 @@ def async_client_factory(status_code: int, content: bytes = b""):
 
 @pytest.mark.asyncio
 async def test_douyin_http_404_preserves_terminal_status(monkeypatch) -> None:
-    from types import SimpleNamespace
+    from dataclasses import replace
+
+    from trippostcollect.application.worker_inputs import worker_config
+    from trippostcollect.platforms.entry import douyin_dependencies
 
     client = object.__new__(douyin_client.DouYinClient)
-    # T06：HTTP 依赖已迁入显式端口，继续只验证本站原 404 分类。
-    client.ports = SimpleNamespace(make_async_client=async_client_factory(404))
-    client.proxy = None
+    client.ports = replace(
+        douyin_dependencies(worker_config())["ports"].client,
+        make_async_client=async_client_factory(404),
+    )
     client.timeout = 1
-    client.headers = {"User-Agent": "test-agent"}
+    client.user_agent = "test-agent"
 
     with pytest.raises(ImageDownloadFetchError) as exc_info:
-        await client.get_aweme_media("https://example.test/missing.jpg")
+        await client.get_note_image("https://p3-pc-sign.douyinpic.com/missing.jpg")
 
     assert exc_info.value.code == "image_source_unavailable"
     assert exc_info.value.http_status == 404

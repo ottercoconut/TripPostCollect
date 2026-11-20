@@ -108,6 +108,8 @@ class FakePage:
         self.record("evaluate", script)
         if script == "() => navigator.userAgent":
             return "离线浏览器 UA"
+        if "HasUserLogin" in script:
+            return {"logged_in": True}
         if "localStorage" in script:
             return {"HasUserLogin": "1"}
         ok = self.context.authenticated
@@ -143,13 +145,12 @@ def warmup_expected(entry, scenario):
     """(成功, Chrome 启动次数, 写出快照的平台, 平台报告文件)。
 
     单平台入口：重开验证失败不写快照；--skip-reopen-verify 与 --no-close-on-success 只启动一次。
-    统一入口不传这两个开关，四个平台各启动两次；重开验证失败时只有不依赖页面接口判定的抖音写出快照。
-    微博不再写 Cookie 快照。
+    统一入口不传这两个开关，四个平台各启动两次。微博和抖音都不写 Cookie 快照。
     """
     failed = scenario == "reopen_failed"
     if entry == "unified":
         reports = {f"{RUN_DIR}/{key}.json" for key in ALL_TARGETS} | {f"{RUN_DIR}/summary.json", f"{RUN_DIR}/summary.md"}
-        snapshots = {"douyin"} if failed else set(ALL_TARGETS) - {"weibo"}
+        snapshots = set() if failed else set(ALL_TARGETS) - {"weibo", "douyin"}
         return not failed, 5 if failed else 8, snapshots, reports
     reports = {"weibo.json"} if entry == "one" else {f"{RUN_DIR}/weibo.json", f"{RUN_DIR}/summary.json"}
     return not failed, 1 if scenario in {"skip", "keep"} else 2, set(), reports
@@ -404,3 +405,21 @@ def test_weibo_warmup_does_not_write_cookie_snapshot(monkeypatch, tmp_path, scen
     assert snapshots == []
     assert result["cookie_snapshot"] is None
     assert set(result["state"]["markers"]) == {"uid_exists", "uid_truthy"}
+
+
+@pytest.mark.parametrize("scenario", ["valid", "skip", "keep"])
+def test_douyin_warmup_uses_has_user_login_and_skips_cookie_snapshot(monkeypatch, tmp_path, scenario):
+    """#222：抖音只认首页 HasUserLogin 是否为 1，不写 Cookie 快照。"""
+    root = tmp_path / "run"
+    root.mkdir()
+    fake = FakePlaywright(scenario)
+    configure(monkeypatch, warmup, fake, root)
+    args = argparse.Namespace(timeout_seconds=1, output_dir=str(root), browser_path=None,
+                              no_close_on_success=scenario == "keep", skip_reopen_verify=scenario == "skip")
+    result = asyncio.run(warmup.warmup_one(fake, "douyin", root, args))
+    snapshots = list(root.rglob(core_paths.COOKIE_SNAPSHOT_FILENAME))
+    assert snapshots == []
+    assert result["ok"] is True
+    assert result["cookie_snapshot"] is None
+    assert result["state"]["markers"] == {"HasUserLogin": True}
+    assert result["state"]["cookie_names"] == []

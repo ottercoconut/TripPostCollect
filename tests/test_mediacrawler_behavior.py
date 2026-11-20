@@ -1431,6 +1431,7 @@ def test_behavior_validation_requires_evidence_for_each_generic_platform(missing
     visits = {
         "zhihu": {"content_visit_ok": True, "request_pacing_ok": True, "continuity_ok": True},
         "weibo": {"content_visit_ok": True, "request_pacing_ok": True, "continuity_ok": True},
+        "douyin": {"content_visit_ok": True, "request_pacing_ok": True, "continuity_ok": True},
     }
 
     complete = mediacrawler_crawl.collect_behavior_validation(

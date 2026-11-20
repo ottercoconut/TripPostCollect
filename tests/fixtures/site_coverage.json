@@ -1414,7 +1414,7 @@
        "lane": "component"
       },
       {
-       "function": "tests/platforms/douyin/test_douyin_offline_drive.py::test_slider_tracks_and_login_cache_lifecycle",
+       "function": "tests/application/test_warmup_and_repair_helpers.py::test_douyin_warmup_uses_has_user_login_and_skips_cookie_snapshot",
        "lane": "component"
       },
       {
@@ -1612,7 +1612,7 @@
        "lane": "component"
       },
       {
-       "function": "tests/test_post_detail_repair.py::test_load_post_repair_targets_rejects_cross_id_target",
+       "function": "tests/platforms/douyin/test_douyin_l1.py::test_profile_http_status_is_runtime",
        "lane": "component"
       },
       {
@@ -1620,7 +1620,7 @@
        "lane": "component"
       },
       {
-       "function": "tests/platforms/douyin/test_douyin_offline_drive.py::test_root_repair_exception_chain",
+       "function": "tests/platforms/douyin/test_douyin_l1.py::test_round_stops_when_author_profile_is_forbidden",
        "lane": "component"
       }
      ]
@@ -1752,11 +1752,11 @@
        "lane": "component"
       },
       {
-       "function": "tests/platforms/douyin/test_douyin_offline_drive.py::test_root_post_form_and_signature_inputs",
+       "function": "tests/platforms/douyin/test_douyin_issue124.py::test_image_client_has_no_search_or_detail_request",
        "lane": "component"
       },
       {
-       "function": "tests/platforms/douyin/test_douyin_offline_faults.py::test_request_transport_error_is_raised_once_without_retry",
+       "function": "tests/test_network_errors_issue129.py::test_douyin_api_client_no_longer_raises_network_unreachable",
        "lane": "component"
       },
       {
@@ -2058,7 +2058,7 @@
       {
        "file": "tests/platforms/douyin/test_douyin_search_safety.py",
        "lane": "component",
-       "min_count": 20
+       "min_count": 16
       },
       {
        "file": "tests/platforms/douyin/test_douyin_issue124.py",

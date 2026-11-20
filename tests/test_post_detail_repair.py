@@ -29,12 +29,6 @@ mediacrawler = import_module("mediacrawler_crawl")
     ("platform", "post_id", "url", "expected"),
     [
         (
-            "douyin",
-            "123",
-            "https://www.douyin.com/video/123?previous_page=search_result",
-            "https://www.douyin.com/video/123",
-        ),
-        (
             "weibo",
             "456",
             "https://weibo.com/88/456",
@@ -102,22 +96,23 @@ def test_select_targets_excludes_observed_and_reports_bad_urls(tmp_path: Path) -
         """
     )
     rows = [
-        (1, "1", "https://www.douyin.com/video/1", "青岛旅游", "{}"),
+        (1, "1", "88", "https://weibo.com/88/1", "青岛旅游", "{}"),
         (
             2,
             "2",
-            "https://www.douyin.com/video/2",
+            "88",
+            "https://weibo.com/88/2",
             "青岛旅游",
             json.dumps({"content_detail_status": "detail_observed"}),
         ),
-        (3, "3", "https://example.test/video/3", "青岛旅游", "not-json"),
+        (3, "bad", "88", "https://example.test/video/3", "青岛旅游", "not-json"),
     ]
     conn.executemany(
         """
         INSERT INTO web_posts(
-            id, platform_key, platform_post_id, canonical_url, keyword,
+            id, platform_key, platform_post_id, author_platform_id, canonical_url, keyword,
             raw_sample_json, artifact_dir
-        ) VALUES (?, 'douyin', ?, ?, ?, ?, '')
+        ) VALUES (?, 'weibo', ?, ?, ?, ?, ?, '')
         """,
         rows,
     )
@@ -125,15 +120,15 @@ def test_select_targets_excludes_observed_and_reports_bad_urls(tmp_path: Path) -
 
     targets, rejected, pending = repair.select_targets(
         conn,
-        platform="douyin",
+        platform="weibo",
         post_ids=[],
         max_items=0,
     )
 
     assert pending == 2
     assert [item["platform_post_id"] for item in targets] == ["1"]
-    assert rejected[0]["platform_post_id"] == "3"
-    assert rejected[0]["reason"] == "invalid_douyin_canonical_url"
+    assert rejected[0]["platform_post_id"] == "bad"
+    assert rejected[0]["reason"] == "invalid_weibo_canonical_url"
     conn.close()
 
 
@@ -266,7 +261,6 @@ def test_user_waiver_keeps_unobserved_post_but_removes_it_from_targets(
 @pytest.mark.parametrize(
     ("platform", "detail_target"),
     [
-        ("douyin", "https://www.douyin.com/video/123"),
         ("weibo", "https://weibo.com/88/123"),
         ("zhihu", "https://www.zhihu.com/question/1/answer/123"),
     ],
@@ -303,7 +297,7 @@ def test_load_post_repair_targets_rejects_cross_id_target(tmp_path: Path) -> Non
             [
                 {
                     "platform_post_id": "123",
-                    "detail_target": "https://www.douyin.com/video/999",
+                    "detail_target": "https://weibo.com/88/999",
                     "keyword": "青岛旅游",
                 }
             ]
@@ -311,8 +305,8 @@ def test_load_post_repair_targets_rejects_cross_id_target(tmp_path: Path) -> Non
         encoding="utf-8",
     )
 
-    with pytest.raises(SystemExit, match="does not match douyin ID 123"):
-        mediacrawler.load_post_repair_targets(path, "douyin")
+    with pytest.raises(SystemExit, match="does not match weibo ID 123"):
+        mediacrawler.load_post_repair_targets(path, "weibo")
 
 
 def test_generic_repair_evidence_accounts_for_every_unrecovered_target() -> None:
@@ -984,11 +978,11 @@ def _seed_pending_douyin(db_path: Path) -> None:
         conn.execute(
             """
             INSERT INTO web_posts(
-                platform_key, platform_post_id, source_type, source_url,
+                platform_key, platform_post_id, author_platform_id, source_type, source_url,
                 canonical_url, keyword, captured_at, raw_sample_json
             ) VALUES (
-                'douyin', '123', 'search', 'https://www.douyin.com/video/123',
-                'https://www.douyin.com/video/123', '青岛崂山',
+                'weibo', '123', '88', 'search', 'https://weibo.com/88/123',
+                'https://weibo.com/88/123', '青岛崂山',
                 '2026-01-01T00:00:00+08:00', '{}'
             )
             """
@@ -1000,7 +994,7 @@ def _repair_argv(db_path: Path) -> list[str]:
     return [
         "repair_post_details.py",
         "--platform",
-        "douyin",
+        "weibo",
         "--db",
         str(db_path),
         "--keyword",
@@ -1231,7 +1225,7 @@ def test_main_sighup_still_writes_summary_and_exits_129(
                 f"repair.POST_DETAIL_REPAIR_BACKUP_ROOT = Path({str(tmp_path / 'bk')!r})",
                 "repair.REPAIR_CHILD_INTERRUPT_GRACE_SECONDS = 0.3",
                 "sys.argv = [",
-                "    'repair_post_details.py', '--platform', 'douyin', '--db',",
+                "    'repair_post_details.py', '--platform', 'weibo', '--db',",
                 f"    {str(db_path)!r}, '--keyword', '青岛旅游',",
                 "    '--batch-size', '1', '--headless',",
                 "]",

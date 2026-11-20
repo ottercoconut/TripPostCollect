@@ -768,12 +768,10 @@ async def test_missing_work_count_is_none_and_omitted_from_author_json(monkeypat
 
 def test_client_has_no_detail_http_or_signer():
     from trippostcollect.platforms.zhihu.client import ZhiHuClient
-    import execjs
 
     assert not hasattr(ZhiHuClient, "get_answer_info")
     assert not hasattr(ZhiHuClient, "get_article_info")
     assert not hasattr(ZhiHuClient, "get_video_info")
     assert not hasattr(ZhiHuClient, "_pre_headers")
-    assert callable(execjs.compile)
     with pytest.raises(ModuleNotFoundError):
         __import__("trippostcollect.platforms.zhihu.signer")

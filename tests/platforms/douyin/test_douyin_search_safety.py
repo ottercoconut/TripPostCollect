@@ -5,9 +5,7 @@ import json
 import pytest
 
 from support.douyin import config
-from dataclasses import replace
 from support.douyin import make_crawler as DouYinCrawler, refresh_settings
-from support.douyin import make_client as DouYinClient
 from trippostcollect.platforms.douyin.models import SearchResponseError
 from trippostcollect.platforms.douyin.parser import (
     DOUYIN_RESULT_LINK_SELECTOR,
@@ -252,22 +250,6 @@ def test_multi_document_chunked_stream_preserves_verify_check() -> None:
     assert raised.value.reason == "search_verify_check"
 
 
-@pytest.mark.asyncio
-async def test_direct_request_preserves_search_decode_failure(monkeypatch) -> None:
-    client = DouYinClient(
-        headers={"User-Agent": "test-agent"},
-        playwright_page=None,
-        cookie_dict={},
-    )
-
-    client.ports = replace(client.ports, make_async_client=lambda **kwargs: FakeAsyncClient())
-
-    with pytest.raises(SearchResponseError) as raised:
-        await client.request(method="GET", url="https://www.douyin.com/search")
-
-    assert raised.value.reason == "invalid_stream_chunk_header"
-
-
 def test_empty_first_page_classifier_prefers_visible_results() -> None:
     assert classify_empty_first_page(
         visible_result_count=4,
@@ -278,99 +260,6 @@ def test_empty_first_page_classifier_prefers_visible_results() -> None:
 def test_visible_result_selector_covers_new_waterfall_cards() -> None:
     assert '.search-result-card:visible' in DOUYIN_RESULT_LINK_SELECTOR
     assert '[id^="waterfall_item_"]:visible' in DOUYIN_RESULT_LINK_SELECTOR
-
-
-@pytest.mark.asyncio
-async def test_browser_search_response_is_reused_before_duplicate_api_request(
-    monkeypatch,
-) -> None:
-    payload = (
-        b'{"status_code":0,"data":[{"aweme_info":{"aweme_id":"123"}}],'
-        b'"has_more":1,"extra":{"logid":"next-search-id"}}'
-    )
-    framed = f"{len(payload):x}\r\n".encode() + payload + b"\r\n0\r\n\r\n"
-    client = DouYinClient(
-        headers={"User-Agent": "test-agent"},
-        playwright_page=None,
-        cookie_dict={},
-    )
-    await client.capture_browser_search_response(FakeBrowserResponse(framed))
-
-    async def forbidden_request(*args, **kwargs):
-        raise AssertionError("#124: search must not issue a direct HTTP request")
-
-    monkeypatch.setattr(client, "get", forbidden_request)
-    response = await client.search_info_by_keyword(keyword="青岛海滨旅游")
-    assert response["data"][0]["aweme_info"]["aweme_id"] == "123"
-    assert response["extra"]["logid"] == "next-search-id"
-
-
-@pytest.mark.asyncio
-async def test_latest_non_verify_browser_response_wins_over_prefetch_verify(
-    monkeypatch,
-) -> None:
-    verify_payload = (
-        b'{"status_code":0,"data":[],"has_more":0,'
-        b'"search_nil_info":{"search_nil_type":"verify_check"}}'
-    )
-    healthy_payload = (
-        b'{"status_code":0,"data":[{"aweme_info":{"aweme_id":"456"}}],'
-        b'"has_more":1,"extra":{"logid":"healthy-search-id"}}'
-    )
-    client = DouYinClient(
-        headers={"User-Agent": "test-agent"},
-        playwright_page=None,
-        cookie_dict={},
-    )
-    await client.capture_browser_search_response(FakeBrowserResponse(verify_payload))
-    await client.capture_browser_search_response(FakeBrowserResponse(healthy_payload))
-
-    async def forbidden_request(*args, **kwargs):
-        raise AssertionError("#124: search must not issue a direct HTTP request")
-
-    monkeypatch.setattr(client, "get", forbidden_request)
-    response = await client.search_info_by_keyword(keyword="青岛海滨旅游")
-    assert response["data"][0]["aweme_info"]["aweme_id"] == "456"
-    assert response["extra"]["logid"] == "healthy-search-id"
-
-
-@pytest.mark.asyncio
-async def test_followup_page_scrolls_for_browser_response_before_direct_request(
-    monkeypatch,
-) -> None:
-    client = DouYinClient(
-        headers={"User-Agent": "test-agent"},
-        playwright_page=None,
-        cookie_dict={},
-    )
-
-    async def fake_scroll(*, keyword: str, offset: int, search_id: str) -> bool:
-        client._observed_search_responses.append(
-            {
-                "keyword": keyword,
-                "offset": offset,
-                "search_id": search_id,
-                "payload": {
-                    "status_code": 0,
-                    "data": [{"aweme_info": {"aweme_id": "789"}}],
-                    "has_more": 1,
-                    "extra": {"logid": "request-log-id"},
-                },
-            }
-        )
-        return True
-
-    async def forbidden_request(*args, **kwargs):
-        raise AssertionError("#124: search must not issue a direct HTTP request")
-
-    monkeypatch.setattr(client, "_scroll_for_observed_search_response", fake_scroll)
-    monkeypatch.setattr(client, "get", forbidden_request)
-    response = await client.search_info_by_keyword(
-        keyword="青岛海滨旅游",
-        offset=40,
-        search_id="stable-search-id",
-    )
-    assert response["data"][0]["aweme_info"]["aweme_id"] == "789"
 
 
 @pytest.mark.asyncio

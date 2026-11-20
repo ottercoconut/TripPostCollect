@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import base64
 import json
+from dataclasses import replace
 from typing import Any
+from urllib.parse import quote
 
 import pytest
 
@@ -62,6 +65,17 @@ def profile_user(*, uid: str = UID, sec_uid: str = SEC, follower: int = 42) -> d
             "signature": "青岛",
         },
     }
+
+
+class _Mouse:
+    def __init__(self, page: Page) -> None:
+        self.page = page
+
+    async def move(self, *args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+
+    async def wheel(self, *args: Any) -> None:
+        del args
 
 
 class CloseControl:
@@ -196,6 +210,11 @@ class Page:
         self.clicks: list[str] = []
         self.closed = False
         self.context: "Context | None" = None
+        self.search_payload: dict[str, Any] | None = None
+        self.search_url = ""
+        self.gotos: list[str] = []
+        self.viewport_size = {"width": 1450, "height": 900}
+        self.mouse = _Mouse(self)
         self.listeners: dict[str, list] = {}
         self.fronts = 0
 
@@ -249,14 +268,28 @@ class Page:
     async def close(self) -> None:
         self.closed = True
 
+    async def goto(self, url: str, **kwargs: Any) -> None:
+        del kwargs
+        self.url = url
+        self.gotos.append(url)
+        if self.search_payload is not None and "/search/" in url and self.search_url:
+            self.emit(Response(self, self.search_payload, url=self.search_url))
+
     def emit(self, response: "Response") -> None:
         for callback in list(self.listeners.get("response", [])):
             callback(response)
 
 
 class Response:
-    def __init__(self, page: Page, payload: dict[str, Any], *, status: int = 200) -> None:
-        self.url = "https://www.douyin.com/aweme/v1/web/user/profile/other/?sec_user_id=target"
+    def __init__(
+        self,
+        page: Page,
+        payload: dict[str, Any] | bytes,
+        *,
+        status: int = 200,
+        url: str | None = None,
+    ) -> None:
+        self.url = url or "https://www.douyin.com/aweme/v1/web/user/profile/other/?sec_user_id=target"
         self.status = status
         self.headers: dict[str, str] = {}
         self.request = type("Request", (), {
@@ -266,7 +299,10 @@ class Response:
             "frame": type("Frame", (), {"page": page})(),
             "post_data": None,
         })()
-        self._body = json.dumps(payload).encode()
+        if isinstance(payload, (bytes, bytearray)):
+            self._body = bytes(payload)
+        else:
+            self._body = json.dumps(payload).encode()
 
     async def body(self) -> bytes:
         return self._body
@@ -355,7 +391,7 @@ def lines_of(capture: DouyinPageCapture) -> list[dict[str, Any]]:
 
 def test_policy_names_match_the_page_rules():
     policy = VISIT_POLICIES["douyin"]
-    assert "douyin" not in VISIT_GATED_PLATFORMS
+    assert "douyin" in VISIT_GATED_PLATFORMS
     assert "repair" not in policy.chains
     assert policy.spec("discovery", "search_results").rule == "douyin.search_response"
     assert policy.spec("discovery", "search_results").source == "page_response"
@@ -421,17 +457,17 @@ async def test_search_ledger_records_each_page_and_skips_video_details(monkeypat
     capture, pages, page = harness(tmp_path)
     opened: list[str] = []
 
-    class _Client:
-        last_search_http_status = 200
-
-        async def search_info_by_keyword(self, **kwargs):
-            del kwargs
-            return {
-                "status_code": 0,
-                "data": [{"aweme_info": video_aweme()}, {"aweme_info": image_aweme()}],
-                "has_more": 0,
-                "extra": {"logid": "search-1"},
-            }
+    payload = {
+        "status_code": 0,
+        "data": [{"aweme_info": video_aweme()}, {"aweme_info": image_aweme()}],
+        "has_more": 0,
+        "extra": {"logid": "search-1"},
+    }
+    page.emit(Response(
+        page,
+        payload,
+        url=f"https://www.douyin.com/aweme/v1/web/general/search/stream/?keyword={quote('青岛')}&offset=0",
+    ))
 
     real_open = pages.open_from_search
 
@@ -447,7 +483,6 @@ async def test_search_ledger_records_each_page_and_skips_video_details(monkeypat
     ]
     crawler = DouYinCrawler()
     refresh_settings(crawler)
-    crawler.dy_client = _Client()
     crawler.capture = capture
     crawler.detail_pages = pages
     crawler.get_aweme_images = _async_none
@@ -620,6 +655,7 @@ async def test_author_link_must_match_sec_uid_and_sit_in_the_sidebar(monkeypatch
     [
         (401, {"status_code": 0, "user": {"uid": UID, "sec_uid": SEC}}, "login_required"),
         (403, {"message": "Blocked by ArgusSecurityPlugin"}, "blocked_or_forbidden"),
+        (403, b"<html>blocked</html>", "blocked_or_forbidden"),
         (429, {"status_code": 0}, "rate_limited"),
     ],
 )
@@ -645,6 +681,242 @@ async def test_missing_profile_is_candidate_failure(monkeypatch, tmp_path):
         await pages.open_from_search(image_aweme())
     assert raised.value.code == "author_profile_missing"
     assert raised.value.runtime_blocking is False
+
+
+PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+)
+ROUND_KEYWORD = "青岛崂山旅游攻略"
+
+
+class _ImageClient:
+    def __init__(self, calls: list[dict[str, Any]]) -> None:
+        self.calls = calls
+
+    async def __aenter__(self) -> "_ImageClient":
+        return self
+
+    async def __aexit__(self, *args: Any) -> bool:
+        return False
+
+    def stream(self, method: str, url: str, timeout: float, headers: dict[str, str]) -> "_ImageBody":
+        del method, timeout
+        self.calls.append({"url": url, "headers": dict(headers)})
+        return _ImageBody(PNG)
+
+
+class _ImageBody:
+    def __init__(self, body: bytes) -> None:
+        self.status_code = 200
+        self._body = body
+
+    async def __aenter__(self) -> "_ImageBody":
+        return self
+
+    async def __aexit__(self, *args: Any) -> bool:
+        return False
+
+    def raise_for_status(self) -> None:
+        return None
+
+    async def aiter_bytes(self):
+        yield self._body
+
+
+class _Playwright:
+    def __init__(self, context: Context) -> None:
+        self._context = context
+
+    async def __aenter__(self) -> "_Playwright":
+        return self
+
+    async def __aexit__(self, *args: Any) -> bool:
+        return False
+
+    @property
+    def chromium(self) -> "_Playwright":
+        return self
+
+
+def _round_page(keyword: str, payload: dict[str, Any]) -> Page:
+    page = Page("https://www.douyin.com/")
+    page.search_payload = payload
+    page.search_url = (
+        "https://www.douyin.com/aweme/v1/web/general/search/stream/"
+        f"?keyword={quote(keyword)}&offset=0"
+    )
+    return page
+
+
+def _prepare_round(monkeypatch: pytest.MonkeyPatch, tmp_path, page: Page):
+    from trippostcollect.platforms.douyin import core as douyin_core
+
+    state_path = tmp_path / "state.json"
+    state_path.write_text('{"events": []}', encoding="utf-8")
+    evidence = tmp_path / "behavior.jsonl"
+    evidence.write_text("", encoding="utf-8")
+    monkeypatch.setenv("TRIPPOSTCOLLECT_STRIP_AUTHOR_AVATARS", "1")
+    monkeypatch.setenv("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", str(state_path))
+    monkeypatch.setenv("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE", str(evidence))
+    monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
+    monkeypatch.setattr(config, "SAVE_LOGIN_STATE", True)
+    monkeypatch.setattr(config, "ENABLE_CDP_MODE", False)
+    monkeypatch.setattr(config, "ENABLE_GET_MEIDAS", True)
+    monkeypatch.setattr(config, "CRAWLER_TYPE", "search")
+    monkeypatch.setattr(config, "KEYWORDS", ROUND_KEYWORD)
+    monkeypatch.setattr(config, "CRAWLER_MAX_SLEEP_SEC", 0)
+    monkeypatch.setattr(config, "HEADLESS", True)
+    monkeypatch.setattr(config, "SAVE_DATA_OPTION", "jsonl")
+    monkeypatch.setattr(config, "SAVE_DATA_PATH", str(tmp_path / "out"))
+    for name in (
+        "DETAIL_DWELL_SECONDS",
+        "AUTHOR_TAB_HOLD_SECONDS",
+        "SEARCH_RESULT_PAUSE_SECONDS",
+        "AUTHOR_CLICK_PAUSE_SECONDS",
+    ):
+        monkeypatch.setattr(detail_page, name, (0.0, 0.0))
+    monkeypatch.setattr(douyin_core.random, "random", lambda: 0.0)
+    context = Context(page)
+    calls: list[dict[str, Any]] = []
+
+    async def launch(*args: Any, **kwargs: Any) -> Context:
+        del args, kwargs
+        return context
+
+    def factory(**kwargs: Any) -> _ImageClient:
+        assert kwargs.get("proxy") is None
+        return _ImageClient(calls)
+
+    crawler = DouYinCrawler()
+    crawler.ports = replace(
+        crawler.ports,
+        async_playwright=lambda: _Playwright(context),
+        launch_profile_context=launch,
+        client=replace(crawler.ports.client, make_async_client=factory),
+    )
+    return crawler, state_path, evidence, calls
+
+
+def _events(state_path, kind: str) -> list[dict[str, Any]]:
+    payload = json.loads(state_path.read_text(encoding="utf-8"))
+    return [event["details"] for event in payload["events"] if event.get("type") == kind]
+
+
+@pytest.mark.asyncio
+async def test_round_trip_records_visit_chain_images_and_exhaustion(monkeypatch, tmp_path):
+    """假浏览器跑通登录、搜索、浮层、作者、正文图和来源耗尽。"""
+
+    image = image_aweme()
+    video = video_aweme("202")
+    page = _round_page(ROUND_KEYWORD, {
+        "status_code": 0,
+        "has_more": 0,
+        "extra": {"logid": "round-log"},
+        "data": [{"aweme_info": video}, {"aweme_info": image}],
+    })
+    _arm_author(page)
+    crawler, state_path, evidence, calls = _prepare_round(monkeypatch, tmp_path, page)
+    await crawler.start()
+
+    records = []
+    for path in (tmp_path / "out").rglob("*.jsonl"):
+        if path.name == "image_manifest.jsonl":
+            continue
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                records.append(json.loads(line))
+    assert [item.get("aweme_id") for item in records] == [AWEME]
+    record = records[0]
+    assert record["content_detail_source"] == "search_aweme_info"
+    assert record["content_detail_status"] == "detail_observed"
+    assert record["creator_hash"] == UID
+    assert record["image_assets"][0]["source_asset_key"].startswith("douyin:uri:")
+    assert calls and "douyinpic.com" in calls[0]["url"]
+    headers = {key.lower(): value for key, value in calls[0]["headers"].items()}
+    assert headers["referer"] == "https://www.douyin.com/"
+    assert headers["user-agent"] == "TestAgent/222"
+    assert "cookie" not in headers
+    assert headers["accept"].startswith("image/")
+
+    ledger = evidence.with_name(f"{evidence.stem}.content_visits.jsonl")
+    manifests = list((tmp_path / "out").rglob("image_manifest.jsonl"))
+    assert manifests
+    stopped = _events(state_path, "adaptive_search_stopped")
+    assert stopped[-1]["stop_reason"] == "source_exhausted"
+    assert stopped[-1]["stop_detail"] == "has_more_false"
+    assert stopped[-1]["source_visit_id"]
+    result = validate_content_visits(
+        [record],
+        [ledger],
+        platform="douyin",
+        mode="discovery",
+        manifests=manifests,
+        stop_event=stopped[-1],
+    )
+    assert result["content_visit_ok"] is True, result
+    missing_images = json.loads(json.dumps(record))
+    missing_images["content_visit_refs"]["images"] = []
+    missing = validate_content_visits(
+        [missing_images], [ledger], platform="douyin", mode="discovery",
+        manifests=manifests, stop_event=stopped[-1],
+    )
+    assert missing["content_visit_ok"] is False and "R5" in missing["problem_counts"]
+    swapped_author = json.loads(json.dumps(record))
+    swapped_author["creator_hash"] = "other-author"
+    swapped = validate_content_visits(
+        [swapped_author], [ledger], platform="douyin", mode="discovery",
+        manifests=manifests, stop_event=stopped[-1],
+    )
+    assert swapped["content_visit_ok"] is False and "R4" in swapped["problem_counts"]
+    broken_ref = json.loads(json.dumps(record))
+    broken_ref["content_visit_refs"]["note_detail"] = "missing-visit"
+    broken = validate_content_visits(
+        [broken_ref], [ledger], platform="douyin", mode="discovery",
+        manifests=manifests, stop_event=stopped[-1],
+    )
+    assert broken["content_visit_ok"] is False and "R1" in broken["problem_counts"]
+    search_items = []
+    for line in ledger.read_text(encoding="utf-8").splitlines():
+        item = json.loads(line)
+        if item.get("kind") == "visit" and item.get("stage") == "search_results":
+            search_items = item.get("items") or []
+    types = {item["id"]: item["type"] for item in search_items}
+    assert types["202"] == "video"
+    assert types[AWEME] == "image"
+    assert "202" in stopped[-1]["candidate_identities"]
+    assert AWEME in stopped[-1]["candidate_identities"]
+    assert all(item.get("aweme_id") != "202" for item in records)
+
+
+@pytest.mark.asyncio
+async def test_round_stops_before_search_when_logged_out(monkeypatch, tmp_path):
+    page = _round_page(ROUND_KEYWORD, {"status_code": 0, "data": [], "has_more": 0, "extra": {}})
+    page.logged_in = False
+    crawler, state_path, _evidence, calls = _prepare_round(monkeypatch, tmp_path, page)
+    await crawler.start()
+    assert all("/search/" not in url for url in page.gotos)
+    assert calls == []
+    stopped = _events(state_path, "adaptive_search_stopped")
+    assert stopped[-1]["stop_detail"] == "login_required"
+    assert stopped[-1]["stop_reason"] != "source_exhausted"
+
+
+@pytest.mark.asyncio
+async def test_round_stops_when_author_profile_is_forbidden(monkeypatch, tmp_path):
+    page = _round_page(ROUND_KEYWORD, {
+        "status_code": 0,
+        "has_more": 1,
+        "extra": {"logid": "round-log"},
+        "data": [{"aweme_info": image_aweme()}],
+    })
+    _arm_author(page)
+    page.profiles = [(403, b"<html>blocked</html>")]
+    crawler, state_path, _evidence, calls = _prepare_round(monkeypatch, tmp_path, page)
+    await crawler.start()
+    assert calls == []
+    stopped = _events(state_path, "adaptive_search_stopped")
+    assert stopped[-1]["stop_reason"] == "runtime_failed"
+    assert stopped[-1]["stop_detail"] == "blocked_or_forbidden"
 
 
 def _arm_author(page: Page) -> None:

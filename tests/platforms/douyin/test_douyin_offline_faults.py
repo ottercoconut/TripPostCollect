@@ -8,7 +8,6 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 import json
 from unittest.mock import AsyncMock
 
@@ -16,9 +15,6 @@ import httpx
 import pytest
 
 from support.douyin import config, make_crawler as DouYinCrawler, install_detail_passthrough
-from trippostcollect.platforms import entry
-from trippostcollect.platforms.douyin.client import DouYinClient
-from trippostcollect.platforms.douyin.models import PlatformRuntimeError
 
 
 class Transport:
@@ -65,29 +61,6 @@ def prepare(monkeypatch, tmp_path):
 def events_of(state_path, kind):
     return [event["details"] for event in json.loads(state_path.read_text(encoding="utf-8"))["events"]
             if event["type"] == kind]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("path", [
-    "/aweme/v1/web/general/search/single/",
-    "/aweme/v1/web/user/profile/other/",
-    "/aweme/v1/web/aweme/detail/",
-])
-async def test_request_transport_error_is_raised_once_without_retry(path):
-    transport = Transport()
-    ports = entry.douyin_dependencies(config)["ports"].client
-    client = DouYinClient(
-        headers={"User-Agent": "t13", "Cookie": ""}, playwright_page=None, cookie_dict={},
-        ports=replace(ports, make_async_client=transport),
-    )
-
-    # #129：只请求一次不变；传输层异常转为运行级 network_unreachable，原异常保留为 __cause__。
-    with pytest.raises(PlatformRuntimeError) as caught:
-        await client.request("GET", "https://www.douyin.com" + path)
-
-    assert caught.value.code == "network_unreachable"
-    assert isinstance(caught.value.__cause__, httpx.ConnectError)
-    assert transport.calls == [path]
 
 
 @pytest.mark.asyncio
