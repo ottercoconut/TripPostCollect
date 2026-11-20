@@ -7,8 +7,8 @@ from urllib.parse import urlsplit
 
 from trippostcollect.application.contracts import ImageStagingError
 from trippostcollect.records.identity import platform_nickname, platform_user_id
-from trippostcollect.runtime.helpers import extract_url_params_to_dict, normalize_image_url
-from trippostcollect.platforms.douyin.models import SearchResponseError, VideoUrlInfo
+from trippostcollect.runtime.helpers import normalize_image_url
+from trippostcollect.platforms.douyin.models import SearchResponseError
 
 DOUYIN_RESULT_LINK_SELECTOR = ', '.join(
     (
@@ -37,9 +37,8 @@ DOUYIN_PROFILE_VERIFY_EVIDENCE_KEYS = (
     "verification_type",
     "account_cert_info",
 )
-# #116：内容记录如实标注正文来源；两种来源都必须通过 douyin_content_detail_observed。
+# #116：搜索卡片正文来源。记录须通过 douyin_content_detail_observed。
 DOUYIN_SEARCH_CONTENT_SOURCE = "search_aweme_info"
-DOUYIN_DETAIL_CONTENT_SOURCE = "aweme_detail"
 DOUYIN_IMAGE_NOTE_AWEME_TYPES = frozenset({"68"})
 DOUYIN_NO_RESULT_MARKERS = (
     "暂无搜索结果",
@@ -49,129 +48,6 @@ DOUYIN_NO_RESULT_MARKERS = (
     "搜索结果为空",
     "换个关键词试试",
 )
-
-
-def _find_nested_platform_record(
-    value: Any,
-    target_id: str,
-    *,
-    id_keys: tuple[str, ...],
-    shape_keys: tuple[str, ...],
-    depth: int = 0,
-) -> dict[str, Any] | None:
-    if depth > 12:
-        return None
-    if isinstance(value, dict):
-        identity = next(
-            (
-                str(value.get(key) or "")
-                for key in id_keys
-                if value.get(key) not in (None, "")
-            ),
-            "",
-        )
-        if identity == str(target_id) and any(key in value for key in shape_keys):
-            return value
-        for nested in value.values():
-            found = _find_nested_platform_record(
-                nested,
-                target_id,
-                id_keys=id_keys,
-                shape_keys=shape_keys,
-                depth=depth + 1,
-            )
-            if found is not None:
-                return found
-    elif isinstance(value, list):
-        for nested in value:
-            found = _find_nested_platform_record(
-                nested,
-                target_id,
-                id_keys=id_keys,
-                shape_keys=shape_keys,
-                depth=depth + 1,
-            )
-            if found is not None:
-                return found
-    return None
-
-
-#!/usr/bin/env python
-# TripPostCollect：T06 按职责迁入；来源 fork 5a68eb5098fcd17308c7fe0b9d53916ae839b303，原许可保留。
-def _find_douyin_detail(value: Any, aweme_id: str) -> dict[str, Any] | None:
-    return _find_nested_platform_record(
-        value,
-        aweme_id,
-        id_keys=("aweme_id",),
-        shape_keys=("desc", "author", "statistics", "images", "video", "create_time"),
-    )
-
-
-# -*- coding: utf-8 -*-
-# Copyright (c) 2025 relakkes@gmail.com
-#
-# This file is part of MediaCrawler project.
-# Repository: https://github.com/NanmiCoder/MediaCrawler/blob/main/media_platform/douyin/help.py
-# GitHub: https://github.com/NanmiCoder
-# Licensed under NON-COMMERCIAL LEARNING LICENSE 1.1
-#
-
-# 声明：本代码仅供学习和研究目的使用。使用者应遵守以下原则：
-# 1. 不得用于任何商业用途。
-# 2. 使用时应遵守目标平台的使用条款和robots.txt规则。
-# 3. 不得进行大规模爬取或对平台造成运营干扰。
-# 4. 应合理控制请求频率，避免给目标平台带来不必要的负担。
-# 5. 不得用于任何非法或不当的用途。
-#
-# 详细许可条款请参阅项目根目录下的LICENSE文件。
-# 使用本代码即表示您同意遵守上述原则和LICENSE中的所有条款。
-
-
-# -*- coding: utf-8 -*-
-# @Author  : relakkes@gmail.com
-# @Name: Programmer Ajiang-Relakkes
-# @Time    : 2024/6/10 02:24
-# @Desc    : Douyin field helpers.
-
-# TripPostCollect：T06 按职责迁入；来源 fork 5a68eb5098fcd17308c7fe0b9d53916ae839b303，原许可保留。
-def parse_video_info_from_url(url: str) -> VideoUrlInfo:
-    """
-    Parse video ID from Douyin video URL
-    Supports the following formats:
-    1. Normal video link: https://www.douyin.com/video/7525082444551310602
-    2. Link with modal_id parameter:
-       - https://www.douyin.com/user/MS4wLjABAAAATJPY7LAlaa5X-c8uNdWkvz0jUGgpw4eeXIwu_8BhvqE?modal_id=7525082444551310602
-       - https://www.douyin.com/root/search/python?modal_id=7471165520058862848
-    3. Short link: https://v.douyin.com/iF12345ABC/ (requires client parsing)
-    4. Pure ID: 7525082444551310602
-
-    Args:
-        url: Douyin video link or ID
-    Returns:
-        VideoUrlInfo: Object containing video ID
-    """
-    # If it's a pure numeric ID, return directly
-    if url.isdigit():
-        return VideoUrlInfo(aweme_id=url, url_type="normal")
-
-    # Check if it's a short link (v.douyin.com)
-    if "v.douyin.com" in url or url.startswith("http") and len(url) < 50 and "video" not in url:
-        return VideoUrlInfo(aweme_id="", url_type="short")  # Requires client parsing
-
-    # Try to extract modal_id from URL parameters
-    params = extract_url_params_to_dict(url)
-    modal_id = params.get("modal_id")
-    if modal_id:
-        return VideoUrlInfo(aweme_id=modal_id, url_type="modal")
-
-    # Extract ID from standard video URL: /video/number
-    video_pattern = r'/video/(\d+)'
-    match = re.search(video_pattern, url)
-    if match:
-        aweme_id = match.group(1)
-        return VideoUrlInfo(aweme_id=aweme_id, url_type="normal")
-
-    raise ValueError(f"Unable to parse video ID from URL: {url}")
 
 
 # TripPostCollect：T06 按职责迁入；来源 fork 5a68eb5098fcd17308c7fe0b9d53916ae839b303，原许可保留。
@@ -677,7 +553,7 @@ def _extract_note_image_assets(aweme_detail: Dict) -> List[Dict]:
     return assets
 
 
-# TripPostCollect #116：图文判定与正文来源证据，搜索卡片和详情两条路径共用。
+# TripPostCollect #116：图文判定与正文来源证据。搜索卡片按 aweme_type 或正文图识别图文。
 def is_douyin_image_note(aweme_item: Dict) -> bool:
     """aweme_type 或正文图证明是图文；其余候选按视频计入已处理，不写内容记录。"""
     return (
@@ -687,7 +563,7 @@ def is_douyin_image_note(aweme_item: Dict) -> bool:
 
 
 def douyin_content_detail_observed(aweme_item: Dict, expected_aweme_id: str) -> bool:
-    """#116：搜索卡片与详情都必须是同一 aweme_id 的图文，并带非空 desc、发帖时间和作者 uid。
+    """#116：搜索卡片必须是同一 aweme_id 的图文，并带非空 desc、发帖时间和作者 uid。
 
     desc 为空时不能用标题或封面文字顶替。
     """
@@ -813,10 +689,3 @@ def douyin_source_asset_key(uri: str | None, source_url: str) -> str:
     normalized = normalize_image_url(source_url)
     digest = sha256(urlsplit(normalized).path.encode("utf-8")).hexdigest()
     return f"douyin:urlsha256:{digest}"
-
-
-def _douyin_detail_urls(aweme_id: str) -> tuple[str, str]:
-    return (
-        f"https://www.douyin.com/note/{aweme_id}",
-        f"https://www.douyin.com/video/{aweme_id}",
-    )

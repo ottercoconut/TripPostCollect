@@ -30,7 +30,6 @@ from trippostcollect.runtime import worker
 
 _config = None
 _weibo_post_repair = False
-_douyin_browser_detail_fallback = False
 _xhs_repair = False
 
 
@@ -69,10 +68,9 @@ def current_config():
 
 
 def install_hooks() -> None:
-    global _weibo_post_repair, _douyin_browser_detail_fallback, _xhs_repair
+    global _weibo_post_repair, _xhs_repair
 
     from trippostcollect.application.worker_inputs import (
-        douyin_browser_detail_fallback_reader,
         weibo_input_readers,
         xhs_repair_reader,
     )
@@ -85,7 +83,6 @@ def install_hooks() -> None:
     _xhs_repair = xhs_repair_reader()()
     # 原 hook 在这里读取修复开关；新客户端只接收该布尔值，不修改 fork 类。
     _weibo_post_repair = weibo_input_readers().post_repair()
-    _douyin_browser_detail_fallback = douyin_browser_detail_fallback_reader()()
 
 
 def weibo_dependencies(config, *, post_repair=False):
@@ -225,17 +222,17 @@ def douyin_dependencies(config):
 
     from playwright.async_api import async_playwright
     from trippostcollect.application.contracts import (
-        DouyinSettings, DouyinClientPorts, DouyinLoginPorts, DouyinCrawlerPorts,
+        DouyinSettings, DouyinClientPorts, DouyinCrawlerPorts,
     )
     from trippostcollect.application.candidates import AdaptiveAccumulator
     from trippostcollect.application.events import append_worker_execution_event as append_execution_event
-    from trippostcollect.application.worker_inputs import douyin_readers, _enabled
+    from trippostcollect.application.worker_inputs import _enabled
     from trippostcollect.artifacts.evidence import write_evidence
     from trippostcollect.artifacts.image_staging import PostImageStager
     from trippostcollect.artifacts.jsonl import AsyncFileWriter, JsonlContentStore
     from trippostcollect.db.discovery_read import existing_platform_identities
     from trippostcollect.platforms.douyin.parser import douyin_source_asset_key
-    from trippostcollect.runtime import behavior, login_helpers
+    from trippostcollect.runtime import behavior
     from trippostcollect.runtime.browser import CDPBrowserManager, CDPBrowserSettings
     from trippostcollect.runtime.browser_runtime import launch_profile_context
     from trippostcollect.runtime.http import make_async_client
@@ -299,7 +296,6 @@ def douyin_dependencies(config):
 
     return {
         "settings": settings,
-        "inputs": douyin_readers(),
         "ports": DouyinCrawlerPorts(
             client=DouyinClientPorts(
                 make_async_client=client_factory,
@@ -307,10 +303,6 @@ def douyin_dependencies(config):
                 classified_http_image_error=classified_http_image_error,
                 image_max_bytes=IMAGE_DOWNLOAD_MAX_BYTES,
             ),
-            login=DouyinLoginPorts(partial(
-                login_helpers.find_login_qrcode, make_async_client=client_factory,
-            ), login_helpers.show_qrcode),
-            browser_detail_fallback=_douyin_browser_detail_fallback,
             async_playwright=async_playwright,
             cdp_manager=partial(CDPBrowserManager, browser_settings, project_browser_args=behavior.project_browser_args),
             project_browser_args=behavior.project_browser_args,

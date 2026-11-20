@@ -27,7 +27,7 @@ from hashlib import sha256
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 from playwright.async_api import BrowserContext, BrowserType, Page, Playwright
-from trippostcollect.application.contracts import DouyinSettings, DouyinReaders, DouyinCrawlerPorts, ImageStagingError
+from trippostcollect.application.contracts import DouyinSettings, DouyinCrawlerPorts, ImageStagingError
 from trippostcollect.core.paths import platform_profile_dir
 from trippostcollect.records.topic_relevance import topic_relevant_for_web_post
 from trippostcollect.runtime.image_retry import ImageDownloadFetchError, is_runtime_blocking_image_error
@@ -49,9 +49,8 @@ class DouYinCrawler:
     browser_context: BrowserContext
     cdp_manager: Any
 
-    def __init__(self, *, settings: DouyinSettings, inputs: DouyinReaders, ports: DouyinCrawlerPorts) -> None:
+    def __init__(self, *, settings: DouyinSettings, ports: DouyinCrawlerPorts) -> None:
         self.settings = settings
-        self.inputs = inputs
         self.ports = ports
         self.source_keyword = ""
         self.crawler_type = ""

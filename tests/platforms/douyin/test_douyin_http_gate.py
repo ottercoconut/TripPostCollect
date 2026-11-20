@@ -1,81 +1,19 @@
-"""#116 抖音 HTTP 状态分类、请求头与 worker 有效性门禁的离线回归。
+"""#116 抖音搜索流程的离线回归：空 extra、视频候选、作者资料与平台阻断。
 
-只替换 httpx 传输与搜索客户端边界；状态分类、作者补全与写出判定走真实实现。
+不访问网络。作者资料由浮层替身提供。
 """
 
 from __future__ import annotations
 
-from dataclasses import replace
 import json
 from unittest.mock import AsyncMock
 
-import httpx
 import pytest
 
 from support.douyin import config, make_crawler as DouYinCrawler, install_detail_passthrough
-from trippostcollect.platforms import entry
 from trippostcollect.platforms.douyin import core as douyin_core
-from trippostcollect.platforms.douyin.client import DouYinClient
 from trippostcollect.platforms.douyin.detail_page import DouyinDetailFetchError
 from trippostcollect.platforms.douyin.models import PlatformRuntimeError
-
-ARGUS_BODY = b"Blocked by ArgusSecurityPlugin Uifid Not Found"
-
-
-class Transport:
-    """记录每次请求并按路径返回预置响应；不访问网络。"""
-
-    def __init__(self, responder):
-        self.responder = responder
-        self.requests: list[httpx.Request] = []
-
-    def __call__(self, **kwargs):
-        return self
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *args):
-        return False
-
-    async def request(self, method, url, **kwargs):
-        request = httpx.Request(method, url, params=kwargs.get("params"), headers=kwargs.get("headers"))
-        self.requests.append(request)
-        status, body = self.responder(request)
-        return httpx.Response(status, content=body, request=request)
-
-
-class Page:
-    """__process_req_params 只读取浏览器事实与 localStorage。"""
-
-    def on(self, *args):
-        pass
-
-    async def evaluate(self, expression, *args):
-        if expression == "() => window.localStorage":
-            return {"xmst": "token"}
-        return {"userAgent": "Mozilla/5.0 Chrome/125.0.0.0", "language": "zh-CN", "platform": "MacIntel"}
-
-
-def make_client(responder, *, cookie_dict=None, page=None):
-    transport = Transport(responder)
-    ports = entry.douyin_dependencies(config)["ports"].client
-    client = DouYinClient(
-        headers={
-            "User-Agent": "Mozilla/5.0 Chrome/125.0.0.0",
-            "Cookie": "sessionid=secret",
-            "Origin": "https://www.douyin.com/",
-            "Referer": "https://www.douyin.com/",
-        },
-        playwright_page=page,
-        cookie_dict=cookie_dict or {},
-        ports=replace(ports, make_async_client=transport),
-    )
-    return client, transport
-
-
-async def signed_bogus(*args):
-    return "fixture-bogus"
 
 
 # ----------------------------- worker 搜索流程 -----------------------------
@@ -85,10 +23,6 @@ def prepare(monkeypatch, tmp_path):
     state_path = tmp_path / "state.json"
     state_path.write_text('{"events": []}', encoding="utf-8")
     monkeypatch.setenv("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", str(state_path))
-    monkeypatch.setenv("TRIPPOSTCOLLECT_DOUYIN_ENRICH_CREATORS", "1")
-    monkeypatch.setenv("TRIPPOSTCOLLECT_DOUYIN_ENRICH_ONLY_IMAGES", "1")
-    monkeypatch.setenv("TRIPPOSTCOLLECT_DOUYIN_MAX_CREATOR_ENRICH", "-1")
-    monkeypatch.setenv("TRIPPOSTCOLLECT_DOUYIN_CREATOR_SLEEP_SECONDS", "0")
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
     monkeypatch.setattr(config, "START_PAGE", 1)
     monkeypatch.setattr(config, "KEYWORDS", "青岛旅游")
@@ -134,7 +68,6 @@ class SearchClient:
         self.profile = profile
         self.extra = extra
         self.profile_calls: list[str] = []
-        self.get_aweme_media = AsyncMock(return_value=b"")
 
     async def search_info_by_keyword(self, **kwargs):
         return {"status_code": 0, "data": [{"aweme_info": item} for item in self.items],

@@ -1,4 +1,4 @@
-"""抖音离线边界：依赖方向、搜索截获、worker 装配与签名输入。
+"""抖音离线边界：依赖方向、空首页分类与 worker 装配。
 
 #222 起整轮搜索驱动不再收集。见 tests/support/douyin_issue222_deviation.py。
 """
@@ -42,8 +42,7 @@ def aweme(post_id):
 
 def test_dependency_direction():
     allowed_runtime = {
-        "trippostcollect.runtime.helpers": {"extract_url_params_to_dict", "normalize_image_url"},
-        "trippostcollect.runtime.cookies": {"convert_cookies", "convert_str_cookie_to_dict"},
+        "trippostcollect.runtime.helpers": {"normalize_image_url"},
         "trippostcollect.runtime.image_retry": {
             "ImageDownloadFetchError", "classified_http_image_error", "is_runtime_blocking_image_error",
         },
@@ -101,7 +100,6 @@ def test_worker_assembly_from_arbitrary_cwd(tmp_path):
         "cls=load_crawler('dy'); crawler=cls()\n"
         "assert cls.__module__ == 'trippostcollect.platforms.douyin.core'\n"
         "assert not any(n.startswith(('media_platform.douyin','store.douyin')) for n in sys.modules)\n"
-        "assert crawler.ports.browser_detail_fallback is False\n"
         "print(json.dumps([load_crawler(code).__name__ for code in ('wb','zhihu','xhs')]))\n"
     )
     environment = dict(os.environ, PYTHONPATH=str(ROOT / "src"))
@@ -109,17 +107,5 @@ def test_worker_assembly_from_arbitrary_cwd(tmp_path):
                             capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, result.stderr[-3000:]
     assert json.loads(result.stdout.splitlines()[-1]) == ["WeiboCrawler", "ZhihuCrawler", "XiaoHongShuCrawler"]
-
-
-REPAIR_CASES = [(False, True), (True, True), (True, False)]
-NAVIGATION_FAILED = ("browser detail response did not contain aweme_detail; attempts=["
-                     "'note:reason=navigation_or_response:Error:payload_keys=[]', "
-                     "'video:reason=navigation_or_response:Error:payload_keys=[]']")
-REPAIR_EXPECTED = {
-    (False, True): ("RuntimeError", NAVIGATION_FAILED, "NoneType", "None", [{"timeout": 30000}] * 2),
-    (True, True): ("RuntimeError", NAVIGATION_FAILED, "ValueError", "原详情请求失败", [{"timeout": 30000}] * 2),
-    (True, False): ("RuntimeError", "Douyin browser detail fallback requires a Playwright page",
-                    "ValueError", "原详情请求失败", []),
-}
 
 

@@ -27,11 +27,10 @@ def refresh_settings(crawler):
     """旧用例在构造后修改全局配置；迁入后显式替换该测试实例切片。"""
     dependencies = entry.douyin_dependencies(config)
     crawler.settings = dependencies["settings"]
-    crawler.inputs = dependencies["inputs"]
 
 
 def install_detail_passthrough(crawler, *, with_profile: bool = True):
-    """搜索单测不走浮层。补上作者资料，避免正式路径去调 httpx。"""
+    """搜索单测不走浮层。补上作者资料，供粉丝量与主页字段判定。"""
 
     class _Pages:
         calls: list[str] = []

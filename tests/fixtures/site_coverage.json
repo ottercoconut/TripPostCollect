@@ -1604,14 +1604,6 @@
        ]
       },
       {
-       "function": "tests/test_residual_detail_fallbacks.py::test_douyin_repair_fallback_tries_note_before_video",
-       "lane": "component"
-      },
-      {
-       "function": "tests/test_residual_detail_fallbacks.py::test_douyin_nested_detail_rejects_id_only_shell",
-       "lane": "component"
-      },
-      {
        "function": "tests/platforms/douyin/test_douyin_l1.py::test_profile_http_status_is_runtime",
        "lane": "component"
       },

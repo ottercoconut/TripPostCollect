@@ -222,16 +222,11 @@ class PagedSearch:
             "extra": {"logid": "stable-search-id" if offset == 0 else f"rotating-{offset}"},
         }
 
-    async def get_user_info(self, sec_uid):
-        return {"status_code": 0, "user": {"follower_count": 7}}
-
 
 def prepare_scan(monkeypatch, tmp_path, *, legacy_inputs):
     state_path = tmp_path / "state.json"
     state_path.write_text('{"events": []}', encoding="utf-8")
     monkeypatch.setenv("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", str(state_path))
-    monkeypatch.setenv("TRIPPOSTCOLLECT_DOUYIN_ENRICH_CREATORS", "1")
-    monkeypatch.setenv("TRIPPOSTCOLLECT_DOUYIN_MAX_CREATOR_ENRICH", "-1")
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
     if legacy_inputs:
         # 旧三元组续跑的全部输入：本轮都不得影响起点与停止判定。

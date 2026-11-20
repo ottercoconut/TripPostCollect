@@ -111,17 +111,6 @@ class DouyinSettings:
 
 
 @dataclass(frozen=True)
-class DouyinReaders:
-    """只绑定读取点；值仍在作者或详情操作开始时读取。#124 起搜索每轮从首页开始，不读续跑输入。"""
-
-    enrich_creators: Callable[[], str | None]
-    enrich_only_images: Callable[[], str]
-    max_creator_enrich: Callable[[], str]
-    creator_sleep_seconds: Callable[[], str]
-    browser_detail_timeout: Callable[[], str]
-
-
-@dataclass(frozen=True)
 class DouyinClientPorts:
     """正文图 CDN。不读取浏览器 Cookie。"""
 
@@ -129,14 +118,6 @@ class DouyinClientPorts:
     image_error: type[Exception]
     classified_http_image_error: Callable[..., Any]
     image_max_bytes: int
-
-
-@dataclass(frozen=True)
-class DouyinLoginPorts:
-    """二维码读取和系统展示；不在平台导入时执行。"""
-
-    find_login_qrcode: Callable[..., Any]
-    show_qrcode: Callable[..., Any]
 
 
 @dataclass(frozen=True)
@@ -164,11 +145,9 @@ class WeiboPorts:
 
 @dataclass(frozen=True)
 class DouyinCrawlerPorts:
-    """抖音流程借用的进程内能力，不改变 HTTP 和写出顺序。"""
+    """抖音页面流程借用的进程内能力：浏览器、候选累积、内容写出与正文图 CDN。"""
 
     client: DouyinClientPorts
-    login: DouyinLoginPorts
-    browser_detail_fallback: bool
     async_playwright: Callable[..., Any]
     cdp_manager: Callable[..., Any]
     project_browser_args: Callable[[], list[str]]
