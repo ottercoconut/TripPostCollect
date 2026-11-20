@@ -11,24 +11,20 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import signal
 import sqlite3
 import sys
 from pathlib import Path
 from typing import Any, Callable
 
-from trippostcollect.application.failures import extract_stdout_json
 from trippostcollect.application.repair_runtime import (
     _complete_no_op,
     _state_fail_open,
     create_sqlite_backup,
     interrupt_details,
-    interrupted_batch_result,
     print_repair_stream,
-    run_repair_child,
+    run_repair_child,  # noqa: F401  测试用来确认 dry-run 不启动 child
     terminalize_repair_interrupt,
-    utc_iso,
     utc_stamp,
     write_json,
 )
@@ -39,7 +35,6 @@ from trippostcollect.core.paths import (
     AUTHOR_PROFILE_BACKFILL_RUNTIME_ROOT,
     DEFAULT_DB,
     FORMAL_CRAWL_CONTRACT,
-    PROJECT_ROOT,
     ensure_dir,
 )
 from trippostcollect.records.sanitization import public_payload
@@ -47,24 +42,17 @@ from trippostcollect.runtime.process import operator_interrupt_error
 from trippostcollect.xhs.leases import DeferredTerminationSignals
 
 
-PLATFORMS = ("xhs", "douyin", "zhihu")
+PLATFORMS = ("xhs", "zhihu")
 XHS_COLUMNS = ("author_verified", "author_verified_text")
-DOUYIN_COLUMNS = (
-    "author_profile_url",
-    "author_description",
-    "author_verified",
-    "author_verified_text",
-)
 ZHIHU_COLUMNS = ("author_following_count",)
 ZHIHU_ORG_COLUMNS = ("author_verified", "author_verified_text")
-COLUMNS = {"xhs": XHS_COLUMNS, "douyin": DOUYIN_COLUMNS, "zhihu": ZHIHU_COLUMNS}
+COLUMNS = {"xhs": XHS_COLUMNS, "zhihu": ZHIHU_COLUMNS}
 ORG_IDENTITY_PREFIX = "机构号"
-AWEME_ID_RE_TEXT = r"^[0-9]+$"
 CHILD_INTERRUPT_GRACE_SECONDS = None
 INTERRUPT_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="回填小红书认证、抖音作者资料，或离线修正知乎关注数与机构号认证。",
+        description="回填小红书认证，或离线修正知乎关注数与机构号认证。",
     )
     parser.add_argument("--platform", required=True, choices=PLATFORMS)
     parser.add_argument("--db", default=str(DEFAULT_DB))
@@ -81,7 +69,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--max-authors", type=int, default=0, help="本轮最多处理的作者数；0 表示全部。")
     parser.add_argument("--author-id", action="append", dest="author_ids", default=[])
-    parser.add_argument("--keyword", default="青岛旅游", help="抖音可见行为搜索词。")
+    parser.add_argument("--keyword", default="青岛旅游", help="保留的搜索词参数，当前平台不使用。")
     parser.add_argument("--batch-size", type=int, default=20)
     parser.add_argument("--headless", action="store_true")
     return parser.parse_args(argv)
@@ -126,15 +114,9 @@ def _author_id_clause(author_ids: list[str]) -> tuple[str, list[str]]:
 
 def load_rows(connection: sqlite3.Connection, platform: str, author_ids: list[str]) -> list[sqlite3.Row]:
     clause, params = _author_id_clause(author_ids)
-    if platform == "xhs":
-        where = "platform_key='xhs' AND author_verified IS NULL"
-    else:
-        where = (
-            "platform_key='douyin' AND ("
-            "author_profile_url IS NULL OR author_description IS NULL OR author_verified IS NULL)"
-            # 已回填过的行不再重复联网：作者没有简介等平台本就不提供的列会一直为空。
-            " AND NOT (json_valid(author_json) AND json_extract(author_json, '$.profile_backfill') IS NOT NULL)"
-        )
+    if platform != "xhs":
+        raise ValueError(f"unsupported author backfill platform: {platform}")
+    where = "platform_key='xhs' AND author_verified IS NULL"
     return list(
         connection.execute(
             f"""
@@ -305,132 +287,6 @@ def apply_xhs_authors(
     }
 
 
-def douyin_works(rows: list[sqlite3.Row]) -> tuple[list[dict[str, str]], str]:
-    works: list[dict[str, str]] = []
-    for row in rows:
-        post_id = str(row["platform_post_id"] or "")
-        if re.fullmatch(AWEME_ID_RE_TEXT, post_id) is None:
-            continue
-        works.append({"aweme_id": post_id, "platform_post_id": post_id})
-        if len(works) == 3:
-            break
-    if not works:
-        return [], "invalid_aweme_id"
-    return works, ""
-
-
-def prepare_douyin_authors(authors: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
-    ready: list[dict[str, Any]] = []
-    unrecovered: list[dict[str, str]] = []
-    for author in authors:
-        author_id = str(author["author_platform_id"])
-        if author_id.startswith("post:"):
-            unrecovered.append({"author_platform_id": author_id, "reason": "missing_author_id"})
-            continue
-        works, reason = douyin_works(author["rows"])
-        if reason:
-            unrecovered.append({"author_platform_id": author_id, "reason": reason})
-            continue
-        ready.append({**author, "works": works})
-    return ready, unrecovered
-
-
-def build_child_command(
-    *,
-    keyword: str,
-    targets_path: Path,
-    output_path: Path,
-    headless: bool,
-) -> list[str]:
-    command = [
-        sys.executable,
-        str(PROJECT_ROOT / "scripts" / "douyin_author_profile_worker.py"),
-        "--targets",
-        str(targets_path),
-        "--keyword",
-        keyword,
-        "--output",
-        str(output_path),
-    ]
-    if headless:
-        command.append("--headless")
-    return command
-
-
-def apply_douyin_observation(
-    connection: sqlite3.Connection,
-    *,
-    rows: list[sqlite3.Row],
-    observation: dict[str, Any],
-    run_id: str,
-    observed_at: str,
-) -> tuple[int, str]:
-    fields = observation.get("fields") if isinstance(observation.get("fields"), dict) else {}
-    changed = 0
-    still_null = False
-    backfill = {
-        "observed_at": observed_at,
-        "run_id": run_id,
-        "source_aweme_id": str(observation.get("source_aweme_id") or ""),
-        "author_verify_evidence": observation.get("author_verify_evidence") or {},
-    }
-    for row in rows:
-        current = connection.execute(
-            """
-            SELECT id, author_profile_url, author_description, author_verified,
-                   author_verified_text, author_json
-            FROM web_posts WHERE id=? AND platform_key='douyin'
-            """,
-            (row["id"],),
-        ).fetchone()
-        assignments = null_assignments(current, fields, DOUYIN_COLUMNS)
-        if assignments:
-            update_null_columns(
-                connection,
-                platform="douyin",
-                row_id=int(current["id"]),
-                assignments=assignments,
-                author_json=merge_profile_backfill(str(current["author_json"] or ""), backfill),
-            )
-            changed += 1
-        after = connection.execute(
-            """
-            SELECT author_profile_url, author_description, author_verified
-            FROM web_posts WHERE id=?
-            """,
-            (row["id"],),
-        ).fetchone()
-        if any(after[column] is None for column in ("author_profile_url", "author_description", "author_verified")):
-            still_null = True
-    if changed == 0:
-        return 0, "profile_insufficient"
-    return changed, "partial" if still_null else "success"
-
-
-def child_payload(child_run: dict[str, Any]) -> dict[str, Any]:
-    wrapper = extract_stdout_json(str(child_run.get("stdout") or ""))
-    path_value = str(wrapper.get("child_summary") or "")
-    blocker = str(wrapper.get("runtime_blocker") or "")
-    payload: dict[str, Any] = {}
-    if path_value:
-        try:
-            loaded = json.loads(Path(path_value).read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            loaded = {}
-        if isinstance(loaded, dict):
-            payload = loaded
-    if blocker and not payload.get("runtime_blocker"):
-        payload["runtime_blocker"] = blocker
-    if not payload:
-        payload = {
-            "observations": [],
-            "unrecovered": [],
-            "runtime_blocker": blocker or "browser_launch_failed",
-        }
-    cleaned = public_payload(payload)
-    return cleaned if isinstance(cleaned, dict) else {}
-
-
 def _reason_counts(items: list[dict[str, str]]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for item in items:
@@ -512,7 +368,7 @@ def _report(
         "batch_plan": batch_plan or [],
         "backup": backup,
         "runtime_blocker": runtime_blocker,
-        "values_are_backfill_time": platform == "douyin",
+        "values_are_backfill_time": False,
     }
     if extra:
         report.update(extra)
@@ -1073,239 +929,10 @@ def _public_counts(report: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def run_douyin(
-    *,
-    db_path: Path,
-    authors: list[dict[str, Any]],
-    before: dict[str, int],
-    dry_run: bool,
-    run_id: str,
-    run_dir: Path,
-    state: FrozenExecutionState,
-    summary_path: Path,
-    keyword: str,
-    batch_size: int,
-    headless: bool,
-) -> int:
-    ready, skipped = prepare_douyin_authors(authors)
-    batch_plan: list[dict[str, Any]] = []
-    for index, batch in enumerate(_chunked(ready, batch_size), start=1):
-        manifest = {
-            "authors": [
-                {"author_platform_id": author["author_platform_id"], "works": author["works"]}
-                for author in batch
-            ]
-        }
-        targets_path = write_json(run_dir / "batches" / f"batch-{index:04d}-targets.json", manifest)
-        output_path = run_dir / "children" / f"batch-{index:04d}" / "observations.json"
-        command = build_child_command(
-            keyword=keyword,
-            targets_path=targets_path,
-            output_path=output_path,
-            headless=headless,
-        )
-        batch_plan.append(
-            {
-                "batch": index,
-                "mode": "douyin_author_profile",
-                "author_count": len(batch),
-                "author_ids": [author["author_platform_id"] for author in batch],
-                "work_count": sum(len(author["works"]) for author in batch),
-                "targets_path": str(targets_path),
-                "output_path": str(output_path),
-                "command": command,
-                "authors": batch,
-            }
-        )
-    if dry_run:
-        public_plan = [{key: value for key, value in item.items() if key != "authors"} for item in batch_plan]
-        report = _report(
-            status="planned",
-            run_id=run_id,
-            platform="douyin",
-            dry_run=True,
-            authors=authors,
-            before=before,
-            after=before,
-            unrecovered=skipped,
-            batch_plan=public_plan,
-        )
-        write_json(summary_path, report)
-        print(json.dumps({"summary": str(summary_path), **_public_counts(report)}, ensure_ascii=False, indent=2))
-        return 0
-    if not ready and not skipped:
-        _complete_no_op(state, reason="no_author_profile_targets")
-        report = _report(
-            status="completed",
-            run_id=run_id,
-            platform="douyin",
-            dry_run=False,
-            authors=[],
-            before=before,
-            after=before,
-            extra={"no_op": True},
-        )
-        write_json(summary_path, report)
-        print(json.dumps({"summary": str(summary_path), **_public_counts(report)}, ensure_ascii=False, indent=2))
-        return 0
-    latch = DeferredTerminationSignals(INTERRUPT_SIGNALS)
-    latch.install()
-    backup: dict[str, Any] = {}
-    success = 0
-    partial = 0
-    changed = 0
-    unrecovered = list(skipped)
-    blocker = ""
-    interrupt_signum: int | None = None
-    forced = False
-    batch_results: list[dict[str, Any]] = []
-    try:
-        if ready and latch.signal_received is None:
-            backup = create_sqlite_backup(
-                db_path,
-                AUTHOR_PROFILE_BACKFILL_BACKUP_ROOT / run_id / db_path.name,
-            )
-            state.begin("command_executed")
-        for item in batch_plan:
-            if latch.signal_received is not None:
-                interrupt_signum = int(latch.signal_received)
-                break
-            child_run = run_repair_child(
-                item["command"],
-                cwd=PROJECT_ROOT,
-                log_dir=run_dir / "logs" / f"batch-{int(item['batch']):04d}",
-                state_path=state.path,
-                interrupt_signal=lambda: latch.signal_received,
-                grace_seconds=CHILD_INTERRUPT_GRACE_SECONDS,
-            )
-            if child_run.get("interrupt_signum") is not None:
-                interrupt_signum = int(child_run["interrupt_signum"])
-                forced = bool(child_run.get("forced_termination"))
-                batch_results.append(interrupted_batch_result(item, child_run))
-                break
-            payload = child_payload(child_run)
-            observed_at = utc_iso()
-            observations = {
-                str(entry.get("author_platform_id") or ""): entry
-                for entry in payload.get("observations") or []
-                if isinstance(entry, dict)
-            }
-            connection = sqlite3.connect(db_path, isolation_level=None)
-            connection.row_factory = sqlite3.Row
-            try:
-                connection.execute("BEGIN IMMEDIATE")
-                for author in item["authors"]:
-                    observation = observations.get(author["author_platform_id"])
-                    if observation is None:
-                        continue
-                    row_changes, status = apply_douyin_observation(
-                        connection,
-                        rows=author["rows"],
-                        observation=observation,
-                        run_id=run_id,
-                        observed_at=observed_at,
-                    )
-                    changed += row_changes
-                    if status == "success":
-                        success += 1
-                    elif status == "partial":
-                        partial += 1
-                    else:
-                        unrecovered.append(
-                            {"author_platform_id": author["author_platform_id"], "reason": status}
-                        )
-                connection.execute("COMMIT")
-            except Exception:
-                connection.execute("ROLLBACK")
-                raise
-            finally:
-                connection.close()
-            for entry in payload.get("unrecovered") or []:
-                if isinstance(entry, dict):
-                    unrecovered.append(
-                        {
-                            "author_platform_id": str(entry.get("author_platform_id") or ""),
-                            "reason": str(entry.get("reason") or "unknown"),
-                        }
-                    )
-            child_blocker = str(payload.get("runtime_blocker") or "")
-            batch_results.append(
-                {
-                    "batch": item["batch"],
-                    "author_count": item["author_count"],
-                    "exit_code": child_run.get("returncode"),
-                    "runtime_blocker": child_blocker,
-                }
-            )
-            if child_blocker:
-                blocker = child_blocker
-                break
-        if interrupt_signum is None and latch.signal_received is not None:
-            interrupt_signum = int(latch.signal_received)
-        if interrupt_signum is not None:
-            pass
-        elif blocker:
-            state.fail("command_executed", error=blocker, evidence={"batches": batch_results, "backup": backup})
-        elif ready:
-            _finish_state_success(state, {"batches": batch_results, "backup": backup, "changed_row_count": changed})
-        else:
-            _complete_no_op(state, reason="no_actionable_douyin_authors")
-    except Exception as exc:
-        if latch.signal_received is not None:
-            interrupt_signum = int(latch.signal_received)
-        else:
-            blocker = blocker or f"author_profile_backfill_exception:{type(exc).__name__}"
-            _state_fail_open(state, blocker)
-    finally:
-        held = latch.signal_received
-        latch.restore()
-    if interrupt_signum is None and held is not None:
-        interrupt_signum = int(held)
-    if interrupt_signum is not None:
-        terminalize_repair_interrupt(
-            state,
-            error=operator_interrupt_error(interrupt_signum),
-            evidence={"backup": backup, "batches": batch_results},
-        )
-    after = before
-    with connect_readonly(db_path) as connection:
-        after = column_counts(connection, "douyin")
-    status = "failed" if interrupt_signum is not None or blocker else "completed"
-    public_plan = [{key: value for key, value in item.items() if key != "authors"} for item in batch_plan]
-    extra = None
-    if interrupt_signum is not None:
-        extra = {"interrupt": interrupt_details(interrupt_signum, forced_termination=forced)}
-    report = _report(
-        status=status,
-        run_id=run_id,
-        platform="douyin",
-        dry_run=False,
-        authors=authors,
-        before=before,
-        after=after,
-        success=success,
-        partial=partial,
-        unrecovered=unrecovered,
-        changed_row_count=changed,
-        batch_plan=public_plan,
-        backup=backup or None,
-        runtime_blocker=blocker,
-        extra=extra,
-    )
-    write_json(summary_path, report)
-    if interrupt_signum is not None:
-        print_repair_stream(operator_interrupt_error(interrupt_signum), sys.stderr)
-        return 128 + interrupt_signum
-    print(json.dumps({"summary": str(summary_path), **_public_counts(report)}, ensure_ascii=False, indent=2))
-    return 2 if blocker else 0
-
-
 def main(argv: list[str] | None = None, *, verified_fields: Any = None) -> int:
     args = parse_args(argv)
     if args.max_authors < 0 or args.batch_size <= 0:
         raise SystemExit("--max-authors 不能为负；--batch-size 必须为正")
-    if args.platform == "douyin" and not str(args.keyword or "").strip():
-        raise SystemExit("抖音回填需要非空的 --keyword")
     if args.org_identity and args.platform != "zhihu":
         raise SystemExit("--org-identity 只适用于 --platform zhihu")
     db_path = Path(args.db).expanduser().resolve()
@@ -1397,9 +1024,4 @@ def main(argv: list[str] | None = None, *, verified_fields: Any = None) -> int:
             report_extra={"anomalies": anomalies, "anomaly_count": len(anomalies)},
             **common,
         )
-    return run_douyin(
-        **common,
-        keyword=str(args.keyword),
-        batch_size=int(args.batch_size),
-        headless=bool(args.headless),
-    )
+    raise SystemExit(f"unsupported author backfill platform: {args.platform}")

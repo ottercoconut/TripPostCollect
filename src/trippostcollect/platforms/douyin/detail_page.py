@@ -53,7 +53,6 @@ LOGIN_REQUIRED = "login_required"
 RATE_LIMITED = "rate_limited"
 BLOCKED_OR_FORBIDDEN = "blocked_or_forbidden"
 
-GATEWAY_BLOCK_MARKERS = ("ArgusSecurityPlugin", "Blocked by")
 CARD_SELECTOR = "#waterfall_item_{aweme_id}"
 AVATAR_SELECTOR = '[data-e2e="feed-active-video"] [data-e2e="video-avatar"]'
 AUTOPLAY_SELECTOR = '[data-e2e="video-player-auto-play"] button'
@@ -98,14 +97,14 @@ def user_sec_uid(url: str) -> str:
 
 
 def profile_runtime_code(captured: CapturedResponse) -> str | None:
-    """截获的资料响应上的运行级 HTTP 分类。403 只在正文里出现网关标记时阻断。"""
+    """截获的资料响应上的运行级 HTTP 分类。403 一律阻断，不看响应体。"""
 
     status = captured.status
     if status == 401:
         return LOGIN_REQUIRED
     if status == 429:
         return RATE_LIMITED
-    if status == 403 and _gateway_blocked(captured.json):
+    if status == 403:
         return BLOCKED_OR_FORBIDDEN
     return None
 
@@ -117,13 +116,6 @@ def profile_matches(payload: Any, *, sec_uid: str, uid: str) -> bool:
     if not isinstance(user, dict):
         return False
     return str(user.get("sec_uid") or "") == sec_uid and str(user.get("uid") or "") == str(uid)
-
-
-def _gateway_blocked(payload: Any) -> bool:
-    if payload is None:
-        return False
-    text = payload if isinstance(payload, str) else str(payload)
-    return any(marker in text for marker in GATEWAY_BLOCK_MARKERS)
 
 
 def _modal_ok(state: Any, aweme_id: str) -> bool:

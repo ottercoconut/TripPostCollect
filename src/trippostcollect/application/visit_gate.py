@@ -201,8 +201,7 @@ VISIT_POLICIES: dict[str, VisitPolicy] = {
         checks_filter_entry=False,
         creator_from_detail_page_response=True,
     ),
-    # #222：没有 repair 链。正文图规则先登记，cdn_direct 写入在图片段完成；本段不把抖音加入
-    # VISIT_GATED_PLATFORMS，入库门禁仍等图片访问一并生效。
+    # #222：没有 repair 链。正文图以 cdn_direct 登记，入库须过 content_visit_ok。
     "douyin": VisitPolicy(
         platform="douyin",
         chains={
@@ -226,7 +225,7 @@ VISIT_POLICIES: dict[str, VisitPolicy] = {
     ),
 }
 # 已纳入访问门禁的平台；平台在其取数改造完成的批次加入。
-VISIT_GATED_PLATFORMS: frozenset[str] = frozenset({"xhs", "zhihu", "weibo"})
+VISIT_GATED_PLATFORMS: frozenset[str] = frozenset({"xhs", "zhihu", "weibo", "douyin"})
 
 
 def _seq(line: Mapping[str, Any]) -> int:

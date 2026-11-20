@@ -84,6 +84,8 @@ class CaptureRule:
     resource_types: frozenset[str]
     body: str
     host_exclude_prefixes: tuple[str, ...] = ()
+    # 默认 ``json.loads``。抖音搜索流要先重组 chunk，由平台传入解码函数。
+    decode: Callable[[bytes], Any] | None = None
 
     def __post_init__(self) -> None:
         if self.body not in BODY_KINDS:
@@ -145,6 +147,8 @@ class CapturedResponse:
     json: Any
     observed_at: str
     body_error: str = ""
+    # 请求地址只留在内存里，供平台按查询参数挑选响应；不写入账本。
+    request_url: str = ""
 
 
 @dataclass(frozen=True)
@@ -824,6 +828,15 @@ class PageCaptureChannel:
         self._rule(rule_name)
         return max(self._pending[rule_name], default=0)
 
+    async def drain_pending(self) -> None:
+        """等当前在途的读体结束。滚轮之后用它确认新响应已经入库。"""
+
+        self._raise_if_faulted()
+        tasks = tuple(self._tasks)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._raise_if_faulted()
+
     def drain(self, rule_name: str, *, after_seq: int) -> list[CapturedResponse | CaptureFailure]:
         """after_seq 之后已结算的全部截获与失败，按到达序号排列（供逐页扫描）。"""
         self._raise_if_faulted()
@@ -973,7 +986,9 @@ class PageCaptureChannel:
         payload: Any = None
         body_error = ""
         try:
-            payload = json.loads(await response.body())
+            raw = await response.body()
+            decoder = rule.decode or json.loads
+            payload = decoder(raw)
         except Exception as exc:
             body_error = type(exc).__name__
         captured = CapturedResponse(
@@ -989,6 +1004,7 @@ class PageCaptureChannel:
             json=payload,
             observed_at=observed_at,
             body_error=body_error,
+            request_url=str(getattr(response, "url", "") or ""),
         )
         self._store(rule.name, captured)
 

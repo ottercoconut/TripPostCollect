@@ -221,7 +221,6 @@ def douyin_dependencies(config):
     from functools import partial
     import logging
     from pathlib import Path
-    import random
     import time
 
     from playwright.async_api import async_playwright
@@ -239,9 +238,13 @@ def douyin_dependencies(config):
     from trippostcollect.runtime import behavior, login_helpers
     from trippostcollect.runtime.browser import CDPBrowserManager, CDPBrowserSettings
     from trippostcollect.runtime.browser_runtime import launch_profile_context
-    from trippostcollect.runtime.cookies import convert_browser_context_cookies
     from trippostcollect.runtime.http import make_async_client
-    from trippostcollect.runtime.image_retry import fetch_image_bytes_with_retry
+    from trippostcollect.runtime.image_retry import (
+        IMAGE_DOWNLOAD_MAX_BYTES,
+        ImageDownloadFetchError,
+        classified_http_image_error,
+        fetch_image_bytes_with_retry,
+    )
 
     values = {field.name: getattr(config, field.name) for field in fields(DouyinSettings)}
     values["DY_SPECIFIED_ID_LIST"] = tuple(values["DY_SPECIFIED_ID_LIST"])
@@ -298,7 +301,12 @@ def douyin_dependencies(config):
         "settings": settings,
         "inputs": douyin_readers(),
         "ports": DouyinCrawlerPorts(
-            client=DouyinClientPorts(client_factory, convert_browser_context_cookies, random.random),
+            client=DouyinClientPorts(
+                make_async_client=client_factory,
+                image_error=ImageDownloadFetchError,
+                classified_http_image_error=classified_http_image_error,
+                image_max_bytes=IMAGE_DOWNLOAD_MAX_BYTES,
+            ),
             login=DouyinLoginPorts(partial(
                 login_helpers.find_login_qrcode, make_async_client=client_factory,
             ), login_helpers.show_qrcode),

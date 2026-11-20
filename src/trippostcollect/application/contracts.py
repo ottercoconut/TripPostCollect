@@ -123,11 +123,12 @@ class DouyinReaders:
 
 @dataclass(frozen=True)
 class DouyinClientPorts:
-    """HTTP 客户端与当前浏览器 Cookie 的原调用接缝。"""
+    """正文图 CDN。不读取浏览器 Cookie。"""
 
     make_async_client: Callable[..., Any]
-    convert_browser_context_cookies: Callable[..., Any]
-    random: Callable[[], float]
+    image_error: type[Exception]
+    classified_http_image_error: Callable[..., Any]
+    image_max_bytes: int
 
 
 @dataclass(frozen=True)

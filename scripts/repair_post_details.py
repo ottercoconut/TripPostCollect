@@ -67,7 +67,7 @@ from trippostcollect.application.repair_runtime import (
 )
 
 
-PLATFORMS = ("douyin", "weibo", "zhihu")
+PLATFORMS = ("weibo", "zhihu")
 # 与通用 runner 相同：首个 SIGINT/SIGTERM/SIGHUP 锁存，独立会话里的 child 收不到终端信号。
 REPAIR_INTERRUPT_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 REPAIR_CHILD_POLL_SECONDS = 0.2
@@ -78,7 +78,6 @@ REPAIR_CHILD_INTERRUPT_GRACE_SECONDS = (
 )
 COMPLETED_REPAIR_OUTCOMES = {"completed", "completed_with_remaining"}
 TRUSTED_DETAIL_SOURCES = {
-    "douyin": {"aweme_detail"},
     "weibo": {"desktop_detail", "search_mblog_complete", "mobile_detail"},
     # #194：详情路径只写 answer_detail / article_detail，当前代码不再产生 search_content。
     "zhihu": {"answer_detail", "article_detail"},
@@ -173,15 +172,6 @@ def _detail_target(
         if not re.fullmatch(r"[0-9A-Za-z]+", author_id) or not re.fullmatch(r"[0-9]+", post_id):
             return None, "invalid_weibo_canonical_url"
         return f"https://weibo.com/{author_id}/{post_id}", ""
-    if platform == "douyin":
-        expected_paths = {f"/video/{post_id}", f"/note/{post_id}"}
-        if (
-            parsed.scheme == "https"
-            and parsed.hostname in {"douyin.com", "www.douyin.com"}
-            and parsed.path.rstrip("/") in expected_paths
-        ):
-            return parsed._replace(query="", fragment="").geturl(), ""
-        return None, "invalid_douyin_canonical_url"
     answer = bool(
         parsed.scheme == "https"
         and parsed.hostname in {"zhihu.com", "www.zhihu.com"}

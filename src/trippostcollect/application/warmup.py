@@ -40,7 +40,7 @@ PLATFORMS: dict[str, dict[str, Any]] = {
         "code": "dy",
         "label": "抖音",
         "urls": ["https://www.douyin.com"],
-        "required": "localStorage HasUserLogin=1 or cookie LOGIN_STATUS=1",
+        "required": "localStorage HasUserLogin=1",
     },
     "zhihu": {
         "code": "zhihu",
@@ -277,18 +277,24 @@ async def bilibili_api_check(page: Page) -> dict[str, Any]:
 
 
 async def current_state(context: BrowserContext, page: Page, platform_key: str) -> dict[str, Any]:
+    if platform_key == "douyin":
+        from trippostcollect.platforms.registry import read_douyin_homepage_login
+
+        logged_in = await read_douyin_homepage_login(context, page)
+        return {
+            "ok": logged_in,
+            "markers": {"HasUserLogin": logged_in},
+            "cookie_names": [],
+            "local_storage_keys": [],
+            "api": {},
+            "url": page.url,
+        }
     urls = PLATFORMS[platform_key]["urls"]
     cookies = {} if platform_key == "weibo" else cookie_dict(await context.cookies(urls))
     local_storage = await safe_local_storage(page)
     api: dict[str, Any] = {}
 
-    if platform_key == "douyin":
-        ok = local_storage.get("HasUserLogin") == "1" or cookies.get("LOGIN_STATUS") == "1"
-        markers = {
-            "HasUserLogin": local_storage.get("HasUserLogin"),
-            "LOGIN_STATUS": cookies.get("LOGIN_STATUS"),
-        }
-    elif platform_key == "zhihu":
+    if platform_key == "zhihu":
         api = await zhihu_api_check(page)
         ok = bool(cookies.get("z_c0") and cookies.get("d_c0") and api.get("ok") and api.get("uid"))
         markers = {
@@ -390,7 +396,7 @@ async def warmup_one(playwright, platform_key: str, batch_dir: Path, args: argpa
         await page.wait_for_timeout(2_000)
 
     elapsed = round(time.monotonic() - started, 2)
-    writes_cookie_snapshot = platform_key != "weibo"
+    writes_cookie_snapshot = platform_key not in {"weibo", "douyin"}
     session_cookies = (
         await context.cookies(platform["urls"]) if state.get("ok") and writes_cookie_snapshot else []
     )

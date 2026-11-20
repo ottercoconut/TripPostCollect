@@ -1,5 +1,4 @@
 from enum import Enum
-from httpx import RequestError
 from pydantic import BaseModel, Field
 
 # -*- coding: utf-8 -*-
@@ -58,7 +57,7 @@ class DouyinImageDownloadError(RuntimeError):
 
 
 # TripPostCollect：T06 按职责迁入；来源 fork 5a68eb5098fcd17308c7fe0b9d53916ae839b303，原许可保留。
-class DataFetchError(RequestError):
+class DataFetchError(Exception):
     """something error when fetch"""
 
 

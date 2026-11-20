@@ -131,7 +131,7 @@ def _find_douyin_detail(value: Any, aweme_id: str) -> dict[str, Any] | None:
 # @Author  : relakkes@gmail.com
 # @Name: Programmer Ajiang-Relakkes
 # @Time    : 2024/6/10 02:24
-# @Desc    : Get a_bogus parameter, for learning and communication only, do not use for commercial purposes, contact author to delete if infringement
+# @Desc    : Douyin field helpers.
 
 # TripPostCollect：T06 按职责迁入；来源 fork 5a68eb5098fcd17308c7fe0b9d53916ae839b303，原许可保留。
 def parse_video_info_from_url(url: str) -> VideoUrlInfo:
