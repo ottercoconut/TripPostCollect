@@ -60,7 +60,7 @@
   停止事件带最后一页的 `source_visit_id`，并记录：
   - `source_page_info` 原文；
   - `source_max_page`；
-  - `page_cap_reached`：最大页是否为 50。
+  - `page_cap_reached`：是否停在平台 50 页上限，判定见下文。
 
   `single_page` 没有分页控件，`source_max_page` 为空，`page_cap_reached` 为 false。
 - 其他情况一律写 `runtime_failed/search_page_invalid`，不推断为耗尽：
@@ -85,7 +85,8 @@
   `--top-refresh-max-pages` 或 `--discovery-source-exhausted`；child 收到这些参数直接以
   `weibo_full_scan_rejects_resume_args` 报错。运行级失败时，未完成的累计摘要仍经 `--resume-summary` 合并，
   下一轮取得结束标记后一次性入库。checkpoint 仍写入本轮最后页码与停止原因，供审计，不作续跑起点。
-- 查询指纹仍按平台与关键词计算，#211 之前积累的已处理 ID（同为数字 mid）继续有效。旧 checkpoint
+- 默认 job 的查询指纹仍按平台与关键词计算，#211 之前积累的已处理 ID（同为数字 mid）继续有效；
+  时间窗 job 的指纹另含 `time_window`，见下文。旧 checkpoint
   中的深层页码不再使用。
 - 批次使用 `stagnation_basis=candidate_identity` 记录诊断计数（本页是否出现未知 mid）；该计数不触发停止。
 
@@ -110,7 +111,14 @@
   - 日期形式表示当日 0 点。
   - 区间左闭右开，即 `[start, end)`；`start` 必须早于 `end`。
   - 其他格式、缺键、多余键或非字符串值都是配置错误。
-- 只有微博接受 `time_window`。其他平台的 job 带这个参数是配置错误，runner 在派发前拒绝。
+- 只有微博接受 `time_window`（平台登记 `supports_time_window`）。其他平台的 job 带这个参数是配置错误：
+  runner 在同步配置时和派发前都会拒绝。
+- runner 传给 child 的参数：
+  - 规范化起止 `--time-window-start` / `--time-window-end`；
+  - 配置原值 `--time-window-source`（JSON）；
+  - `--time-window-job-key`。
+
+  child 只在微博时接受这些参数，起止必须成对，并用同一解析函数重新校验，原值与规范化起止必须一致。
 - 一个 job 对应一个关键词加一个时间窗。要覆盖多个时间段，就配多个 job（通常放在 `config/one_off/` 派生
   配置里，见运行手册“一次性配置”）。
 - 搜索入口：
@@ -120,7 +128,8 @@
   ```
 
   起止统一写成小时形式 `YYYY-MM-DD-H`，例如上例为 `custom:2025-07-01-0:2025-07-08-0`。
-  job 的 `target_url` 写成同一地址，供行为证据核对目标页。
+  job 的 `target_url` 写成同一地址，作为配置记录。行为证据的目标页核对（`target_url_ok`）只检查搜索页
+  地址中是否含关键词，不比对 `timescope` 等查询参数。
 - 统一用小时形式的原因（2026-11-20 侦察，#217）：
   - 平台的日期形式 `custom:D:D` 包含终点当天，而小时形式的终点不含；只用小时形式才能得到左闭右开。
   - `custom:D-0:(D+1)-0` 与日窗 `custom:D:D` 结果相同。
@@ -133,7 +142,12 @@
   结果不会被取到；是否把该窗口切细、另配 job，由操作人根据摘要决定。
 - `time_window` 是来源参数，计入查询指纹。每个时间窗 job 有独立的 checkpoint 与已处理候选记录；
   没有 `time_window` 的默认 job，指纹与 #211 时完全相同。
-- 停止事件、批次诊断与运行摘要都记录本 job 的 `time_window`（原始起止与地址中的 `timescope` 值）。
+- 停止事件、批次诊断、child 运行摘要、runner 结果与 dry-run 计划都记录本 job 的 `time_window`：
+  - `start` / `end`：配置原值；
+  - `start_normalized` / `end_normalized`：规范化小时形式；
+  - `timescope`：地址中的值。
+
+  默认模式不写这个键。
 - 去重沿用现有机制，不为时间窗另做：
   - 打开详情前，候选会与该平台全部已入库帖子 ID 比对（不分 job），也与本 job 的已处理候选、本轮已见 ID 比对；
   - 入库按平台与帖子 ID 去重。
