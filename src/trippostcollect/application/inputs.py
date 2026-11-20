@@ -15,7 +15,7 @@ from trippostcollect.core.paths import MEDIACRAWLER_RUNS_OUTPUT as DEFAULT_OUTPU
 from trippostcollect.application.contracts import PLATFORMS as PLATFORMS
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run MediaCrawler for supported structured social platforms.")
     parser.add_argument("--keyword", default="青岛旅游", help="Qingdao search keyword.")
     parser.add_argument(
@@ -91,6 +91,13 @@ def parse_args() -> argparse.Namespace:
             "through platform detail mode without discovery writes."
         ),
     )
+    parser.add_argument("--time-window-start", help="Normalized Weibo time-window start, YYYY-MM-DD-H.")
+    parser.add_argument("--time-window-end", help="Normalized Weibo time-window end, YYYY-MM-DD-H.")
+    parser.add_argument(
+        "--time-window-source",
+        help="Original time_window JSON. Normalized bounds must match --time-window-start/end.",
+    )
+    parser.add_argument("--time-window-job-key", default="", help="Job key recorded in time-window errors.")
     parser.add_argument(
         "--repair-targets-file",
         help=(
@@ -98,7 +105,7 @@ def parse_args() -> argparse.Namespace:
             "detail_target, and keyword; requires --post-repair."
         ),
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def selected_platforms(values: list[str]) -> list[str]:

@@ -43,6 +43,8 @@ class AdaptiveAccumulator:
     last_source_visit_id: str | None = None
     # 微博搜索页结束标记附带的分页原文、最大页和是否停在平台 50 页上限。
     page_audit: dict[str, Any] | None = None
+    # #217：时间窗 job 的原始起止、规范化起止与 timescope。默认模式不写。
+    time_window: dict[str, Any] | None = None
     _batch_new_before: int = 0
     _batch_candidate_before: int = 0
     event_sink: Callable[[str, dict[str, Any]], None] = field(
@@ -240,6 +242,7 @@ class AdaptiveAccumulator:
             "discovery_phase": discovery_phase,
             "candidate_identities": sorted(self.seen_candidate_identities),
         }
+        details.update(self._time_window_fields())
         self.event_sink("adaptive_batch_completed", details)
         if self.stop_reason:
             self.event_sink("adaptive_search_stopped", self.summary())
@@ -352,4 +355,10 @@ class AdaptiveAccumulator:
             result["source_visit_id"] = self.last_source_visit_id
         if self.page_audit:
             result.update(self.page_audit)
+        result.update(self._time_window_fields())
         return result
+
+    def _time_window_fields(self) -> dict[str, Any]:
+        if self.time_window is None:
+            return {}
+        return {"time_window": dict(self.time_window)}

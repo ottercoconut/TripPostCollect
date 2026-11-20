@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable, Mapping, Sequence
 
 from trippostcollect.core.paths import (
     BROWSER_PROFILE_ROOT,
@@ -45,6 +45,8 @@ class WebSite:
     profile_dir_override: Path | None = None
     static_referer: str | None = None
     notes: str = ""
+    # #217：目前只有微博接受 job 参数里的显式时间窗。通用代码只看这个能力。
+    supports_time_window: bool = False
 
 
 SITES: dict[str, WebSite] = {
@@ -65,6 +67,7 @@ SITES: dict[str, WebSite] = {
         account_risk_level="high",
         content_focus="desktop search posts, post details, author metrics",
         notes="Desktop search at s.weibo.com is the page-state source. Persistent profile holds the login.",
+        supports_time_window=True,
     ),
     "xhs": WebSite(
         key="xhs",
@@ -185,3 +188,110 @@ def profile_dir_for(site_key: str, profile_root: str | Path = DEFAULT_PROFILE_RO
 
 def state_path_for(site_key: str, state_dir: str | Path = DEFAULT_STATE_DIR) -> Path:
     return Path(state_dir).expanduser() / f"{site_key}_storage_state.json"
+
+
+def supports_time_window(platform_key: str) -> bool:
+    """平台是否接受 ``params.time_window``。未知平台视为不支持。"""
+
+    try:
+        site = get_site(platform_key)
+    except ValueError:
+        return False
+    return bool(site.supports_time_window)
+
+
+def require_job_time_window(
+    platform_key: str,
+    params: Mapping[str, Any],
+    *,
+    job_key: str,
+) -> dict[str, str] | None:
+    """同步与派发前检查 job 参数。没有 ``time_window`` 时返回 None。"""
+
+    if "time_window" not in params:
+        return None
+    from trippostcollect.platforms.weibo.time_window import (
+        TIME_WINDOW_UNSUPPORTED,
+        TimeWindowError,
+        parse_time_window,
+    )
+
+    if not supports_time_window(platform_key):
+        raise TimeWindowError(
+            TIME_WINDOW_UNSUPPORTED,
+            job_key,
+            f"platform={platform_key} does not accept time_window",
+        )
+    return parse_time_window(params.get("time_window"), job_key=job_key).audit()
+
+
+def _blank(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def resolve_child_time_window(
+    platforms: Sequence[str],
+    *,
+    start: Any,
+    end: Any,
+    source: Any = None,
+    job_key: str,
+) -> dict[str, str] | None:
+    """child 收到的起止必须成对，并经与 job 参数相同的解析函数校验。"""
+
+    import json
+
+    from trippostcollect.platforms.weibo.time_window import (
+        TIME_WINDOW_ARGS_INCOMPLETE,
+        TIME_WINDOW_INVALID,
+        TIME_WINDOW_UNSUPPORTED,
+        TimeWindowError,
+        parse_time_window,
+    )
+
+    start_text = _blank(start)
+    end_text = _blank(end)
+    source_text = _blank(source)
+    if start_text is None and end_text is None and source_text is None:
+        return None
+    bounds_incomplete = (start_text is None) != (end_text is None)
+    source_without_bounds = source_text is not None and start_text is None
+    if bounds_incomplete or source_without_bounds:
+        raise TimeWindowError(
+            TIME_WINDOW_ARGS_INCOMPLETE,
+            job_key,
+            "time window start and end must both be set",
+        )
+    for platform_key in platforms:
+        if not supports_time_window(platform_key):
+            raise TimeWindowError(
+                TIME_WINDOW_UNSUPPORTED,
+                job_key,
+                f"platform={platform_key} does not accept time_window",
+            )
+    flagged = parse_time_window({"start": start_text, "end": end_text}, job_key=job_key)
+    if source_text is None:
+        return flagged.audit()
+    try:
+        payload = json.loads(source_text)
+    except json.JSONDecodeError as exc:
+        raise TimeWindowError(TIME_WINDOW_INVALID, job_key, "time window source is not json") from exc
+    raw = parse_time_window(payload, job_key=job_key)
+    if (raw.start, raw.end) != (flagged.start, flagged.end):
+        raise TimeWindowError(
+            TIME_WINDOW_INVALID,
+            job_key,
+            "normalized bounds do not match the time window source",
+        )
+    return raw.audit()
+
+
+def time_window_worker_env(audit: Mapping[str, str] | None, *, job_key: str) -> dict[str, str]:
+    """微博 worker 读取的原始起止。应用层不直接导入平台实现。"""
+
+    from trippostcollect.platforms.weibo.time_window import worker_environment
+
+    return worker_environment(audit, job_key=job_key)

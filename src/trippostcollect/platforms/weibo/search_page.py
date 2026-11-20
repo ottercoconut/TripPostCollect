@@ -17,6 +17,7 @@ from urllib.parse import quote, urlsplit
 
 from trippostcollect.platforms.weibo.models import DataFetchError, PlatformRuntimeError
 from trippostcollect.platforms.weibo.page_scripts import STATE_SCRIPTS, read_dom
+from trippostcollect.platforms.weibo.time_window import search_filter_signature
 from trippostcollect.runtime.human_flow import human_scroll, load_behavior_profile
 from trippostcollect.runtime.page_capture import CaptureRule, PageCaptureChannel
 from trippostcollect.runtime.visit_ledger import VisitLedger, content_visits_path
@@ -118,10 +119,16 @@ class WeiboSearchSnapshot:
     visit_id: str = ""
 
 
-def search_url(keyword: str) -> str:
-    """桌面「查看全部搜索结果」。不带页码。"""
+def search_url(keyword: str, time_window: Any = None) -> str:
+    """桌面搜索地址。无时间窗时与默认 ``nodup=1`` 入口相同，不带页码。"""
 
-    return f"{SEARCH_HOST}?q={quote(keyword.strip(), safe='')}&{FILTER_SIGNATURE}"
+    encoded = quote(keyword.strip(), safe="")
+    if time_window is None:
+        return f"{SEARCH_HOST}?q={encoded}&{FILTER_SIGNATURE}"
+    return (
+        f"{SEARCH_HOST}?q={encoded}&typeall=1&suball=1"
+        f"&timescope={time_window.timescope}&{FILTER_SIGNATURE}"
+    )
 
 
 def blocking_code_for_url(url: str) -> str | None:
@@ -272,7 +279,10 @@ def classify_search_page(raw: Any, *, page_number: int) -> WeiboSearchSnapshot:
         has_pager=has_pager,
         has_more=stop_detail is None,
         stop_detail=stop_detail,
-        page_cap_reached=max_page == PAGE_CAP,
+        page_cap_reached=(
+            max_page == PAGE_CAP
+            or (stop_detail == "next_disabled" and page_number == PAGE_CAP)
+        ),
     )
 
 
@@ -314,6 +324,7 @@ class WeiboPageCapture:
         self.search_session = uuid.uuid4().hex
         self.last_search_visit_id = ""
         self.closed = False
+        self.time_window = None
 
     @classmethod
     def open(cls, context: Any, *, mode: str = "discovery") -> WeiboPageCapture:
@@ -375,10 +386,13 @@ class WeiboPageCapture:
         """搜索页导航写入账本。随后的搜索读取晚于这次动作。"""
 
         self.search_session = uuid.uuid4().hex
+        query_keys = ["q", "nodup"]
+        if self.time_window is not None:
+            query_keys = ["q", "typeall", "suball", "timescope", "nodup"]
         self.trigger_id = self.channel.action(
             "navigate",
             page_role="primary",
-            target={"route": "/weibo", "query_keys": ["q", "nodup"]},
+            target={"route": "/weibo", "query_keys": query_keys},
         )
 
     async def read_search(self, page_number: int) -> WeiboSearchSnapshot:
@@ -433,7 +447,7 @@ class WeiboPageCapture:
             is_target=True,
             has_more=has_more,
             search_session=self.search_session,
-            filter_signature=FILTER_SIGNATURE,
+            filter_signature=search_filter_signature(self.time_window),
             items=items,
         )
 

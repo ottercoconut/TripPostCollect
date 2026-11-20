@@ -1364,4 +1364,6 @@ PAGINATION_EVENT_FIELDS = (
     "candidate_identities",
     "skipped_candidate_count",
     "skipped_candidate_failures",
+    # #217：时间窗 job 的原始起止、规范化起止与 timescope。默认模式的事件没有这个键。
+    "time_window",
 )

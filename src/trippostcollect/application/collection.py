@@ -18,6 +18,7 @@ from trippostcollect.application.inputs import load_xhs_detail_urls as load_xhs_
 from trippostcollect.application.inputs import load_xhs_repair_target_ids as load_xhs_repair_target_ids
 from trippostcollect.application.inputs import load_zhihu_detail_urls as load_zhihu_detail_urls
 from trippostcollect.application.inputs import selected_platforms as selected_platforms
+from trippostcollect.platforms.registry import resolve_child_time_window, time_window_worker_env
 from trippostcollect.application.policy import CrawlPolicyBlocked
 from trippostcollect.application.policy import clear_site_policy_state
 from trippostcollect.application.policy import record_site_cooldown
@@ -117,6 +118,26 @@ def behavior_environment(evidence_path: Path, profile_name: str) -> dict[str, st
         "TRIPPOSTCOLLECT_PROJECT_SCRIPTS": str(ROOT / "scripts"),
         "TRIPPOSTCOLLECT_BROWSER_ARGS_JSON": json.dumps(browser_runtime_args()),
     }
+
+
+def accept_time_window_args(args: argparse.Namespace, platforms: list[str]) -> dict[str, str] | None:
+    """不支持的平台或不成对的起止在派发 worker 前拒绝。"""
+
+    job_key = str(getattr(args, "time_window_job_key", "") or "").strip()
+    if not job_key:
+        job_key = str(getattr(args, "discovery_job_id", "") or "").strip() or "child"
+    try:
+        return resolve_child_time_window(
+            platforms,
+            start=getattr(args, "time_window_start", None),
+            end=getattr(args, "time_window_end", None),
+            source=getattr(args, "time_window_source", None),
+            job_key=job_key,
+        )
+    except ValueError as exc:
+        if str(getattr(exc, "code", "")).startswith("time_window"):
+            raise SystemExit(str(exc)) from exc
+        raise
 
 
 def validate_formal_record(
@@ -757,6 +778,12 @@ def _run_platform_without_policy(
         "TRIPPOSTCOLLECT_POST_REPAIR": "1" if getattr(args, "post_repair", False) else "0",
         "TRIPPOSTCOLLECT_DB_PATH": str(Path(args.db).expanduser().resolve()),
         **behavior_environment(behavior_evidence_path, args.behavior_profile),
+        **time_window_worker_env(
+            getattr(args, "time_window_audit", None),
+            job_key=str(getattr(args, "time_window_job_key", "") or "").strip()
+            or str(getattr(args, "discovery_job_id", "") or "").strip()
+            or "child",
+        ),
     }
     if args.discovery_job_id is not None:
         extra_env.update(
@@ -1300,6 +1327,7 @@ def _run_main(
         ):
             # #124/#185/#211：抖音、知乎与微博每轮从首页全量扫描，旧的深层恢复与顶部刷新参数直接视为错误。
             raise SystemExit(f"{platform_key}_full_scan_rejects_resume_args")
+    args.time_window_audit = accept_time_window_args(args, platforms)
     if "xhs" in platforms:
         if len(platforms) != 1:
             raise SystemExit("XHS must run alone through scripts/xhs_runner.py")
@@ -1439,6 +1467,8 @@ def _run_main(
         "records": records,
         **result_counts,
     }
+    if getattr(args, "time_window_audit", None):
+        summary["time_window"] = args.time_window_audit
     if runtime_blocker:
         summary["runtime_blocker"] = runtime_blocker
     behavior_validation = collect_behavior_validation(

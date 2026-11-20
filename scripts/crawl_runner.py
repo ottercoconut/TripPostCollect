@@ -27,6 +27,7 @@ from trippostcollect.artifacts.image_completion import (
     verify_image_artifacts,
     verify_image_persistence,
 )
+from trippostcollect.platforms.registry import require_job_time_window
 from trippostcollect.scheduler.discovery import (
     clear_campaign,
     load_checkpoint,
@@ -188,6 +189,11 @@ def validate_crawl_config(config: Any, path: Path) -> dict[str, Any]:
                 f"removed quantity fields remain in job {item.get('job_key')}: "
                 f"{', '.join(stale_fields)}"
             )
+        require_job_time_window(
+            str(params.get("platform") or item.get("site_key") or ""),
+            params,
+            job_key=str(item.get("job_key") or ""),
+        )
     return config
 
 
@@ -310,6 +316,9 @@ def resolve_discovery_args(
         "local_image_storage_required": True,
         "media_root": str(LOCAL_MEDIA_ROOT.resolve()),
     }
+    window = require_job_time_window(platform_key, params, job_key=str(row["job_key"]))
+    if window is not None:
+        plan["time_window"] = window
     return job_args, plan
 
 
@@ -358,6 +367,20 @@ def build_command(row: JobRow, args: argparse.Namespace) -> list[str]:
             raise ValueError(f"removed download_images option remains in job {row['job_key']}")
         command = [sys.executable, str(ROOT / "scripts" / "mediacrawler_crawl.py"), "--platforms", platform]
         add_flag(command, "--keyword", args.recovery_keyword or params.get("keyword", "青岛旅游"))
+        window = require_job_time_window(platform, params, job_key=str(row["job_key"]))
+        if window is not None:
+            add_flag(command, "--time-window-start", window["start_normalized"])
+            add_flag(command, "--time-window-end", window["end_normalized"])
+            add_flag(
+                command,
+                "--time-window-source",
+                json.dumps(
+                    {"start": window["start"], "end": window["end"]},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            )
+            add_flag(command, "--time-window-job-key", row["job_key"])
         add_flag(command, "--required-fields-profile", required_fields_profile)
         add_flag(command, "--behavior-profile", profile)
         add_flag(command, "--login-type", params.get("login_type", "cookie"))
@@ -812,7 +835,7 @@ def build_result_record(
     child_logs: Mapping[str, str] | None = None,
     residual_process_groups: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
-    return {
+    result = {
         "job_key": job.row["job_key"],
         "site_key": job.row["site_key"],
         "job_kind": job.row["job_kind"],
@@ -838,6 +861,10 @@ def build_result_record(
         "residual_process_groups": [dict(item) for item in residual_process_groups],
         "import_result": dict(import_result or {}),
     }
+    window = (job.discovery_plan or {}).get("time_window")
+    if window is not None:
+        result["time_window"] = window
+    return result
 
 
 def planned_record(job: PreparedJob) -> dict[str, Any]:
