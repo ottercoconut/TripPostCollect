@@ -23,6 +23,14 @@
 >   - `m.weibo.cn` 搜索与详情、`get_note_full_text` 长文直连、`$render_data` 提取、repair 浏览器回退；
 >   - `WEIBO_SEARCH_TYPE`、`ENABLE_WEIBO_FULL_TEXT`；
 >   - warmup 的 `weibo_api_check`、移动站 `/api/config` 判定与微博 Cookie 快照。
+>
+> - 抖音已改为页面取数并纳入访问门禁（#222），详见[抖音平台文档](platforms/douyin.md)。本文中以下抖音条目均已删除：
+>   - 浏览器外 HTTPX 客户端、`signer.py` 与 `resources/js/douyin.js`（`a_bogus`）、`x-tt-argus` 与 `uifid` 处理、
+>     `update_cookies` Cookie 复制；
+>   - `/aweme/v1/web/aweme/detail/` 直连详情与浏览器详情回退（`install_douyin_browser_detail_fallback`），
+>     `/user/profile/other/` 直连作者资料；
+>   - 抖音历史详情修复、作者资料回填（`profile_backfill.py`、`douyin_author_profile_worker.py`），
+>     warmup 的 `LOGIN_STATUS` Cookie 判定与抖音 Cookie 快照。
 
 > 2026-09-28 完成 P00-08 静态复核并补齐全量符号账；设计就绪 D 门禁的静态部分已满足，实施另需授权。
 > （以下为 2026-09-28 当时状态；迁移已于 T14 完成。）本文中的目标文件、类型和接口当时尚未实现。主设计保留原则与原研究，本文是目录、接口、读取时点和任务卡的唯一详细定义；

@@ -12,8 +12,8 @@ TripPostCollect 用于授权 CTF 靶场中的低频图文抓取、证据保留�
 | 正式抓取、来源耗尽、成功和失败语义 | [正式抓取执行契约](formal-crawl-contract.md) |
 | 取数来源与真实访问门禁 | [正式抓取执行契约](formal-crawl-contract.md#取数来源与真实访问门禁) |
 | 命令、登录、恢复和结果检查 | [正式抓取运行手册](operations-runbook.md) |
-| 抖音、微博、知乎历史详情修复 | [正式抓取运行手册](operations-runbook.md#通用平台历史详情修复) |
-| 小红书、抖音、知乎作者资料历史回填 | [正式抓取运行手册](operations-runbook.md#作者资料回填) |
+| 微博、知乎历史详情修复 | [正式抓取运行手册](operations-runbook.md#通用平台历史详情修复) |
+| 小红书、知乎作者资料历史回填 | [正式抓取运行手册](operations-runbook.md#作者资料回填) |
 | 调度器、执行器和数据流 | [抓取架构](crawl-architecture.md) |
 | 本地分支清理、提交、版本标签和 Git 备份恢复 | [本地分支与版本管理](version-control.md) |
 | SQLite、媒体文件、事务和入库校验 | [数据持久化](data-persistence.md) |
@@ -21,7 +21,7 @@ TripPostCollect 用于授权 CTF 靶场中的低频图文抓取、证据保留�
 | 五个平台的字段能力 | [平台字段覆盖](platform-field-coverage.md) |
 | 小红书账号、登录、抓取和恢复 | [小红书 Workflow](platforms/xhs.md) |
 | B站 article 详情与正文完整性 | [B站 article](platforms/bilibili.md) |
-| 抖音搜索游标与图文详情 | [抖音](platforms/douyin.md) |
+| 抖音搜索、浮层详情、作者页与图片字段 | [抖音](platforms/douyin.md) |
 | 微博桌面站搜索、详情、作者与图片字段 | [微博](platforms/weibo.md) |
 | 知乎回答、文章与图片字段 | [知乎](platforms/zhihu.md) |
 | 固定 URL 页面证据 | [页面证据平台](platforms/page-evidence.md) |
