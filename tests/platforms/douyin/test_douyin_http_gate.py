@@ -12,10 +12,11 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from support.douyin import config, make_crawler as DouYinCrawler
+from support.douyin import config, make_crawler as DouYinCrawler, install_detail_passthrough
 from trippostcollect.platforms import entry
 from trippostcollect.platforms.douyin import core as douyin_core
 from trippostcollect.platforms.douyin.client import DouYinClient
+from trippostcollect.platforms.douyin.detail_page import DouyinDetailFetchError
 from trippostcollect.platforms.douyin.models import DataFetchError, PlatformRuntimeError
 
 ARGUS_BODY = b"Blocked by ArgusSecurityPlugin Uifid Not Found"
@@ -250,10 +251,11 @@ class SearchClient:
         return self.profile or {}
 
 
-def search_crawler(client, stored):
+def search_crawler(client, stored, *, with_profile: bool = True):
     crawler = DouYinCrawler()
     crawler.dy_client = client
     crawler.get_aweme_images = AsyncMock(return_value=None)
+    install_detail_passthrough(crawler, with_profile=with_profile)
 
     async def store(aweme_item, **kwargs):
         stored.append((aweme_item["aweme_id"], kwargs))
@@ -289,7 +291,8 @@ async def test_video_candidate_is_processed_without_profile_or_content_record(mo
 
     assert [item[0] for item in stored] == ["note-1"]
     assert stored[0][1] == {"content_detail_source": "search_aweme_info", "expected_aweme_id": "note-1"}
-    assert client.profile_calls == ["sec-note-1"]
+    assert client.profile_calls == []
+    assert crawler.detail_pages.calls == ["note-1"]
     crawler.get_aweme_images.assert_awaited_once()
     stopped = events_of(state_path, "adaptive_search_stopped")[-1]
     assert sorted(stopped["candidate_identities"]) == ["note-1", "video-1"]
@@ -299,12 +302,11 @@ async def test_video_candidate_is_processed_without_profile_or_content_record(mo
 @pytest.mark.asyncio
 async def test_search_author_placeholder_followers_are_not_valid_and_skip_images(monkeypatch, tmp_path):
     state_path = prepare(monkeypatch, tmp_path)
-    # 作者资料请求关闭时只剩搜索作者对象的占位 0：不算有效，也不下载正文图。
-    monkeypatch.setenv("TRIPPOSTCOLLECT_DOUYIN_ENRICH_CREATORS", "0")
+    # 没有作者页资料时，搜索作者对象上的占位粉丝不算已观测，也不下载正文图。
     stored = []
     client = SearchClient([image_aweme("1")], extra={"logid": "id"})
 
-    crawler = search_crawler(client, stored)
+    crawler = search_crawler(client, stored, with_profile=False)
     await crawler.search()
 
     crawler.get_aweme_images.assert_not_awaited()
@@ -318,15 +320,27 @@ async def test_search_author_placeholder_followers_are_not_valid_and_skip_images
 async def test_creator_profile_block_is_runtime_failure_without_retry(monkeypatch, tmp_path, code):
     state_path = prepare(monkeypatch, tmp_path)
     stored = []
-    client = SearchClient(
-        [image_aweme("1"), image_aweme("2")],
-        profile=PlatformRuntimeError("blocked", code=code),
-        extra={"logid": "id"},
-    )
+    client = SearchClient([image_aweme("1"), image_aweme("2")], extra={"logid": "id"})
+    crawler = search_crawler(client, stored)
 
-    await search_crawler(client, stored).search()
+    class _Blocked:
+        calls: list[str] = []
 
-    assert client.profile_calls == ["sec-1"]
+        async def open_from_search(self, aweme, *, search_visit_id: str = ""):
+            del search_visit_id
+            self.calls.append(str(aweme.get("aweme_id") or ""))
+            raise DouyinDetailFetchError(
+                str(aweme.get("aweme_id") or ""),
+                code,
+                runtime_blocking=True,
+                retryable=False,
+            )
+
+    crawler.detail_pages = _Blocked()
+    await crawler.search()
+
+    assert crawler.detail_pages.calls == ["1"]
+    assert client.profile_calls == []
     assert stored == []
     assert events_of(state_path, "candidate_skipped") == []
     stopped = events_of(state_path, "adaptive_search_stopped")[-1]
@@ -336,17 +350,29 @@ async def test_creator_profile_block_is_runtime_failure_without_retry(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_creator_profile_transport_failure_stays_retryable_candidate_skip(monkeypatch, tmp_path):
+async def test_author_page_miss_is_candidate_skip_without_httpx(monkeypatch, tmp_path):
     state_path = prepare(monkeypatch, tmp_path)
     stored = []
-    client = SearchClient([image_aweme("1")], profile=DataFetchError("douyin HTTP 502"), extra={"logid": "id"})
+    client = SearchClient([image_aweme("1")], extra={"logid": "id"})
+    crawler = search_crawler(client, stored)
 
-    await search_crawler(client, stored).search()
+    class _Missing:
+        async def open_from_search(self, aweme, *, search_visit_id: str = ""):
+            del search_visit_id
+            raise DouyinDetailFetchError(
+                str(aweme.get("aweme_id") or ""),
+                "author_profile_missing",
+                attempts=3,
+                retryable=False,
+            )
 
-    assert client.profile_calls == ["sec-1"] * 3
+    crawler.detail_pages = _Missing()
+    await crawler.search()
+
+    assert client.profile_calls == []
     skipped = events_of(state_path, "candidate_skipped")
-    assert skipped[0]["error_code"] == "detail_request_failed"
-    assert skipped[0]["retryable"] is True
+    assert skipped[0]["error_code"] == "author_profile_missing"
+    assert skipped[0]["retryable"] is False
     assert events_of(state_path, "adaptive_search_stopped")[-1]["stop_reason"] == "source_exhausted"
 
 

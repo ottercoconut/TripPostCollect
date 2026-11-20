@@ -7,9 +7,9 @@ from unittest.mock import AsyncMock
 from PIL import Image
 import pytest
 
-from support.douyin import config
+from support.douyin import config, make_crawler as DouYinCrawler, install_detail_passthrough
 from trippostcollect.platforms.douyin import core as douyin_core
-from support.douyin import make_crawler as DouYinCrawler
+from trippostcollect.platforms.douyin.detail_page import DouyinDetailFetchError
 from trippostcollect.platforms.douyin.models import DouyinImageDownloadError
 from trippostcollect.runtime.image_retry import ImageDownloadFetchError
 
@@ -215,12 +215,16 @@ async def test_creator_profile_failure_is_recorded_and_later_candidate_continues
     crawler = DouYinCrawler()
     crawler.dy_client = SearchClient()
 
-    async def enrich(aweme):
-        if aweme["aweme_id"] == "retry-aweme":
-            return {**aweme, "creator_profile_error": "detail_request_failed"}
-        return aweme
+    class _Pages:
+        async def open_from_search(self, aweme, *, search_visit_id: str = ""):
+            del search_visit_id
+            if aweme["aweme_id"] == "retry-aweme":
+                raise DouyinDetailFetchError(
+                    "retry-aweme", "author_profile_missing", attempts=3, retryable=False,
+                )
+            return aweme
 
-    crawler.enrich_aweme_creator = enrich
+    crawler.detail_pages = _Pages()
     crawler.get_aweme_images = AsyncMock(return_value=None)
     store = AsyncMock(return_value=None)
     monkeypatch.setattr(crawler, "update_douyin_aweme", store)
@@ -235,7 +239,7 @@ async def test_creator_profile_failure_is_recorded_and_later_candidate_continues
     stopped = [event for event in events if event["type"] == "adaptive_search_stopped"][-1]
     assert skipped[0]["details"]["identity"] == "retry-aweme"
     assert skipped[0]["details"]["failure_scope"] == "post"
-    assert skipped[0]["details"]["attempts"] == 1
+    assert skipped[0]["details"]["attempts"] == 3
     assert stopped["details"]["stop_reason"] == "source_exhausted"
     assert stopped["details"]["candidate_identities"] == [
         "retry-aweme",
@@ -288,7 +292,7 @@ async def test_image_rate_limit_stops_run_without_candidate_skip(
     monkeypatch.setattr(config, "KEYWORDS", "test")
     crawler = DouYinCrawler()
     crawler.dy_client = SearchClient()
-    crawler.enrich_aweme_creator = AsyncMock(side_effect=lambda aweme: aweme)
+    install_detail_passthrough(crawler)
     crawler.get_aweme_images = AsyncMock(
         side_effect=DouyinImageDownloadError(
             "retry-aweme", 0, "image_rate_limited", attempts=1
@@ -321,7 +325,7 @@ async def test_image_failure_is_recorded_seen_and_later_candidate_continues(
     monkeypatch.setattr(config, "KEYWORDS", "test")
     crawler = DouYinCrawler()
     crawler.dy_client = SearchClient()
-    crawler.enrich_aweme_creator = AsyncMock(side_effect=lambda aweme: aweme)
+    install_detail_passthrough(crawler)
     crawler.get_aweme_images = AsyncMock(
         side_effect=[
             DouyinImageDownloadError(
@@ -366,7 +370,7 @@ async def test_terminal_image_failure_is_recorded_and_later_candidate_continues(
     monkeypatch.setattr(config, "KEYWORDS", "test")
     crawler = DouYinCrawler()
     crawler.dy_client = SearchClient()
-    crawler.enrich_aweme_creator = AsyncMock(side_effect=lambda aweme: aweme)
+    install_detail_passthrough(crawler)
     crawler.get_aweme_images = AsyncMock(
         side_effect=[
             DouyinImageDownloadError(

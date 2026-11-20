@@ -32,11 +32,12 @@ from trippostcollect.records.topic_relevance import topic_relevant_for_web_post
 from trippostcollect.runtime.image_retry import ImageDownloadFetchError, is_runtime_blocking_image_error
 from trippostcollect.platforms.douyin import parser
 from trippostcollect.platforms.douyin.client import DouYinClient, inspect_empty_first_page
+from trippostcollect.platforms.douyin.detail_page import DouyinDetailFetchError, DouyinDetailPages
 from trippostcollect.platforms.douyin.models import (
     DataFetchError, PlatformRuntimeError, SearchResponseError, DouyinImageDownloadError,
 )
 from trippostcollect.platforms.douyin.parser import parse_video_info_from_url
-from trippostcollect.platforms.douyin.login import DouYinLogin
+from trippostcollect.platforms.douyin.search_page import DouyinPageCapture
 
 logger = logging.getLogger("TripPostCollect")
 
@@ -65,6 +66,8 @@ class DouYinCrawler:
         self.creator_profile_cache: Dict[str, Dict] = {}
         self.creator_profile_failure_cache: Dict[str, Dict[str, Any]] = {}
         self.creator_profile_enriched_count = 0
+        self.capture: DouyinPageCapture | None = None
+        self.detail_pages: DouyinDetailPages | None = None
         # #178：作者资料回填只在被显式挂上冻结清单时走这条路径，搜索和详情不受影响。
         self.author_profile_targets: List[Dict[str, Any]] | None = None
         self.author_profile_result: Dict[str, Any] | None = None
@@ -100,20 +103,14 @@ class DouYinCrawler:
             await self.context_page.goto(self.index_url, wait_until="domcontentloaded")
 
             self.dy_client = await self.create_douyin_client(httpx_proxy_format)
-            if not await self.dy_client.pong(browser_context=self.browser_context):
-                login_obj = DouYinLogin(
-                    login_type=self.settings.LOGIN_TYPE,
-                    login_phone="",  # you phone number
-                    browser_context=self.browser_context,
-                    context_page=self.context_page,
-                    cookie_str=self.settings.COOKIES,
-                    ports=self.ports.login,
-                )
-                await login_obj.begin()
-                await self.dy_client.update_cookies(
-                    browser_context=self.browser_context,
-                    urls=self.cookie_urls,
-                )
+            self.capture = DouyinPageCapture.open(self.browser_context)
+            self.capture.install(self.context_page)
+            self.dy_client.before_search_scroll = self.capture.before_scroll
+            self.detail_pages = DouyinDetailPages(self.capture, self.context_page)
+            login_code = await self.capture.confirm_login(self.context_page)
+            if login_code:
+                self._stop_before_search(login_code)
+                return
             if self.author_profile_targets is not None:
                 # 与 detail 模式相同：先在关键词搜索页完成人类行为，再按冻结作品取作者资料。
                 # 不写 checkpoint、不下载正文图、不写内容记录。
@@ -142,10 +139,6 @@ class DouYinCrawler:
                 search_url = f"{self.index_url}/search/{quote(behavior_keyword)}?type=general"
                 await self.context_page.goto(search_url, wait_until="domcontentloaded")
                 await self.ports.run_required_human_behavior(self.context_page, "douyin")
-                await self.dy_client.update_cookies(
-                    browser_context=self.browser_context,
-                    urls=self.cookie_urls,
-                )
                 await self.search()
             elif self.settings.CRAWLER_TYPE == "detail":
                 # Get the information and comments of the specified post
@@ -174,6 +167,11 @@ class DouYinCrawler:
         for keyword in self.settings.KEYWORDS.split(","):
             self.source_keyword = keyword
             logger.info(f"[DouYinCrawler.search] Current keyword: {keyword}")
+            if self.capture is not None:
+                self.capture.begin_search()
+                scroll = getattr(self.dy_client, "before_search_scroll", None)
+                if scroll is None:
+                    self.dy_client.before_search_scroll = self.capture.before_scroll
             aweme_list: List[str] = []
             page = 1
             next_offset = 0
@@ -243,6 +241,13 @@ class DouYinCrawler:
                         discovery_phase=discovery_phase,
                     )
                     break
+
+                if self.capture is not None:
+                    self.capture.record_search_page(
+                        posts_res,
+                        page_number=requested_page,
+                        http_status=int(getattr(self.dy_client, "last_search_http_status", 200) or 200),
+                    )
                 if "data" not in posts_res or posts_res.get("data") is None:
                     accumulator.mark_runtime_failed(
                         "missing_data_field",
@@ -391,32 +396,39 @@ class DouYinCrawler:
                         if accumulator.consider(aweme_id, valid=False):
                             break
                         continue
-                    # #124：搜索项只来自浏览器截获的搜索卡片（首页重建随直接请求删除）。
+                    # #124：搜索项只来自浏览器截获的搜索卡片。#222：图文打开浮层并截获作者页。
                     content_detail_source = parser.DOUYIN_SEARCH_CONTENT_SOURCE
-                    aweme_info = await self.enrich_aweme_creator(aweme_info)
-                    if aweme_info.get("creator_profile_runtime_error"):
-                        accumulator.mark_runtime_failed(
-                            str(aweme_info["creator_profile_runtime_error"]),
-                            source_page=requested_page,
-                            source_offset=requested_offset,
-                            source_cursor=requested_search_id,
-                            resume_page=requested_page,
-                            resume_offset=requested_offset,
-                            resume_cursor=requested_search_id,
-                            discovery_phase=discovery_phase,
+                    if self.detail_pages is None:
+                        raise RuntimeError("douyin_detail_pages_missing")
+                    search_visit_id = ""
+                    if self.capture is not None:
+                        search_visit_id = self.capture.last_search_visit_id
+                    try:
+                        aweme_info = await self.detail_pages.open_from_search(
+                            aweme_info,
+                            search_visit_id=search_visit_id,
                         )
-                        processed_count += 1
-                        break
-                    if aweme_info.get("creator_profile_error"):
+                    except DouyinDetailFetchError as exc:
+                        if exc.runtime_blocking:
+                            accumulator.mark_runtime_failed(
+                                exc.code,
+                                source_page=requested_page,
+                                source_offset=requested_offset,
+                                source_cursor=requested_search_id,
+                                resume_page=requested_page,
+                                resume_offset=requested_offset,
+                                resume_cursor=requested_search_id,
+                                discovery_phase=discovery_phase,
+                            )
+                            processed_count += 1
+                            break
                         should_stop = accumulator.skip_candidate_failure(
                             aweme_id,
                             failure_scope="post",
-                            detail="creator_profile_failed",
-                            error_code=str(aweme_info["creator_profile_error"]),
-                            attempts=int(
-                                aweme_info.get("creator_profile_attempts") or 1
-                            ),
-                            retryable=True,
+                            detail="candidate_skipped",
+                            error_code=exc.code,
+                            attempts=exc.attempts,
+                            retryable=False,
                             source_page=requested_page,
                             source_offset=requested_offset,
                             source_cursor=requested_search_id,
@@ -928,6 +940,12 @@ class DouYinCrawler:
                 super().__init__(**dependencies())
 
         return DouYinCrawler
+
+    def _stop_before_search(self, code: str) -> None:
+        """未登录或首页风控：写运行级停止，不发起搜索。"""
+
+        logger.error("[DouYinCrawler.start] blocked before search code=%s", code)
+        self.ports.candidates().mark_runtime_failed(code, discovery_phase="frontier")
 
     async def update_douyin_aweme(
         self,

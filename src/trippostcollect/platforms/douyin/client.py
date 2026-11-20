@@ -138,6 +138,8 @@ class DouYinClient:
         ]
         self.playwright_page = playwright_page
         self.cookie_dict = cookie_dict
+        self.before_search_scroll = None
+        self.last_search_http_status = 200
         self._observed_search_responses: list[dict[str, Any]] = []
         self._observed_search_response_tasks: set[asyncio.Task] = set()
         if self.playwright_page is not None:
@@ -161,6 +163,7 @@ class DouYinClient:
                 "offset": int((query.get("offset") or ["0"])[0]),
                 "search_id": (query.get("search_id") or [""])[0],
                 "payload": payload,
+                "status": int(getattr(response, "status", 200) or 200),
             }
         except Exception as exc:
             reason = getattr(exc, "reason", type(exc).__name__)
@@ -218,6 +221,7 @@ class DouYinClient:
             if index not in matched_indexes
         ]
         payload = selected_record["payload"]
+        self.last_search_http_status = int(selected_record.get("status") or 200)
         nil_info = payload.get("search_nil_info")
         logger.info(
             "[DouYinClient.search_info_by_keyword] reuse browser search response, "
@@ -239,6 +243,8 @@ class DouYinClient:
         if self.playwright_page is None or offset <= 0 or not search_id:
             return False
         for attempt in range(1, 9):
+            if self.before_search_scroll is not None:
+                await self.before_search_scroll(attempt)
             try:
                 viewport = self.playwright_page.viewport_size or {"width": 1920, "height": 1080}
                 await self.playwright_page.mouse.move(
@@ -425,15 +431,10 @@ class DouYinClient:
         return await self.request(method="POST", url=f"{self._host}{uri}", data=data, headers=headers)
 
     async def pong(self, browser_context: BrowserContext) -> bool:
-        local_storage = await self.playwright_page.evaluate("() => window.localStorage")
-        if local_storage.get("HasUserLogin", "") == "1":
-            return True
+        """已不作为正式登录判定。正式路径只读页面状态 ``HasUserLogin``。"""
 
-        _, cookie_dict = await self.ports.convert_browser_context_cookies(
-            browser_context,
-            urls=self.cookie_urls,
-        )
-        return cookie_dict.get("LOGIN_STATUS") == "1"
+        del browser_context
+        return False
 
     async def update_cookies(self, browser_context: BrowserContext, urls: Optional[list[str]] = None):
         cookie_str, cookie_dict = await self.ports.convert_browser_context_cookies(

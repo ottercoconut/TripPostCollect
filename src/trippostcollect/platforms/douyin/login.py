@@ -28,7 +28,7 @@ from typing import Optional
 from playwright.async_api import BrowserContext, Page
 from tenacity import RetryError, retry, retry_if_result, stop_after_attempt, wait_fixed
 from trippostcollect.application.contracts import DouyinLoginPorts
-from trippostcollect.runtime.cookies import convert_cookies, convert_str_cookie_to_dict
+from trippostcollect.runtime.cookies import convert_str_cookie_to_dict
 from trippostcollect.platforms.douyin.login_support import DouYinLogin as DouyinSliderLogin, ExpiringLocalCache
 
 logger = logging.getLogger("TripPostCollect")
@@ -92,9 +92,6 @@ class DouYinLogin(DouyinSliderLogin):
     @retry(stop=stop_after_attempt(600), wait=wait_fixed(1), retry=retry_if_result(lambda value: value is False))
     async def check_login_state(self):
         """Check if the current login status is successful and return True otherwise return False"""
-        current_cookie = await self.browser_context.cookies()
-        _, cookie_dict = convert_cookies(current_cookie)
-
         for page in self.browser_context.pages:
             try:
                 local_storage = await page.evaluate("() => window.localStorage")
@@ -103,9 +100,6 @@ class DouYinLogin(DouyinSliderLogin):
             except Exception as e:  # noqa: F841
                 # logger.warn(f"[DouYinLogin] check_login_state waring: {e}")
                 await asyncio.sleep(0.1)
-
-        if cookie_dict.get("LOGIN_STATUS") == "1":
-            return True
 
         return False
 

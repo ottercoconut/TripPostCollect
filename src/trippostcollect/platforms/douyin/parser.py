@@ -777,6 +777,9 @@ def update_douyin_aweme(
             else "detail_unobserved"
         )
         save_content_item["content_detail_source"] = content_detail_source
+        refs = aweme_item.get("content_visit_refs")
+        if isinstance(refs, dict) and refs:
+            save_content_item["content_visit_refs"] = dict(refs)
         # 冻结旧列契约（db 模式）不含简介、认证证据与主页链接，只在 jsonl 记录中写出（#163）。
         save_content_item.update(_profile_author_extras(creator_profile))
         profile_url = _author_profile_url(user_info, creator_profile)

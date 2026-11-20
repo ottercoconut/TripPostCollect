@@ -33,6 +33,8 @@ ACTION_KINDS = frozenset(
         "click_card",
         "flip_image",
         "click_author",
+        "open_author_panel",
+        "toggle_autoplay",
         "close_tab",
         "close_overlay",
         "navigate",

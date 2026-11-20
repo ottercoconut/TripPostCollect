@@ -17,7 +17,6 @@ import pytest
 
 from trippostcollect.application.failures import classify_attempt
 from trippostcollect.platforms.bilibili import client as bilibili_client
-from trippostcollect.platforms.douyin import core as douyin_core
 from trippostcollect.platforms.douyin.client import DouYinClient
 from trippostcollect.platforms.douyin.models import PlatformRuntimeError as DouyinRuntimeError
 from trippostcollect.platforms.zhihu.client import ZhiHuClient
@@ -73,10 +72,9 @@ async def test_douyin_request_transport_error_becomes_network_unreachable():
 
 @pytest.mark.asyncio
 async def test_douyin_creator_profile_network_failure_stops_run_without_skip(monkeypatch, tmp_path):
+    """#222：正式搜索不再请求作者资料。传输层失败留在仍存在的 httpx 客户端上，不进入搜索。"""
+
     state_path = douyin_faults.prepare(monkeypatch, tmp_path)
-    monkeypatch.setenv("TRIPPOSTCOLLECT_DOUYIN_ENRICH_CREATORS", "1")
-    monkeypatch.setenv("TRIPPOSTCOLLECT_DOUYIN_ENRICH_ONLY_IMAGES", "0")
-    monkeypatch.setenv("TRIPPOSTCOLLECT_DOUYIN_MAX_CREATOR_ENRICH", "30")
     transport = douyin_faults.Transport()
     ports = douyin_faults.entry.douyin_dependencies(douyin_faults.config)["ports"].client
     real_client = DouYinClient(
@@ -86,21 +84,29 @@ async def test_douyin_creator_profile_network_failure_stops_run_without_skip(mon
 
     class Client:
         async def search_info_by_keyword(self, **kwargs):
+            del kwargs
             return {"status_code": 0, "data": [{"aweme_info": douyin_faults.image_aweme("first")}],
-                    "has_more": 1, "extra": {"logid": "fresh-search-id"}}
+                    "has_more": 0, "extra": {"logid": "fresh-search-id"}}
 
         async def get_user_info(self, sec_uid):
-            # 真实 client 的 get_user_info 依赖签名；这里直接走真实 request() 的传输层转换。
             return await real_client.request("GET", "https://www.douyin.com/aweme/v1/web/user/profile/other/")
 
-    monkeypatch.setattr(douyin_core.asyncio, "sleep", AsyncMock(return_value=None))
     crawler = douyin_faults.DouYinCrawler()
     crawler.dy_client = Client()
+    douyin_faults.install_detail_passthrough(crawler)
+    crawler.get_aweme_images = AsyncMock(return_value=None)
+    crawler.update_douyin_aweme = AsyncMock(return_value=None)
 
-    await crawler.search()  # 不再崩溃到 worker 顶层
+    await crawler.search()
 
+    assert transport.calls == []
+    assert events_of(state_path, "candidate_skipped") == []
+    stopped = events_of(state_path, "adaptive_search_stopped")[-1]
+    assert stopped["stop_reason"] == "source_exhausted"
+    with pytest.raises(DouyinRuntimeError) as raised:
+        await real_client.request("GET", "https://www.douyin.com/aweme/v1/web/user/profile/other/")
+    assert raised.value.code == "network_unreachable"
     assert transport.calls == ["/aweme/v1/web/user/profile/other/"]
-    assert_runtime_network_stop(state_path, "first", "network_unreachable")
 
 
 # ---------- 知乎 ----------

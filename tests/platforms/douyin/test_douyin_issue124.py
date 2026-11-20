@@ -151,7 +151,7 @@ import json  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
 from unittest.mock import AsyncMock  # noqa: E402
 
-from support.douyin import config, make_crawler as DouYinCrawler, refresh_settings  # noqa: E402
+from support.douyin import config, make_crawler as DouYinCrawler, refresh_settings, install_detail_passthrough  # noqa: E402
 from trippostcollect.platforms.douyin import core as douyin_core  # noqa: E402
 
 
@@ -217,6 +217,7 @@ def prepare_scan(monkeypatch, tmp_path, *, legacy_inputs):
     monkeypatch.setattr(douyin_core.asyncio, "sleep", AsyncMock())
     crawler = DouYinCrawler()
     refresh_settings(crawler)
+    install_detail_passthrough(crawler)
     crawler.get_aweme_images = AsyncMock(return_value=None)
     crawler.update_douyin_aweme = AsyncMock(return_value=None)
     return crawler, state_path

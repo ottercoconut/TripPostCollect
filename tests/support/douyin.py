@@ -30,6 +30,32 @@ def refresh_settings(crawler):
     crawler.inputs = dependencies["inputs"]
 
 
+def install_detail_passthrough(crawler, *, with_profile: bool = True):
+    """搜索单测不走浮层。补上作者资料，避免正式路径去调 httpx。"""
+
+    class _Pages:
+        calls: list[str] = []
+
+        async def open_from_search(self, aweme, *, search_visit_id: str = ""):
+            del search_visit_id
+            self.calls.append(str(aweme.get("aweme_id") or ""))
+            item = dict(aweme)
+            if with_profile and not item.get("creator_profile"):
+                author = item.get("author") if isinstance(item.get("author"), dict) else {}
+                item["creator_profile"] = {
+                    "status_code": 0,
+                    "user": {
+                        "uid": author.get("uid"),
+                        "sec_uid": author.get("sec_uid"),
+                        "follower_count": 7,
+                    },
+                }
+            return item
+
+    crawler.detail_pages = _Pages()
+    return crawler.detail_pages
+
+
 class ProjectionStore:
     """测试捕获出口；投影、时间与写出调用仍走真实 core。"""
 

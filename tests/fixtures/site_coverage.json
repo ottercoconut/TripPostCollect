@@ -1410,11 +1410,8 @@
        ]
       },
       {
-       "function": "tests/platforms/douyin/test_douyin_offline_drive.py::test_drive_requests_records_images_events",
-       "lane": "component",
-       "params": [
-        "login_expired"
-       ]
+       "function": "tests/platforms/douyin/test_douyin_l1.py::test_login_state_uses_has_user_login_only",
+       "lane": "component"
       },
       {
        "function": "tests/platforms/douyin/test_douyin_offline_drive.py::test_slider_tracks_and_login_cache_lifecycle",
@@ -1751,7 +1748,7 @@
      "status": "covered",
      "entries": [
       {
-       "function": "tests/platforms/douyin/test_douyin_offline_drive.py::test_drive_requests_records_images_events",
+       "function": "tests/platforms/douyin/test_douyin_l1.py::test_search_ledger_records_each_page_and_skips_video_details",
        "lane": "component"
       },
       {
@@ -1767,7 +1764,7 @@
        "lane": "component"
       },
       {
-       "function": "tests/platforms/douyin/test_douyin_offline_faults.py::test_creator_profile_transport_error_ends_run_without_retry_or_skip",
+       "function": "tests/platforms/douyin/test_douyin_offline_faults.py::test_search_does_not_request_creator_profile_over_httpx",
        "lane": "component"
       }
      ]

@@ -10,13 +10,13 @@ from __future__ import annotations
 
 from dataclasses import replace
 import json
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 
-from support.douyin import config, make_crawler as DouYinCrawler
+from support.douyin import config, make_crawler as DouYinCrawler, install_detail_passthrough
 from trippostcollect.platforms import entry
-from trippostcollect.platforms.douyin import core as douyin_core
 from trippostcollect.platforms.douyin.client import DouYinClient
 from trippostcollect.platforms.douyin.models import PlatformRuntimeError
 
@@ -112,13 +112,9 @@ async def test_search_transport_error_ends_run_without_exhaustion(monkeypatch, t
 
 
 @pytest.mark.asyncio
-async def test_creator_profile_transport_error_ends_run_without_retry_or_skip(monkeypatch, tmp_path):
+async def test_search_does_not_request_creator_profile_over_httpx(monkeypatch, tmp_path):
     state_path = prepare(monkeypatch, tmp_path)
-    monkeypatch.setenv("TRIPPOSTCOLLECT_DOUYIN_ENRICH_CREATORS", "1")
-    monkeypatch.setenv("TRIPPOSTCOLLECT_DOUYIN_ENRICH_ONLY_IMAGES", "0")
-    monkeypatch.setenv("TRIPPOSTCOLLECT_DOUYIN_MAX_CREATOR_ENRICH", "30")
     profile_calls = []
-    sleeps = []
 
     class Client:
         async def search_info_by_keyword(self, **kwargs):
@@ -127,20 +123,17 @@ async def test_creator_profile_transport_error_ends_run_without_retry_or_skip(mo
 
         async def get_user_info(self, sec_uid):
             profile_calls.append(sec_uid)
-            raise httpx.ConnectError("离线网络中断")
+            raise AssertionError("discovery must not call get_user_info")
 
-    async def sleep(seconds):
-        sleeps.append(seconds)
-
-    monkeypatch.setattr(douyin_core.asyncio, "sleep", sleep)
     crawler = DouYinCrawler()
     crawler.dy_client = Client()
+    install_detail_passthrough(crawler)
+    crawler.get_aweme_images = AsyncMock(return_value=None)
+    crawler.update_douyin_aweme = AsyncMock(return_value=None)
 
-    with pytest.raises(httpx.ConnectError):
-        await crawler.search()
+    await crawler.search()
 
-    # 作者资料循环只对 DataFetchError 重试（3 次）；传输层异常第一次即终止本轮，不写 candidate_skipped。
-    assert profile_calls == ["sec-first"]
-    assert sleeps == []
-    assert events_of(state_path, "candidate_skipped") == []
-    assert events_of(state_path, "adaptive_search_stopped") == []
+    assert profile_calls == []
+    assert crawler.detail_pages.calls == ["first"]
+    stopped = events_of(state_path, "adaptive_search_stopped")[-1]
+    assert stopped["stop_reason"] == "source_exhausted"
