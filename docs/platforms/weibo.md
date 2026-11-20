@@ -66,7 +66,8 @@
   - 点击下一页后页码没有前进。
 - 每个查询最多 50 页（`page-info` 为“共50页/500条”，第 50 页的 `a.next` 带 `disabled`）。这是平台的翻页
   上限，不等于该关键词的内容已经取尽。是否把达到上限的末页接受为来源耗尽，或改为按时间窗切分查询，
-  待操作人在 #211 决定。决定之前，实现按上表停止，并用 `page_cap_reached=true` 标出上限情形。
+  待定。操作人已选定按时间窗切分的方向，待验证项见 #213；实现前仍按上表停止，并用 `page_cap_reached=true`
+  标出上限情形。
 - 每轮从搜索第一页翻到结束标记。已处理 ID 在打开详情前滑过，包括以下来源：
   - 数据库已有 ID；
   - 累计摘要中的有效 ID；
@@ -139,14 +140,23 @@
   `author_profile_url` 写成 `https://weibo.com/u/{uid}`。以上各项缺键都为 NULL，不补 0；键上的 0 照记为 0。
   #211 之前的历史行粉丝来源是 `search_author`，导入与修复校验仍接受；新抓取只写 `detail_side_user`。
 - 认证原值 `verified`、`verified_type`、`verified_type_ext`、`verified_reason` 写入 `author_json.weibo_verify`。
-  `author_verified` 与 `author_verified_text` 的判定口径待操作人在 #211 决定。决定之前这两列为 NULL；
-  决定后可从 `author_json` 离线回填，不需重访。侦察到的原值：
+- 认证判定（#213，操作人 2026-11-20 决定）。机构与个人只按 `verified_type` 区分，不按类型码细分：
 
-  | 作者类型 | `verified` | `verified_type` | `verified_type_ext` | `verified_reason` |
-  |---|---|---|---|---|
-  | 机构 | true | 1 | 0 | 机构名称 |
-  | 个人 | true | 0 | 0 或 2 | 认证说明 |
-  | 无认证 | false | -1 | — | 空 |
+  | 条件 | `author_verified` | `author_verified_text` |
+  |---|---|---|
+  | `verified=true` 且 `verified_type=0`（个人） | 1 | `verified_reason`（去首尾空白），为空时为 NULL |
+  | `verified=true` 且 `verified_type` 为 0、-1 以外的整数（机构） | 1 | `机构认证、<verified_reason>`；说明为空时为 `机构认证` |
+  | `verified=true` 且 `verified_type` 为 -1、缺失或不是整数 | 1 | `verified_reason`，不加机构前缀 |
+  | `verified=false` | 0 | NULL |
+  | 没有 `verified`，或不是布尔值 | NULL | NULL |
+
+  - 侦察中见过的机构类型码为 1、2、3、4、7。5、6、8 等尚未见过的值同样记为机构。将来若出现旧“达人”
+    （200/220）等情形，另行研究。
+  - 依据：2026-11-20 对 40 位作者的只读侦察（#213 评论）。`verified_type` 为 1–7 的作者，主页认证链接全部
+    指向机构蓝 V 认证页；0 与 -1 全部指向个人认证页或申请页。
+  - `verified_type_ext` 不区分机构与个人，只影响 V 标颜色：个人 0 为黄 V，1、2 为橙 V；机构 53 为红 V（媒体），
+    其余为蓝 V。它不参与判定。
+  - 带 `author_json.weibo_verify` 的行可按上表离线重算，不需重访。#211 之前的历史行没有原值，回填见 #213。
 - 头像（`avatar_hd`、`avatar_large`、`profile_image_url`）、性别（`gender`）、所在地（`location`）、生日、公司
   和 `status_total_counter` 不采集。
 - 截获不到匹配的 `sideUser`，或其中没有用户对象，是候选级失败（`author_profile_missing`）：按 3 次、间隔
@@ -198,4 +208,4 @@
   - 再下载正文图。
 - 导航响应 401/403 记 `login_required`，429 记 `rate_limited`；其他非 2xx 视为该条详情不可用。
 - 不调用 Playwright `page.request` 等请求接口。该入口不写搜索 checkpoint，完成含义只覆盖清单中的旧行。
-- 是否用同一链路为约 3882 行历史微博回填作者简介、关注数、作品数和认证，待操作人在 #211 决定。
+- 是否用同一链路为约 3882 行历史微博回填作者简介、关注数、作品数和认证，待操作人在 #213 决定。

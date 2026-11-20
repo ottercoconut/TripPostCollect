@@ -24,6 +24,10 @@ IMAGE_LIST_SOURCE = "pic_infos"
 ACCEPTED_PIC_TYPES = frozenset({"pic", "gif", "livephoto"})
 PIC_SPEC_KEYS = ("largest", "mw2000", "original")
 VERIFY_KEYS = ("verified", "verified_type", "verified_type_ext", "verified_reason")
+# #213：verified_type 为 0 是个人认证，-1 是未认证；其余值（侦察见过 1、2、3、4、7）一律记为机构，
+# 不按类型码细分。机构的认证文字以“机构认证”开头。
+PERSONAL_VERIFIED_TYPES = frozenset({0, -1})
+INSTITUTION_VERIFIED_PREFIX = "机构认证"
 
 CREATED_AT_UNPARSEABLE = "created_at_unparseable"
 DETAIL_CONTENT_EMPTY = "detail_content_empty"
@@ -217,6 +221,35 @@ def weibo_verify_of(user: dict) -> dict[str, Any]:
     return {key: user[key] for key in VERIFY_KEYS if key in user and user[key] is not None}
 
 
+def weibo_author_verification(user: dict) -> tuple[int | None, str | None]:
+    """按 #213 口径得出 ``author_verified`` 与 ``author_verified_text``。
+
+    ``verified`` 不是布尔值时两列都为 None，不推断。未认证为 0，文字为 None。
+    已认证时文字取 ``verified_reason``；``verified_type`` 是整数且不是 0 或 -1 时记为机构，
+    文字为“机构认证、<说明>”，说明为空时只写“机构认证”。
+    ``verified_type`` 缺失或不是整数时不判定机构，只写说明。
+    """
+
+    if not isinstance(user, dict):
+        return None, None
+    verified = user.get("verified")
+    if not isinstance(verified, bool):
+        return None, None
+    if not verified:
+        return 0, None
+    raw_reason = user.get("verified_reason")
+    reason = raw_reason.strip() if isinstance(raw_reason, str) else ""
+    verified_type = user.get("verified_type")
+    institution = (
+        isinstance(verified_type, int)
+        and not isinstance(verified_type, bool)
+        and verified_type not in PERSONAL_VERIFIED_TYPES
+    )
+    if institution:
+        return 1, f"{INSTITUTION_VERIFIED_PREFIX}、{reason}" if reason else INSTITUTION_VERIFIED_PREFIX
+    return 1, reason or None
+
+
 def weibo_source_asset_key(pid: str | None, source_url: str) -> str:
     if pid not in (None, ""):
         return f"weibo:pid:{str(pid).strip()}"
@@ -282,6 +315,7 @@ def parse_weibo_detail(
     followers_observed = followers is not None
     assets = weibo_image_assets(status)
     verify = weibo_verify_of(author)
+    author_verified, author_verified_text = weibo_author_verification(author)
     description = author.get("description") if isinstance(author.get("description"), str) else None
     record = {
         "note_id": show_identity(status),
@@ -307,8 +341,8 @@ def parse_weibo_detail(
         "author_posts_count": _count(author, "statuses_count"),
         "author_description": description,
         "author_profile_url": _profile_url(user_id),
-        "author_verified": None,
-        "author_verified_text": None,
+        "author_verified": author_verified,
+        "author_verified_text": author_verified_text,
         "author_json": {"weibo_verify": verify} if verify else {},
         "content_detail_status": CONTENT_DETAIL_STATUS,
         "content_detail_source": CONTENT_DETAIL_SOURCE,

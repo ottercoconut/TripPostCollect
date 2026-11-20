@@ -181,8 +181,8 @@ def test_author_fields_and_verify_blob_omit_absent_keys():
     assert record["author_profile_url"] == "https://weibo.com/u/88"
     assert record["note_url"] == "https://weibo.com/88/Abc12"
     assert record["mblogid"] == "Abc12"
-    assert record["author_verified"] is None
-    assert record["author_verified_text"] is None
+    assert record["author_verified"] == 1
+    assert record["author_verified_text"] == "机构认证、机构"
     assert record["author_json"]["weibo_verify"] == {
         "verified": True,
         "verified_type": 1,
@@ -212,6 +212,41 @@ def test_zero_followers_stay_observed():
     record = _record(user=_user(followers_count=0))
     assert record["followers_count"] == 0
     assert record["followers_observed"] is True
+
+
+@pytest.mark.parametrize(
+    ("fields", "expected"),
+    [
+        # #213：0 为个人，文字取认证说明。
+        ({"verified": True, "verified_type": 0, "verified_reason": " 本地资讯博主（青岛） "}, (1, "本地资讯博主（青岛）")),
+        ({"verified": True, "verified_type": 0, "verified_reason": ""}, (1, None)),
+        # 0 与 -1 以外一律记为机构，不按类型码细分，未见过的值也算机构。
+        ({"verified": True, "verified_type": 1, "verified_reason": "青岛市文化和旅游局"}, (1, "机构认证、青岛市文化和旅游局")),
+        ({"verified": True, "verified_type": 3, "verified_type_ext": 53, "verified_reason": "媒体"}, (1, "机构认证、媒体")),
+        ({"verified": True, "verified_type": 7, "verified_reason": "   "}, (1, "机构认证")),
+        ({"verified": True, "verified_type": 6}, (1, "机构认证")),
+        ({"verified": True, "verified_type": 200, "verified_reason": "达人"}, (1, "机构认证、达人")),
+        # 类型码缺失或不是整数时不判定机构，只写说明。
+        ({"verified": True, "verified_reason": "说明"}, (1, "说明")),
+        ({"verified": True, "verified_type": "1", "verified_reason": "说明"}, (1, "说明")),
+        ({"verified": True, "verified_type": True, "verified_reason": "说明"}, (1, "说明")),
+        ({"verified": True, "verified_type": -1, "verified_reason": "说明"}, (1, "说明")),
+        # 未认证为 0；verified 缺失或不是布尔值时不推断。
+        ({"verified": False, "verified_type": -1, "verified_reason": ""}, (0, None)),
+        ({"verified": False, "verified_type": 1, "verified_reason": "机构"}, (0, None)),
+        ({"verified_type": 1, "verified_reason": "机构"}, (None, None)),
+        ({"verified": 1, "verified_type": 1, "verified_reason": "机构"}, (None, None)),
+        ({"verified": "true", "verified_type": 1}, (None, None)),
+    ],
+)
+def test_author_verification_rule(fields, expected):
+    user = _user()
+    for key in ("verified", "verified_type", "verified_type_ext", "verified_reason"):
+        user.pop(key)
+    user.update(fields)
+    assert weibo_store.weibo_author_verification(user) == expected
+    record = _record(user=user)
+    assert (record["author_verified"], record["author_verified_text"]) == expected
 
 
 def test_image_spec_order_skips_unknown_types_and_missing_pids():
@@ -261,7 +296,8 @@ def test_projected_record_passes_formal_validation_and_keeps_verify_blob():
     assert row["author_following_count"] == 4
     assert row["author_posts_count"] == 6
     assert row["author_description"] == "简介"
-    assert row["author_verified"] is None
+    assert row["author_verified"] == 1
+    assert row["author_verified_text"] == "机构认证、机构"
     assert row["author_profile_url"] == "https://weibo.com/u/88"
     assert row["canonical_url"] == "https://weibo.com/88/Abc12"
 
