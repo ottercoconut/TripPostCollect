@@ -27,7 +27,8 @@
 - warmup 用同一判定：首页 `HasUserLogin` 为 `"1"` 即成功；否则等待人工登录，关闭重开 profile 后再读一次。
   抖音不再读取 `LOGIN_STATUS` Cookie，warmup 也不再写抖音 Cookie 快照。
 - 风控判定只认可见特征。页面 DOM 里常驻一个隐藏的空验证码容器（2026-11-20 侦察，#222），所以：
-  - 验证码或滑块容器（类名或 ID 含 `captcha`、`verify` 域名的 iframe）必须在可视区内可见才算命中；
+  - 验证码或滑块容器（类名或 ID 含 `captcha`、`verify` 域名的 iframe）必须可见才算命中：宽高都不小于 40，
+    `display`、`visibility` 未隐藏，`opacity` 不为 0，并且在可视区内；
   - 落到验证域名、可见的验证码容器，或页面出现“验证码”“请完成下列验证”，是 `captcha_detected`；
   - 可见的“操作过于频繁”“请稍后再试”一类提示是 `rate_limited`；
   - 可见的登录面板是 `login_required`。
@@ -51,9 +52,12 @@
 - 搜索访问写入访问账本，每条带：
   - 连续 `search_page`（从 1 起）；
   - `is_target=true`；
-  - 本页登记的全部 `aweme_id` 与类型（图文或视频）；
+  - 本页登记的全部 `aweme_id` 与类型（`image` 或 `video`，门禁 R2 只排除 `video`）；
   - `has_more`；
   - `search_session`。
+
+  首页访问的触发是导航，后续页是滚轮前写下的 `scroll` 动作。搜索响应由 #124 的截获读一次响应体，
+  页面采纳该页后再按规则写访问行，不另挂一条会再次读体的截获规则。
 - 图文在综合搜索里占比低：2026-11-20 侦察中，前 5 页 49 条结果只有 3 条图文，其余是视频或聚合卡。
 
 ### 搜索接口契约
@@ -125,7 +129,7 @@ checkpoint 仍写入本轮最后的 page、offset、search ID 与停止原因供
   不打开详情，不请求作者，不写内容记录，也不下载媒体。
 - 每条未知图文候选都在搜索页真实点击卡片 `#waterfall_item_{aweme_id}`：
   - 卡片不在可视区时，先用可见滚轮把它带入可视区；
-  - 点击前写一段 `search_results` 停顿（随机 1.2–2.8 秒）；
+  - 点击前写一段 `search_results` 停顿（随机 1.2–2.8 秒，连续性为 `completed`）；
   - 点击卡片后，页面在同一标签打开浮层，地址栏变为 `?modal_id={aweme_id}`。
 - 打开浮层后 8 秒内，经已登记的状态脚本读取浮层状态（规则 `douyin.modal_state`，`page_state`）：
   - 地址栏 `modal_id`；
@@ -144,7 +148,8 @@ checkpoint 仍写入本轮最后的 page、offset、search ID 与停止原因供
   - 关闭后在本轮后续浮层里保持关闭。之后每次读取浮层状态，开关仍须为关闭；若重新开启，按上一条
     再关一次。
 - 浮层停留随机 5–9 秒（账本阶段 `note_detail`），然后打开作者（见下文）。
-- 关闭浮层：Esc 无效。点击左上角的圆形关闭按钮（账本动作 `close_overlay`）。打开过作者侧栏时，第一次
+- 关闭浮层：Esc 无效，`[data-e2e="video-close"]` 也点不掉。点击左上角的圆形关闭按钮（账本动作 `close_overlay`）：
+  按几何条件选取，在视口左上 140×140 内、宽高 24–88、接近正方形、最靠左上的可见控件，不写死坐标。打开过作者侧栏时，第一次
   点击只是从侧栏返回，要再点一次才关闭。地址栏不再带 `modal_id` 才算关闭。连续 3 次点击仍未关闭，是
   运行级阻断：`runtime_failed`，`stop_detail=douyin_modal_close_failed`。浮层没关会挡住后续卡片的点击，
   不能带着它继续。
@@ -174,8 +179,9 @@ checkpoint 仍写入本轮最后的 page、offset、search ID 与停止原因供
      `open_author_panel`），页面右侧打开“TA的作品”侧栏。浮层里同时有前后几条作品，选择器必须限定在
      `feed-active-video` 内。
   2. 点作者前写一段 `creator_profile` 停顿（1–2 秒），再点击侧栏标题处的作者链接（账本动作
-     `click_author`）。这个链接是 `a[href*="/user/"]`、`target=_blank`，要排除页面顶部当前账号自己的
-     `/user/self` 链接。
+     `click_author`）。这个链接是 `a[target="_blank"][href*="/user/"]`，路径段等于卡片 `author.sec_uid`，
+     要排除页面顶部当前账号自己的 `/user/self` 链接。侧栏没有稳定的容器选择器，所以另加几何条件：链接
+     左边缘不小于当前播放项右边缘减 8 像素，且纵坐标不超过 220，播放器内部的作者链接不会被选中。
 - 点击后 8 秒内出现新标签 `https://www.douyin.com/user/{sec_uid}?…`。新标签 URL 中的 `sec_uid` 必须等于
   搜索卡片 `author.sec_uid`。
 - 作者数据是作者页自身请求 `/aweme/v1/web/user/profile/other/` 的响应（被动截获，规则 `douyin.user_profile`，
@@ -183,7 +189,8 @@ checkpoint 仍写入本轮最后的 page、offset、search ID 与停止原因供
   同一作者页会出现多条该路径的响应，其中包括当前登录账号自己的资料（2026-11-20 侦察），都不参与。
 - 访问账本中，作者访问的 `subject_id` 是资料 `user.uid`。作者页 URL 的 `sec_uid` 与资料 `user.sec_uid`
   一致时，`url_user_id` 记同一 uid；不一致时不登记作者访问。
-- 作者标签停留随机 5–9 秒后关闭，回到浮层。
+- 作者标签停留随机 5–9 秒（账本阶段 `author_tab`，不参与 R6）后关闭，回到浮层。点作者前的 1–2 秒
+  才是 `creator_profile` 停顿。
 - 不用侧栏代替作者页：侧栏有时不发资料请求、只显示“0粉丝”占位，侧栏打开后还会按“顺序连播”切到该作者
   的其他作品（2026-11-20 侦察，4 次中 2 次没有资料请求）。
 - 字段（#116、#163，键名与 2026-11-20 侦察一致）：
@@ -215,7 +222,8 @@ checkpoint 仍写入本轮最后的 page、offset、search ID 与停止原因供
 
   以下是运行级阻断，不写 seen：
   - 资料响应为 401（`login_required`）；
-  - 403 且响应体含 `ArgusSecurityPlugin` 或 `Blocked by`（`blocked_or_forbidden`）；
+  - 403（`blocked_or_forbidden`）。被拦截时响应往往不是 JSON，看不到 `ArgusSecurityPlugin` 一类标记，
+    所以资料响应只要是 403 就停止；
   - 429（`rate_limited`）；
   - 作者页落到登录、验证码或频控。
 - worker 判定有效与导入门禁一致：没有 `creator_profile` 粉丝、正文证据或正文图的候选不算有效，也不下载
