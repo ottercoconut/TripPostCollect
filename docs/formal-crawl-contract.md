@@ -20,6 +20,8 @@
 >
 > **授权记录（2026-11-20）：** 操作人决定微博 50 页上限在默认模式下按来源耗尽处理，并授权临时解冻以同步
 > #217 显式时间窗模式。
+>
+> **授权记录（2026-11-20）：** 操作人授权临时解冻，同步 #222 抖音页面取数与访问门禁口径。
 
 本文定义正式抓取的机器语义。平台参数和必需字段 profile：通用平台在
 `config/crawl_targets.json` 中配置；小红书在 `config/xhs_targets.json` 和
@@ -138,7 +140,7 @@ BrowserContext；只有触发轮的精确租约已经释放且 `runtime_session_
 取数来源分三级：L1 为被动截获页面自身发出的请求的响应，或读取页面状态；L2 为在页面上下文中
 主动发起请求；L3 为 Playwright `page.request` / `context.request`。L3 对所有平台禁止。浏览器外
 HTTP 客户端（httpx 等）不属于以上任何一级：已纳入访问门禁的平台不得用它取得平台数据，只有平台
-文档登记的例外（如知乎、微博图片直连 CDN：UA 取自浏览器、Referer 固定为站点、不带 cookie）可以使用。已纳入访问门禁的
+文档登记的例外（如知乎、微博、抖音图片直连 CDN：UA 取自浏览器、Referer 固定为站点、不带 cookie）可以使用。已纳入访问门禁的
 平台只能经页面取数通道取得平台数据，静态检查 `tests/test_fetch_boundary.py` 禁止旁路导入、Playwright
 请求接口和页面脚本内的主动请求；L3 的静态检查覆盖全部平台目录。
 小红书已纳入访问门禁，搜索、详情、作者、图片与登录态只用 L1，没有例外。知乎（#185）已纳入访问门禁。
@@ -153,10 +155,17 @@ discovery 链为 `search_results → note_detail → creator_profile → images`
 （L1，`page_response`），不另开作者页，与详情同一次触发；正文图是登记过的 CDN 直连例外，UA 取自浏览器，
 Referer 固定为 `https://weibo.com/`，不带 Cookie，不经第三方代理，访问账本以 `cdn_direct` 登记并参与 R5。
 repair 链没有搜索访问：指定 `weibo.com/{uid}/{mid}` 以 `navigate` 打开详情。每条微博入库记录须经
-`content_visit_ok`。B站和抖音目前不纳入访问门禁（#111），
+`content_visit_ok`。抖音（#222）已纳入访问门禁。discovery 链为
+`search_results → note_detail → creator_profile → images`：搜索是本轮搜索页自身 `/general/search/stream/` 与
+`/single/` 的被动截获（L1，`page_response`），截获不到即 `runtime_failed:browser_search_response_missing`；详情由
+真实点击搜索卡片在同一标签打开浮层，经已登记的状态脚本读取地址栏 `modal_id` 与当前播放项（L1，`page_state`），
+浮层不另发作品请求，正文取同一轮截获的搜索卡片 `aweme_info`；作者由浮层内两步真实点击（头像打开侧栏，再点
+侧栏作者链接）打开新标签作者页，被动截获页面自身的 `/aweme/v1/web/user/profile/other/`（L1，`page_response`），
+只接受 `user.sec_uid` 与作者页 URL、搜索卡片作者一致的那一条；正文图是登记过的 CDN 直连例外，UA 取自浏览器，
+Referer 固定为 `https://www.douyin.com/`，不带 Cookie，不经第三方代理，访问账本以 `cdn_direct` 登记并参与 R5。
+抖音没有 repair 链。每条抖音入库记录须经 `content_visit_ok`。B站目前不纳入访问门禁（#111），
 计划在 2026-11-12（UTC−8）之后重构（#157）：浏览器负责登录、Cookie
-与行为证据，搜索、详情、作者与图片由浏览器外 HTTP 客户端取得，不写访问账本，也不参与 `content_visit_ok`。抖音搜索例外（#124）：只经浏览器截获本轮
-搜索页自身请求的响应，截获不到即 `runtime_failed:browser_search_response_missing`，不改走浏览器外请求。
+与行为证据，搜索、详情、作者与图片由浏览器外 HTTP 客户端取得，不写访问账本，也不参与 `content_visit_ok`。
 其中正文图片请求不带平台 Cookie，也不经第三方代理。
 
 每轮写只追加的访问账本（行为证据同目录的 `content_visits` JSONL），以单一单调序号记录动作、
@@ -173,6 +182,8 @@ repair 链没有搜索访问：指定 `weibo.com/{uid}/{mid}` 以 `navigate` 打
 知乎 discovery 按列表点击、再点作者的顺序核验；repair 链的详情由指定 URL `navigate` 打开，不要求先有搜索访问。
 微博的作者访问不由点击触发：它必须与详情位于同一标签、晚于打开详情的那次点击或导航，且作者 ID 与
 `statuses/show` 的作者 ID 一致。
+抖音的作者访问由浮层内点击侧栏作者链接（`click_author`）触发、在新标签打开；作者页 URL 中的 `sec_uid` 与资料
+`user.sec_uid` 一致时，访问记录的作者 ID（资料 `user.uid`）才视为与页面 URL 一致。
 
 ## 来源耗尽与计数字段
 
@@ -319,7 +330,7 @@ checkpoint 按最后完整批次正常推进。`candidate_skipped` 不增加有�
 | B站 article | `article_view_api` | `content_text/content` | 搜索 `desc`、预览图 |
 | 微博 | `desktop_detail`；历史行仍可能是 `search_mblog_complete`、`mobile_detail` | `content_text/content` | 列表截断正文、HTML `text`、标题 |
 | 小红书 | `note_detail` | `desc` | 搜索卡片摘要、标题 |
-| 抖音 | `search_aweme_info`、`aweme_detail` | `desc` | 标题、封面或预览文本 |
+| 抖音 | `search_aweme_info`；历史行仍可能是 `aweme_detail` | `desc` | 标题、封面或预览文本 |
 | 知乎 | `answer_detail`、`article_detail`；历史行仍可能是 `search_content` | `content_text/content` | `title`、`desc/excerpt` |
 
 平台详情、作者与粉丝的具体来源由 `required_fields_profile`、

@@ -101,6 +101,12 @@ def weibo_required_stages(facts: LedgerFacts, mode: str) -> RequiredStages:
     return zhihu_required_stages(facts, mode)
 
 
+def douyin_required_stages(facts: LedgerFacts, mode: str) -> RequiredStages:
+    """与知乎相同：有详情才要求搜索结果与详情停顿，有滚动翻页才要求翻页停顿，有点作者才要求作者停顿。"""
+
+    return zhihu_required_stages(facts, mode)
+
+
 def xhs_required_stages(facts: LedgerFacts, mode: str) -> RequiredStages:
     pacing: set[str] = set()
     if mode == "discovery":
@@ -195,9 +201,31 @@ VISIT_POLICIES: dict[str, VisitPolicy] = {
         checks_filter_entry=False,
         creator_from_detail_page_response=True,
     ),
+    # #222：没有 repair 链。正文图以 cdn_direct 登记，入库须过 content_visit_ok。
+    "douyin": VisitPolicy(
+        platform="douyin",
+        chains={
+            "discovery": ("search_results", "note_detail", "creator_profile", "images"),
+        },
+        stages={
+            "discovery": {
+                "search_results": StageSpec("douyin.search_response", "page_response"),
+                "note_detail": StageSpec("douyin.modal_state", "page_state", trigger="click_card"),
+                "creator_profile": StageSpec("douyin.user_profile", "page_response", trigger="click_author"),
+                "note_image": StageSpec("douyin.content_image", "cdn_direct"),
+            },
+        },
+        target_filter="",
+        required_stages=douyin_required_stages,
+        record_id_field="aweme_id",
+        record_user_field="creator_hash",
+        target_id_field="aweme_id",
+        detail_page_role="primary",
+        checks_filter_entry=False,
+    ),
 }
 # 已纳入访问门禁的平台；平台在其取数改造完成的批次加入。
-VISIT_GATED_PLATFORMS: frozenset[str] = frozenset({"xhs", "zhihu", "weibo"})
+VISIT_GATED_PLATFORMS: frozenset[str] = frozenset({"xhs", "zhihu", "weibo", "douyin"})
 
 
 def _seq(line: Mapping[str, Any]) -> int:

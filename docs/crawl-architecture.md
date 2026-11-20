@@ -5,6 +5,8 @@
 > **授权记录（2026-11-13）：** 操作人授权临时解冻，同步 #185 知乎页面取数、访问门禁与全量扫描口径。
 >
 > **授权记录（2026-11-19）：** 操作人授权临时解冻，同步 #211 微博桌面站页面取数、访问门禁与全量扫描口径。
+>
+> **授权记录（2026-11-20）：** 操作人授权临时解冻，同步 #222 抖音页面取数与访问门禁口径。
 
 本文只描述组件边界和数据流。完成谓词、错误分类和候选记忆语义见
 [正式抓取执行契约](formal-crawl-contract.md)，操作步骤见[运行手册](operations-runbook.md)，表结构、
@@ -96,9 +98,9 @@ worker、是否启动执行和并发上限，便于区分 dry-run 计划与正�
 ```text
 平台详情/正文结构
   -> 显式 ImageCandidate(role=content)
-  -> B站、抖音：浏览器外 HTTP 客户端直连图片 CDN 下载到本轮 staging（只带 UA、Referer、Accept，
+  -> B站：浏览器外 HTTP 客户端直连图片 CDN 下载到本轮 staging（只带 UA、Referer、Accept，
      不带平台 Cookie，不经第三方代理）
-     知乎、微博：登记的 CDN 直连例外（UA 取自浏览器，Referer 固定为平台站点，不带 Cookie，访问账本记 cdn_direct）
+     知乎、微博、抖音：登记的 CDN 直连例外（UA 取自浏览器，Referer 固定为平台站点，不带 Cookie，访问账本记 cdn_direct）
      小红书：浏览器翻看时截获的图片响应体写入本轮 staging
   -> 原子追加 image_manifest.jsonl
   -> 根项目按同一投影核对身份和数量
@@ -149,10 +151,15 @@ worker、是否启动执行和并发上限，便于区分 dry-run 计划与正�
 详情与作者都是详情标签页面自身请求的被动截获（`weibo.statuses_show`、`weibo.side_user` / `page_response`），
 作者不另开页面。正文图同样是登记的 CDN 直连例外，账本来源为 `cdn_direct`。
 
+抖音（#222）搜索是本轮搜索页自身请求的被动截获（`douyin.search_response` / `page_response`）；详情由点击搜索卡片
+在同一标签打开浮层，经登记的状态脚本读取 `modal_id` 与当前播放项（`douyin.modal_state` / `page_state`），浮层不另发
+作品请求，正文取同一轮的搜索卡片；作者由浮层内两步点击打开新标签作者页，被动截获页面自身的资料请求
+（`douyin.user_profile` / `page_response`）。正文图是登记的 CDN 直连例外，账本来源为 `cdn_direct`。
+
 取数分级以[正式契约](formal-crawl-contract.md#取数来源与真实访问门禁)为准，本文不另行定义：L3 只指
 Playwright `page.request` / `context.request`，所有平台禁止；浏览器外 HTTP 客户端单列，已纳入门禁的
-平台只允许平台文档登记的例外。小红书没有此类例外。知乎（#185）与微博（#211）的例外是正文图 CDN 直连。
-B站和抖音目前不纳入门禁（#111），计划在
+平台只允许平台文档登记的例外。小红书没有此类例外。知乎（#185）、微博（#211）与抖音（#222）的例外是正文图
+CDN 直连。B站目前不纳入门禁（#111），计划在
 2026-11-12（UTC−8）之后重构（#157）。静态检查 `tests/test_fetch_boundary.py`
 守护旁路导入、Playwright 请求接口和页面脚本内的主动请求。
 
@@ -193,7 +200,7 @@ dry-run 只证明这些计划已固定，不会创建 scheduler attempt 或启�
 |---|---|---|---|
 | B站 article | 项目自有 article 搜索/详情分支 | article API、详情正文门禁 | [B站](platforms/bilibili.md) |
 | 微博 | 根包平台适配器搜索 | 桌面站页面取数、访问门禁、每轮全量扫描 | [微博](platforms/weibo.md) |
-| 抖音 | 根包平台适配器搜索 | 浏览器响应监听、每轮全量扫描 | [抖音](platforms/douyin.md) |
+| 抖音 | 根包平台适配器搜索 | 页面截获搜索与作者、浮层页面状态、访问门禁、每轮全量扫描 | [抖音](platforms/douyin.md) |
 | 知乎 | 根包平台适配器搜索 | 页面截获搜索、详情与作者页面状态、访问账本、zhimg CDN 直连 | [知乎](platforms/zhihu.md) |
 | 小红书 | 独立 runner + 根包平台适配器 | 逻辑账号租约、轮内扫码、标签页保护 | [小红书](platforms/xhs.md) |
 

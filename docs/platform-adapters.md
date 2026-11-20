@@ -18,6 +18,9 @@
 > - B 节“确定目录”中部分目标文件未按原计划建立（如 `application/bilibili_repair.py`、`scheduler/runner.py`、
 >   `xhs/runner.py`、`platforms/zhihu/login.py`、`resources/js/stealth.min.js`），另有 `visit_gate.py`、
 >   `page_capture.py` 等后来新增的模块未列出；实际目录以仓库为准。
+> - 抖音已改为页面取数并纳入访问门禁（#222，2026-11-20）：没有 HTTPX 搜索、详情或作者客户端，没有 `a_bogus`
+>   签名、`douyin.js`、`login.py`/`login_support.py`（含滑块），`pyexecjs`、`opencv-python`、`numpy` 已移出依赖；
+>   详见[抖音平台文档](platforms/douyin.md)。
 > - 项目 Python 目标为 3.12（不是 3.11）。
 > - 粉丝策略 `followers_policy` 只接受 `required`；文中“平台不提供时声明 `ignored`”的设想没有实现。
 
@@ -1023,7 +1026,7 @@ fork 的 `M/pyproject.toml`；v0.3 研究时未运行这些调用，不重新验
 | Pillow | [image_materialization.py](../src/trippostcollect/artifacts/image_materialization.py)：141、156、160 | 图片打开/verify 与项目错误映射，不自写图片解码器 |
 | Tenacity | XHS client（`M/media_platform/xhs/client.py`）：168；微博 client（`M/media_platform/weibo/client.py`）：104；知乎 client（`M/media_platform/zhihu/client.py`）：90 | 保留各自次数/等待/传播，不叠一层全额重试 |
 | Playwright | [mediacrawler_crawl.py](../scripts/mediacrawler_crawl.py)：1011 | 原 CfT/浏览器行为、登录和借用能力，不重包全部 API |
-| pyexecjs/execjs | 知乎 help.py（`M/media_platform/zhihu/help.py`）：253；抖音 client.py（`M/media_platform/douyin/client.py`）：388 | 知乎侧已于 #185 删除；抖音仍用既有 JS 桥和资源，所读接入排除 general/search，不外推所有请求 |
+| pyexecjs/execjs | 知乎 help.py（`M/media_platform/zhihu/help.py`）：253；抖音 client.py（`M/media_platform/douyin/client.py`）：388 | 知乎侧已于 #185 删除，抖音侧已于 #222 删除，`pyexecjs` 已移出依赖 |
 | 标准库 urllib | [mediacrawler_crawl.py](../scripts/mediacrawler_crawl.py)：4970 | B站 article 原 HTTP 链，不能为统一请求栈改成 HTTPX |
 | Scrapling/Patchright | [ctf_scrapling_preflight.py](../scripts/ctf_scrapling_preflight.py)：217；[ctf_resource_crawl.py](../scripts/ctf_resource_crawl.py)：794 | 既有辅助路径原样保留，不据此称五站正式路径使用它们 |
 | requests/lxml | v0.6专项静态证据：requests属贴吧client；lxml属知乎Parsel与根Scrapling | requests随死支路退出后裁，lxml活跃闭包保留；T12验引用与安装 |

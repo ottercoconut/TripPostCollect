@@ -139,7 +139,7 @@ def load_post_repair_targets(
     *,
     db_path: str | Path | None = None,
 ) -> list[dict[str, Any]]:
-    if platform_key not in {"douyin", "weibo", "zhihu"}:
+    if platform_key not in {"weibo", "zhihu"}:
         raise SystemExit(f"unsupported post repair platform: {platform_key}")
     path = Path(path_value).expanduser().resolve()
     try:
@@ -172,25 +172,18 @@ def load_post_repair_targets(
             )
         else:
             parsed = urlparse(detail_target.split("#", 1)[0].split("?", 1)[0])
-            if platform_key == "douyin":
-                valid = bool(
-                    parsed.scheme == "https"
-                    and parsed.hostname in {"douyin.com", "www.douyin.com"}
-                    and re.fullmatch(rf"/(?:video|note)/{re.escape(post_id)}/?", parsed.path)
+            answer = bool(
+                parsed.hostname in {"zhihu.com", "www.zhihu.com"}
+                and re.fullmatch(
+                    rf"/question/[^/]+/answer/{re.escape(post_id)}/?",
+                    parsed.path,
                 )
-            else:
-                answer = bool(
-                    parsed.hostname in {"zhihu.com", "www.zhihu.com"}
-                    and re.fullmatch(
-                        rf"/question/[^/]+/answer/{re.escape(post_id)}/?",
-                        parsed.path,
-                    )
-                )
-                article = bool(
-                    parsed.hostname == "zhuanlan.zhihu.com"
-                    and re.fullmatch(rf"/p/{re.escape(post_id)}/?", parsed.path)
-                )
-                valid = bool(parsed.scheme == "https" and (answer or article))
+            )
+            article = bool(
+                parsed.hostname == "zhuanlan.zhihu.com"
+                and re.fullmatch(rf"/p/{re.escape(post_id)}/?", parsed.path)
+            )
+            valid = bool(parsed.scheme == "https" and (answer or article))
         if not valid:
             raise SystemExit(
                 f"post repair target does not match {platform_key} ID {post_id}: {detail_target!r}"

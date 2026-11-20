@@ -567,7 +567,7 @@ def test_worker_explicit_checkpoint_uses_real_publisher_and_ack(scenario, monkey
     monkeypatch.setattr(events, "_batch_publisher", None)
     # 根入口不导入 fork 由 tests/architecture/test_package_boundaries.py 的导入扫描承担，
     # 选站只装载本站由 tests/architecture/test_selected_platform_loading.py 承担。
-    for name in ("_weibo_post_repair", "_douyin_browser_detail_fallback", "_xhs_repair"):
+    for name in ("_weibo_post_repair", "_xhs_repair"):
         monkeypatch.setattr(entry, name, getattr(entry, name))
     entry.install_hooks()
     events.append_worker_execution_event("adaptive_batch_completed", s.event)

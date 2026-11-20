@@ -856,19 +856,6 @@ def _run_platform_without_policy(
                 "TRIPPOSTCOLLECT_ZHIHU_INITIAL_SETTLE_SECONDS": "8",
             }
         )
-    elif platform_key == "douyin":
-        extra_env.update(
-            {
-                "TRIPPOSTCOLLECT_DOUYIN_ENRICH_CREATORS": "1",
-                "TRIPPOSTCOLLECT_DOUYIN_ENRICH_ONLY_IMAGES": "1",
-                "TRIPPOSTCOLLECT_DOUYIN_MAX_CREATOR_ENRICH": "-1",
-                "TRIPPOSTCOLLECT_DOUYIN_CREATOR_SLEEP_SECONDS": "0.25",
-                "TRIPPOSTCOLLECT_DOUYIN_BROWSER_DETAIL_FALLBACK": (
-                    "1" if getattr(args, "post_repair", False) else "0"
-                ),
-                "TRIPPOSTCOLLECT_DOUYIN_BROWSER_DETAIL_TIMEOUT_MS": "30000",
-            }
-        )
     if platform_key in {"xhs", "zhihu"}:
         browser_path = discover_cdp_browser_path()
         if browser_path:
@@ -1282,9 +1269,9 @@ def _run_main(
     args.post_repair_target_ids = set()
     args.post_repair_metadata_by_identity = {}
     if args.post_repair:
-        if len(platforms) != 1 or platforms[0] not in {"douyin", "weibo", "zhihu"}:
+        if len(platforms) != 1 or platforms[0] not in {"weibo", "zhihu"}:
             raise SystemExit(
-                "--post-repair requires exactly one of --platforms douyin, weibo, or zhihu"
+                "--post-repair requires exactly one of --platforms weibo or zhihu"
             )
         if not args.repair_targets_file:
             raise SystemExit("--post-repair requires --repair-targets-file")

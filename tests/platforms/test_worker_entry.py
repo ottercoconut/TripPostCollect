@@ -187,7 +187,7 @@ def test_configure_does_not_import_any_platform(tmp_path: Path) -> None:
 
 @pytest.mark.installation
 def test_all_worker_platforms_import_in_root_environment_without_exit_slices(tmp_path: Path) -> None:
-    # 抖音在导入时编译 libs/douyin.js，需要 Node；以任意 cwd 验证不依赖仓库目录
+    # 以任意 cwd 验证 worker 导入不依赖仓库目录。
     probe = (
         "import importlib, json\n"
         f"from {ENTRY_MODULE} import configure, load_crawler\n"

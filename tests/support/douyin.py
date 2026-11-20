@@ -27,7 +27,32 @@ def refresh_settings(crawler):
     """旧用例在构造后修改全局配置；迁入后显式替换该测试实例切片。"""
     dependencies = entry.douyin_dependencies(config)
     crawler.settings = dependencies["settings"]
-    crawler.inputs = dependencies["inputs"]
+
+
+def install_detail_passthrough(crawler, *, with_profile: bool = True):
+    """搜索单测不走浮层。补上作者资料，供粉丝量与主页字段判定。"""
+
+    class _Pages:
+        calls: list[str] = []
+
+        async def open_from_search(self, aweme, *, search_visit_id: str = ""):
+            del search_visit_id
+            self.calls.append(str(aweme.get("aweme_id") or ""))
+            item = dict(aweme)
+            if with_profile and not item.get("creator_profile"):
+                author = item.get("author") if isinstance(item.get("author"), dict) else {}
+                item["creator_profile"] = {
+                    "status_code": 0,
+                    "user": {
+                        "uid": author.get("uid"),
+                        "sec_uid": author.get("sec_uid"),
+                        "follower_count": 7,
+                    },
+                }
+            return item
+
+    crawler.detail_pages = _Pages()
+    return crawler.detail_pages
 
 
 class ProjectionStore:

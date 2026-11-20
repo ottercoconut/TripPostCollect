@@ -181,22 +181,22 @@ shasum -a 256 data/backups/trippostcollect-before-<run_id>.sqlite
 
 ## 通用平台历史详情修复
 
-`scripts/repair_post_details.py` 默认只处理抖音、微博或知乎中已经存在、但
+`scripts/repair_post_details.py` 默认只处理微博或知乎中已经存在、但
 `raw_sample_json.content_detail_status != detail_observed` 的记录。知乎另有离线图片去重和全量刷新两种模式，见下文「知乎历史回填」。它不是新内容发现入口：每个 child
 只接收冻结清单中的平台 ID 和详情入口，强制 `--no-checkpoint-write`，成功子集仍经过正文、作者粉丝、
 图片 staging/manifest、行为策略、长期媒体晋升和 SQLite 事务门禁。修复时逐条保留原记录的关键词，
 不会把本轮行为搜索词冒充原始发现词。
 
-知乎详情只在本轮页面缺少创建时间时，从同一旧行回填 `published_at`（载荷里的 `created_time` 同样只用于补这个时间）。粉丝、粉丝来源、`followers_observed`、关注、作品数、认证以及其他作者字段必须来自本次作者页，不得从旧行带回。微博（#211）的粉丝、关注、作品数与简介同样必须来自本次详情页 `sideUser`，不得从旧行带回。抖音仍可在本轮没有观察到粉丝时，把旧行的粉丝数、`followers_observed` 和来源整组回填；本轮已经观察到的粉丝数（包括真实 `0`）优先。正文、图片和 `answer_detail`/`article_detail`/`desktop_detail` 来源仍必须来自本次详情访问。若补齐后仍无
+知乎详情只在本轮页面缺少创建时间时，从同一旧行回填 `published_at`（载荷里的 `created_time` 同样只用于补这个时间）。粉丝、粉丝来源、`followers_observed`、关注、作品数、认证以及其他作者字段必须来自本次作者页，不得从旧行带回。微博（#211）的粉丝、关注、作品数与简介同样必须来自本次详情页 `sideUser`，不得从旧行带回。抖音的修复入口已随 #222 删除，页面取数版跟踪于 #223。正文、图片和 `answer_detail`/`article_detail`/`desktop_detail` 来源仍必须来自本次详情访问。若补齐后仍无
 有效详情，child 将本批标记为 `repair_no_valid_detail` 且不得把搜索载荷直接当作详情成功；无人值守总控
 按下文规则记录该批失败并继续后续批次，只有运行级阻断才停止平台总控。
 
-先检查通用平台登录，再按平台分别冻结计划。三个平台必须使用三个独立进程；不要在一个命令中混合：
+先检查通用平台登录，再按平台分别冻结计划。两个平台必须使用两个独立进程；不要在一个命令中混合：
 
 ```bash
 source .venv/bin/activate
 python scripts/repair_post_details.py \
-  --platform douyin \
+  --platform weibo \
   --keyword 青岛旅游 \
   --batch-size 20 \
   --dry-run
@@ -209,13 +209,13 @@ dry-run 会列出当前可执行目标数、拒绝目标样本、批次数、每
 ```bash
 source .venv/bin/activate
 python scripts/repair_post_details.py \
-  --platform douyin \
+  --platform weibo \
   --keyword 青岛旅游 \
   --batch-size 20 \
   --confirm-default-db-repair
 ```
 
-微博和知乎只替换 `--platform`。微博清单按 `https://weibo.com/{作者平台 ID}/{mid}` 绑定，没有作者平台 ID 的旧行被拒绝（#211）。单轮会按 `--batch-size` 扫描当前所有可执行待修复记录；
+知乎只替换 `--platform`。微博清单按 `https://weibo.com/{作者平台 ID}/{mid}` 绑定，没有作者平台 ID 的旧行被拒绝（#211）。单轮会按 `--batch-size` 扫描当前所有可执行待修复记录；
 `--max-items N` 用于小批试跑，`--post-id ID` 用于精确重试。详情或图片候选失败只留下该旧记录继续
 待修复，成功子集可以入库；运行级阻断（登录、验证码、频控、安全或策略、浏览器整体失败、运行权限
 或行为证据失败）以及 SQLite、媒体持久化一致性失败会停止后续批次。
@@ -252,7 +252,7 @@ state 旁的 worker 进程组兜底强杀。stdout / stderr 先做头像审计�
 `post_detail_repair_no_progress` 并失败退出；先按候选失败样本排障，不做无限循环。只有 child 声称成功
 入库但 SQLite 或媒体复验不一致时才使用 `post_detail_repair_persistence_not_verified`。
 
-用户在复核有限重试证据后明确表示某些微博、知乎或抖音帖子“不再修复”时，保留原帖和真实详情状态，
+用户在复核有限重试证据后明确表示某些微博或知乎帖子“不再修复”时，保留原帖和真实详情状态，
 把精确帖子登记到 `post_detail_repair_waivers`。登记前必须备份默认 SQLite，并在单一事务中保存原因、
 `authorized_by=user`、授权时间及来源 repair run；不得改 `content_detail_status` 或借用 discovery 排除表。
 后续自动选择和显式 `--post-id` 都把这些记录以 `post_detail_repair_waived` 拒绝。若本次范围全部已豁免，
@@ -344,7 +344,7 @@ python scripts/repair_post_details.py \
 
 ## 作者资料回填
 
-`scripts/backfill_author_profiles.py` 回填作者资料。小红书和抖音只填当前为 NULL 的作者列，不覆盖已有值，也不改粉丝、关注、昵称、正文、图片或 `published_at`。取不回的作者保留原行，不删除。写默认库前必须显式确认；程序在第一笔写入前建立 SQLite 一致性备份并记录 SHA-256。
+`scripts/backfill_author_profiles.py` 回填作者资料，只接受小红书和知乎；抖音回填原先走 httpx，已随 #222 删除，页面取数版跟踪于 #223。小红书只填当前为 NULL 的作者列，不覆盖已有值，也不改粉丝、关注、昵称、正文、图片或 `published_at`。取不回的作者保留原行，不删除。写默认库前必须显式确认；程序在第一笔写入前建立 SQLite 一致性备份并记录 SHA-256。
 
 小红书不访问平台：从该行 `raw_sample_json.creator_profile_json` 用与入库相同的 `creator_verified_fields` 计算 `author_verified` / `author_verified_text`。解析失败或投影为空的行保持不动，并记入报告。
 
@@ -352,23 +352,12 @@ python scripts/repair_post_details.py \
 
 知乎机构号认证是另一条离线修正，用 `--org-identity` 单独打开，与上面的关注数修正互斥：一次命令只做其中一件。不带该开关时，知乎仍只做关注数修正；带上该开关时只改机构号认证，不改关注数，也不访问平台。选行要求 `author_page_badges.isOrg` 为 JSON 布尔 true（`json_type` 为 `true`；字符串 `"true"` 或缺失都不改）。命中的行写 `author_verified=1`，`author_verified_text` 为 `机构号` 或 `机构号、<原文字>`，并同步 `raw_sample_json` 的 `author_verified` 与 `verified_text`。已经是 `author_verified=1` 且文字以“机构号”开头的行跳过，重复执行变更为 0。
 
-抖音按 `author_platform_id` 分组。每位作者按入库时间从新到旧最多尝试 3 个已有作品：先在 `--keyword` 搜索页完成与详情修复相同的人类行为，再取作品详情和作者资料。详情里的作者 ID 必须与行一致才写。写入的简介、认证和主页链接是回填当时的作者资料，不是原始抓取时刻的；`author_json.profile_backfill` 记录 `observed_at`、`run_id`、`source_aweme_id` 和认证候选原值。登录失效、验证码、频控、安全策略、浏览器整体失败或网络不可达会停止后续批次，已提交的写入保留；再次运行只挑仍有空列、且没有 `profile_backfill` 记录的作者（作者本就没有简介时该列一直为空，不反复联网）。HTTP 详情返回空壳时与详情修复相同，改用浏览器打开作品页取详情；连续 10 位作者都只得到空详情时，按运行级阻断 `consecutive_empty_detail` 停止。
-
 先 dry-run，确认目标数、样本和批次计划。dry-run 不访问平台、不备份、不写库：
 
 ```bash
 source .venv/bin/activate
 python scripts/backfill_author_profiles.py \
   --platform xhs \
-  --dry-run
-```
-
-```bash
-source .venv/bin/activate
-python scripts/backfill_author_profiles.py \
-  --platform douyin \
-  --keyword 青岛旅游 \
-  --batch-size 20 \
   --dry-run
 ```
 
@@ -393,16 +382,6 @@ python scripts/backfill_author_profiles.py \
 source .venv/bin/activate
 python scripts/backfill_author_profiles.py \
   --platform xhs \
-  --confirm-default-db-backfill
-```
-
-```bash
-source .venv/bin/activate
-python scripts/backfill_author_profiles.py \
-  --platform douyin \
-  --keyword 青岛旅游 \
-  --batch-size 20 \
-  --max-authors 20 \
   --confirm-default-db-backfill
 ```
 
@@ -594,9 +573,9 @@ python scripts/login_warmup.py \
 `outputs/login_warmup/<run_id>/summary.json` 和 `summary.md`。它不抓内容或写内容表。
 
 四个通用平台的持久 profile 位于 `data/runtime/platform_sessions/<platform>/profile`（`<platform>` 为
-`bilibili`、`weibo`、`douyin`、`zhihu`）。B站、抖音、知乎的 Cookie 快照位于同级的
-`data/runtime/platform_sessions/<platform>/trippostcollect_cookie_snapshot.json`，权限 `0600`；微博只用页面取数，
-warmup 不写快照（#211）；位置只由
+`bilibili`、`weibo`、`douyin`、`zhihu`）。B站、知乎的 Cookie 快照位于同级的
+`data/runtime/platform_sessions/<platform>/trippostcollect_cookie_snapshot.json`，权限 `0600`；微博（#211）与抖音（#222）
+只用页面取数，warmup 不写快照；位置只由
 `trippostcollect.core.paths` 定义。新 profile 不存在时按首登流程创建空目录，需要人工登录。
 快照另存登录 page 的 `navigator.userAgent`（`user_agent` 字段），供不开浏览器的请求（B站 repair）与浏览器
 保持同一 UA；#127 前写出的快照没有该字段，B站 repair 遇到时停止并要求重跑 warmup。
@@ -612,8 +591,9 @@ context 自带的第一页，不另开空白页。只有 `headless` 与浏览器
 `languages` 与 `timezone`，用于核对 CDP 实际环境，不能只凭进程参数判定一致。
 
 `crawl_runner.py` 只读取上述 Cookie 快照，不在缺快照时另起浏览器读取 profile；知乎缺快照或缺 `d_c0`/`z_c0`
-时任务直接失败，先运行本节 warmup 再重跑。微博（#211）不读取 Cookie 快照，持久 profile 是唯一登录态来源。
-warmup 报告中的登录结果只保留状态码、`uid`、`name`（微博只记 `$CONFIG.uid` 是否存在且为真）和清洗过的
+时任务直接失败，先运行本节 warmup 再重跑。微博（#211）与抖音（#222）不读取 Cookie 快照，持久 profile 是唯一登录态来源。
+warmup 报告中的登录结果只保留状态码、`uid`、`name`（微博只记 `$CONFIG.uid` 是否存在且为真，抖音只记
+`localStorage.HasUserLogin` 是否为 `"1"`）和清洗过的
 错误码/错误名，不保存平台原始响应或页面状态原值。
 
 微博（#211）只认桌面首页 `https://weibo.com/` 页面状态 `window.$CONFIG.uid` 存在且为真；未登录时把桌面
@@ -789,7 +769,7 @@ runner run_summary.json
 | path escape / file missing | 检查路径、symlink、清理程序和 staging 完整性 |
 | non-raster / decode / too-large / source-unavailable | 保留终态错误并跳过候选，不改后缀或伪造成功 |
 | HTTP 401/403、429、验证码、封禁 | 运行级阻断；保留前沿，不写候选 seen |
-| `network_timeout` + `stop_detail` 含 `network_unreachable` | B站、抖音的浏览器外请求重试用尽后仍是传输层失败（DNS、连接、超时、重置）：网络整体故障，与候选无关；运行级失败，不写 `candidate_skipped` 与 seen，900 秒后重试。先恢复本机网络或代理，不清理候选记忆；正文图片下载不在此列 |
+| `network_timeout` + `stop_detail` 含 `network_unreachable` | B站的浏览器外请求重试用尽后仍是传输层失败（DNS、连接、超时、重置）：网络整体故障，与候选无关；运行级失败，不写 `candidate_skipped` 与 seen，900 秒后重试。先恢复本机网络或代理，不清理候选记忆；正文图片下载不在此列 |
 | `sqlite_import_failed` | 确认整批数据库和本轮新媒体已回滚，checkpoint/seen/campaign 未推进 |
 | `persistence_verified` 失败 | 不 finalize；从摘要身份逐帖核对 SQLite 与文件 |
 | `source_exhaustion_not_persisted` | 子摘要未给出运行级阻断，正式门禁按 `formal_validation.stop_reason` 未满足；按该停止原因排查 |

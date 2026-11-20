@@ -15,6 +15,8 @@
 > **授权记录（2026-11-19）：** 操作人授权临时解冻，同步 #211 微博桌面站页面取数、访问门禁与全量扫描口径。
 >
 > **授权记录（2026-11-20）：** 操作人决定微博认证区分机构与个人（#213），授权临时解冻以同步判定口径。
+>
+> **授权记录（2026-11-20）：** 操作人授权临时解冻，同步 #222 抖音页面取数与访问门禁口径。
 
 ## 数据库文件
 
@@ -153,7 +155,7 @@ checkpoint、seen 与 campaign 更新。摘要或其 JSONL 缺失时冻结失败
 适配器 worker（`trippostcollect.platforms.entry`；B站 article 为进程内分支）后导入 `web_posts`；小红书由 `xhs_runner.py` 为人工指定逻辑账号申请互斥租约、创建本轮临时 profile，
 再调用同一底层执行器并在该轮唯一 BrowserContext 中完成人工登录。
 五个平台都把权威正文图下载到本轮 staging，原子生成 schema v1
-`image_manifest.jsonl`；根项目按同一显式投影复验 manifest、文件字节和身份。B站、抖音由浏览器外 HTTP 客户端直连图片 CDN 下载，只带 UA、Referer 与 Accept，不带平台 Cookie、不经第三方代理；小红书写入页面翻看时截获的图片响应体。知乎正文图不带平台 Cookie、不经第三方代理，UA 取自浏览器，Referer 固定为 `https://www.zhihu.com/`，访问账本以 `cdn_direct` 登记（#185）。微博正文图同样是登记的 CDN 直连例外，Referer 固定为 `https://weibo.com/`，访问账本以 `cdn_direct` 登记（#211）。只有来源耗尽、
+`image_manifest.jsonl`；根项目按同一显式投影复验 manifest、文件字节和身份。B站由浏览器外 HTTP 客户端直连图片 CDN 下载，只带 UA、Referer 与 Accept，不带平台 Cookie、不经第三方代理；小红书写入页面翻看时截获的图片响应体。知乎正文图不带平台 Cookie、不经第三方代理，UA 取自浏览器，Referer 固定为 `https://www.zhihu.com/`，访问账本以 `cdn_direct` 登记（#185）。微博正文图同样是登记的 CDN 直连例外，Referer 固定为 `https://weibo.com/`，访问账本以 `cdn_direct` 登记（#211）。抖音正文图同样是登记的 CDN 直连例外，UA 取自浏览器，Referer 固定为 `https://www.douyin.com/`，访问账本以 `cdn_direct` 登记（#222）。只有来源耗尽、
 字段、行为、策略和 staging 图片门禁全部通过，正式运行才晋升到 `data/media` 并注入统一入库映射；
 门禁未通过、晋升失败或已确认发生在提交前的 SQLite 导入回滚时，不得留下本轮新建的无引用长期媒体文件。平台显式投影后的全部 manifest 候选均须通过下载与字节复验；
 知乎同一 `v2-<32位十六进制>` 在生成 `image_list` 时只保留一张（#187），优先级 `_r` > 无后缀 > `_1440w` > `_720w` > `_b`，未知后缀排在 `_b` 之后，非 `v2-` 地址不参与合并。下载、manifest 和 `cdn_direct` 只含保留的那张。已观察且来源受信任的知乎回答/文章可以没有正文图（#191）：该帖不要求 manifest 行，`image_materialization` 的预期张数不增加，仍须 `complete=true`。下载后再仅在同帖内
@@ -193,7 +195,7 @@ B站正式调度用专栏/图文 article 搜索发现候选，但必须再取得
 | `content_text` | 仅接受 `content_detail_status=detail_observed` 且 `content_detail_source` 受信任的权威正文：B站 `content_text/content`，微博 `content_text/content`，小红书 `desc`，抖音 `desc`，知乎 `content_text/content`。小红书和知乎可在入库文本中拼接标题与已验证正文，但标题、搜索 `desc/excerpt` 或预览文本不能单独通过 |
 | `author_display_name` | `nickname`、`user_nickname`、`user_name` 或 `author_name`（按此顺序取第一个非空值） |
 | `author_platform_id` | 小红书 `user_id`、`creator_hash` 或其他平台用户 ID |
-| `author_followers_count` | 微博详情页 `sideUser` 的 `followers_count`（`author_followers_source=detail_side_user`），小红书作者主页补充字段 `fans_count`、`followers_count` 或 `fans`，知乎作者页 `followerCount`（`author_followers_source=author_page`）归一后的 `followers_count`，抖音只取作者主页响应 `user` 节点的粉丝字段（`creator_profile`，不读搜索作者对象） |
+| `author_followers_count` | 微博详情页 `sideUser` 的 `followers_count`（`author_followers_source=detail_side_user`），小红书作者主页补充字段 `fans_count`、`followers_count` 或 `fans`，知乎作者页 `followerCount`（`author_followers_source=author_page`）归一后的 `followers_count`，抖音只取作者页自身请求 `/user/profile/other/` 的 `user` 节点粉丝字段（`creator_profile`，#222 起为新标签作者页的被动截获；不读搜索作者对象） |
 | `published_at` | 发帖时间，统一保存为 Asia/Shanghai ISO 字符串，如 `2024-04-06T15:35:00+08:00`。优先取平台原始发布时间字段，如 `create_time`、`publish_time`、`time`、`datePublished`；`captured_at` 只表示本项目抓取时间 |
 | `keyword` | 优先保存每条记录的 `source_keyword`；缺失时回退到最终执行摘要的 `keyword`，即本次 child 命令实际使用的检索词。当前通用结构化 store 会逐条写入 `source_keyword`；自动 checkpoint 延续同一查询词，显式 `--recovery-keyword` 才会产生恢复词。旧记录缺少该字段时，回退值不能作为其原始检索词证据 |
 | `topic_relevant` | 使用与 `keyword` 相同的实际检索词，分别检查最终写入 `web_posts.title` 与 `web_posts.content_text` 的字符串。任一字段经 Unicode NFKC、大小写和空白归一后包含“青岛”或完整检索词为 1，否则为 0；字段之间不拼接，平台清洗前文本、raw JSON、作者、URL 或其他元数据均不参与 |
