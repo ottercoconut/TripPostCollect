@@ -568,6 +568,17 @@ sqlite3 data/backups/xhs_full_scan_migration/trippostcollect-<日期>.sqlite \
 
 派生配置从首次同步至验收完成不得修改，并作为该轮冻结证据保留；不要复用旧 one-off job key。
 
+### 微博时间窗 job（#217）
+
+需要微博单查询 50 页上限之外的结果时，在派生配置里为同一关键词配置一个或多个时间窗 job。每个 job 的
+`params.time_window` 写一个左闭右开的区间，`target_url` 写成对应的时间窗搜索地址。格式与语义见
+`docs/platforms/weibo.md`“时间窗模式”。
+
+- 一个 job 只有一个窗口，不会自动拆分。摘要显示某个窗口 `page_cap_reached=true` 时，说明该窗口内仍有
+  结果被上限截断；是否把它切细，另配新的 job，由操作人决定。
+- 时间窗的 job 之间、与默认 job 之间的重复帖子，会在打开详情前按已入库 ID 滑过，不需要人工去重。
+- 只有微博 job 能写 `time_window`，其他平台写了 runner 会拒绝。
+
 ## 登录
 
 ### 通用平台
@@ -583,8 +594,9 @@ python scripts/login_warmup.py \
 `outputs/login_warmup/<run_id>/summary.json` 和 `summary.md`。它不抓内容或写内容表。
 
 四个通用平台的持久 profile 位于 `data/runtime/platform_sessions/<platform>/profile`（`<platform>` 为
-`bilibili`、`weibo`、`douyin`、`zhihu`），Cookie 快照位于同级的
-`data/runtime/platform_sessions/<platform>/trippostcollect_cookie_snapshot.json`，权限 `0600`；位置只由
+`bilibili`、`weibo`、`douyin`、`zhihu`）。B站、抖音、知乎的 Cookie 快照位于同级的
+`data/runtime/platform_sessions/<platform>/trippostcollect_cookie_snapshot.json`，权限 `0600`；微博只用页面取数，
+warmup 不写快照（#211）；位置只由
 `trippostcollect.core.paths` 定义。新 profile 不存在时按首登流程创建空目录，需要人工登录。
 快照另存登录 page 的 `navigator.userAgent`（`user_agent` 字段），供不开浏览器的请求（B站 repair）与浏览器
 保持同一 UA；#127 前写出的快照没有该字段，B站 repair 遇到时停止并要求重跑 warmup。
