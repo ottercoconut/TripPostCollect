@@ -21,6 +21,8 @@ from trippostcollect.artifacts.image_completion import (
 from trippostcollect.artifacts.image_manifest import ImageManifestEntry, write_manifest_atomic
 from trippostcollect.artifacts.image_materialization import write_staging_image
 
+from support.formal_config import write_formal_config_all_enabled
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
@@ -136,7 +138,7 @@ def test_generic_dry_run_freezes_image_contract_for_all_four_platforms(
             "--db",
             str(db_path),
             "--config",
-            str(ROOT / "config" / "crawl_targets.json"),
+            str(write_formal_config_all_enabled(tmp_path)),
             "--run-root",
             str(tmp_path / "runs"),
             "--execution-state-root",

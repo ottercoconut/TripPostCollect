@@ -11,6 +11,8 @@ from types import SimpleNamespace
 
 from trippostcollect.db.bootstrap import bootstrap_connection
 
+from support.formal_config import formal_config_all_enabled
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
@@ -25,8 +27,7 @@ def command_value(command: list[str], flag: str) -> str:
 
 
 def test_enabled_bilibili_job_routes_to_formal_detail_executor(tmp_path: Path) -> None:
-    config_path = ROOT / "config" / "crawl_targets.json"
-    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config = formal_config_all_enabled()
     jobs = [
         item
         for item in config["jobs"]
