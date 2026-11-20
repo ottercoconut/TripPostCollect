@@ -13,6 +13,8 @@
 > **授权记录（2026-11-17）：** 操作人决定知乎机构号（作者页 isOrg 为 true）认证记为是、文字以“机构号”开头（#205）。
 >
 > **授权记录（2026-11-19）：** 操作人授权临时解冻，同步 #211 微博桌面站页面取数、访问门禁与全量扫描口径。
+>
+> **授权记录（2026-11-20）：** 操作人决定微博认证区分机构与个人（#213），授权临时解冻以同步判定口径。
 
 本文定义正式抓取的机器语义。平台参数和必需字段 profile：通用平台在
 `config/crawl_targets.json` 中配置；小红书在 `config/xhs_targets.json` 和
@@ -324,8 +326,9 @@ checkpoint 按最后完整批次正常推进。`candidate_skipped` 不增加有�
 不读取，入库为空，不作必需项。认证以作者页为准（#193、#205）：用户实体 `isOrg` 为严格布尔 true 的机构号，`author_verified` 为 1，文字以“机构号”开头；已有身份认证描述时写成“机构号、<原描述>”，没有描述时为“机构号”；即使 `badgeV2` 缺失或结构不对也如此。非机构号仍只认 `badgeV2.detailBadges` 中 `type` 为 `identity`、`detailType` 为 `identity_org` 或 `identity_people` 且 `badgeStatus` 为 `passed` 的项，此时为 1，文字为这些项的 `description`（机构在前，去重后用“、”连接）；读到 `badgeV2` 且 `detailBadges` 是列表但没有这两类时为 0、文字为空；没有 `badgeV2` 或结构不对则不推断。不用 `userType`、`/org/` 路径或 `orgVerifyStatus` 判断机构号。读不到作者页用户实体时不改。搜索 `verify_bayes` 与 `badge_v2.title` 不是认证来源。
 微博（#211）粉丝取详情页自身请求 `sideUser` 的 `followers_count`，来源为 `detail_side_user`；关注数为 `friends_count`，作品数为
 `statuses_count`；赞、评、分享取 `statuses/show` 的 `attitudes_count`、`comments_count`、`reposts_count`；以上缺键均为空，
-不补 0。微博不提供收藏数。认证原值写入 `author_json`，`author_verified` / `author_verified_text` 的判定口径待操作人决定，
-决定前为空。
+不补 0。微博不提供收藏数。认证原值写入 `author_json`。认证判定见 `platforms/weibo.md`（#213）：`verified` 为严格布尔
+true 时为 1、false 时为 0，其余情况为空，不推断；`verified_type` 为 0、-1 以外的整数记为机构，文字为“机构认证、<verified_reason>”，
+说明为空时为“机构认证”；其余已认证作者的文字为 `verified_reason`。
 详情或作者候选级失败服从上面的 `candidate_skipped` 规则，登录、授权、频控、验证码和
 风控仍属于运行级阻断。
 

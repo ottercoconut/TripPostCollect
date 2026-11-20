@@ -13,6 +13,8 @@
 > **授权记录（2026-11-17）：** 操作人决定知乎机构号（作者页 isOrg 为 true）认证记为是、文字以“机构号”开头（#205）。
 >
 > **授权记录（2026-11-19）：** 操作人授权临时解冻，同步 #211 微博桌面站页面取数、访问门禁与全量扫描口径。
+>
+> **授权记录（2026-11-20）：** 操作人决定微博认证区分机构与个人（#213），授权临时解冻以同步判定口径。
 
 ## 数据库文件
 
@@ -168,8 +170,9 @@ HTTP 401/403、429 及平台登录、验证码、安全限制、账号/IP 封禁
 没有时取 `text_raw`；正文图按 `pic_ids` 顺序取 `pic_infos` 的原尺寸规格。作者来自同页 `sideUser`：粉丝
 `followers_count`（`author_followers_source=detail_side_user`）、关注 `friends_count`（`author_following_count`）、
 作品数 `statuses_count`（`author_posts_count`）、简介 `description`（`author_description`）。互动与作者计数缺键为
-NULL，不补 0；收藏平台不提供。认证原值写入 `author_json.weibo_verify`，`author_verified` / `author_verified_text`
-待操作人决定口径，决定前为 NULL。小红书搜索会补拉
+NULL，不补 0；收藏平台不提供。认证原值写入 `author_json.weibo_verify`；`author_verified` / `author_verified_text`
+按 #213 判定：`verified` 为 true/false 时为 1/0，其余为 NULL；`verified_type` 为 0、-1 以外的整数时文字为
+“机构认证、<verified_reason>”（说明为空时为“机构认证”），个人为 `verified_reason`。小红书搜索会补拉
 作者主页指标。知乎回答/文章的发布时间、正文、图片和赞评藏来自详情页页面状态（分享平台不提供，#188）；粉丝来自作者页
 `followerCount`（`author_followers_count`），关注数来自 `followingCount`（`author_following_count`），作品数是
 `answerCount + articlesCount`（`author_posts_count`），缺键为 NULL，不补 0。
