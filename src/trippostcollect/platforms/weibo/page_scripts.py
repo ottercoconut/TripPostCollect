@@ -62,7 +62,7 @@ DOM_SCRIPTS: dict[str, str] = {
     page_info: pageInfo,
     next_disabled: nextDisabled,
     max_page: maxPage,
-    no_results: bodyText.indexOf("找到0条结果") !== -1,
+    no_results: bodyText.indexOf("找到0条结果") !== -1 || bodyText.indexOf("抱歉，未找到相关结果") !== -1,
   };
 }""",
     "weibo.at_bottom": """() => {

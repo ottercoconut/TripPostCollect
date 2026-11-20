@@ -214,6 +214,21 @@ def classify_search_page(raw: Any, *, page_number: int) -> WeiboSearchSnapshot:
     raw_cards = raw.get("cards")
     if not isinstance(raw_cards, list):
         raise WeiboSearchPageInvalid()
+    # #215：nodup=1 与时间窗的无结果页显示“抱歉，未找到相关结果。”，并附带推荐微博卡片，
+    # 卡片结构与搜索结果相同但与关键词无关。出现无结果标记时一律忽略页面卡片。
+    if raw.get("no_results"):
+        if page_number == 1 and not raw.get("has_pager"):
+            return WeiboSearchSnapshot(
+                cards=[],
+                current_page=None,
+                page_info="",
+                max_page=None,
+                has_pager=False,
+                has_more=False,
+                stop_detail="no_results",
+                page_cap_reached=False,
+            )
+        raise WeiboSearchPageInvalid()
     cards: list[WeiboSearchCandidate] = []
     for item in raw_cards:
         if not isinstance(item, dict):
@@ -237,12 +252,8 @@ def classify_search_page(raw: Any, *, page_number: int) -> WeiboSearchSnapshot:
     next_disabled = raw.get("next_disabled")
     if next_disabled is not None and not isinstance(next_disabled, bool):
         raise WeiboSearchPageInvalid()
-    no_results = bool(raw.get("no_results"))
-
     stop_detail: str | None
-    if page_number == 1 and not cards and no_results:
-        stop_detail = "no_results"
-    elif page_number == 1 and cards and not has_pager:
+    if page_number == 1 and cards and not has_pager:
         stop_detail = "single_page"
     elif cards and next_disabled is True:
         stop_detail = "next_disabled"

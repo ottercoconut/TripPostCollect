@@ -71,7 +71,7 @@ global.document = {
     sel === 'div.card-wrap[action-type="feed_list_item"][mid]' ? [card] : []
   ),
   querySelector: (sel) => (sel === "div.m-page2" ? pager : null),
-  body: { innerText: "其他文字找到0条结果" },
+  body: { innerText: input.bodyText || "其他文字找到0条结果" },
   scrollingElement: { scrollTop: 10, clientHeight: 20, scrollHeight: 100 },
 };
 const search = eval("(" + input.cards + ")")();
@@ -80,9 +80,10 @@ process.stdout.write(JSON.stringify({ uidResults, ua, search, bottom }));
 """
 
 
-def run_scripts() -> dict:
+def run_scripts(body_text: str = "") -> dict:
     node, _cli = compute_driver_executable()
     payload = {
+        "bodyText": body_text,
         "uid": STATE_SCRIPTS["weibo.config_uid"],
         "ua": STATE_SCRIPTS["weibo.user_agent"],
         "cards": DOM_SCRIPTS["weibo.search_cards"],
@@ -128,6 +129,38 @@ def test_page_scripts_read_uid_flag_cards_and_pager():
     assert result["search"]["has_pager"] is True
     assert result["search"]["no_results"] is True
     assert "secret-uid" not in json.dumps(result["search"])
+
+
+@pytest.mark.parametrize(
+    ("body_text", "expected"),
+    [
+        ("推荐 抱歉，未找到相关结果。 热门微博", True),
+        ("找到0条结果，部分相似结果已省略，您可以点击查看全部搜索结果", True),
+        ("青岛旅游 第1页", False),
+    ],
+)
+def test_page_script_recognizes_both_no_result_markers(body_text, expected):
+    # #215：nodup=1 与时间窗的无结果页是“抱歉，未找到相关结果。”。
+    assert run_scripts(body_text)["search"]["no_results"] is expected
+
+
+def test_no_result_marker_ignores_recommended_cards_and_rejects_pager():
+    page = dom_page(
+        [card("11"), card("12")], no_results=True, has_pager=False,
+        next_disabled=None, max_page=None, info="", current="",
+    )
+    snapshot = classify_search_page(page, page_number=1)
+    assert snapshot.cards == []
+    assert snapshot.stop_detail == "no_results"
+    assert snapshot.has_more is False
+    with pytest.raises(WeiboSearchPageInvalid):
+        classify_search_page(dom_page([card("11")], no_results=True), page_number=1)
+    with pytest.raises(WeiboSearchPageInvalid):
+        classify_search_page(
+            dom_page([card("11")], no_results=True, has_pager=False, next_disabled=None,
+                     max_page=None, info="", current=""),
+            page_number=2,
+        )
 
 
 def test_search_url_is_desktop_nodup_without_a_page_number():
@@ -493,6 +526,24 @@ async def test_no_results_stops_without_opening_details(monkeypatch, tmp_path):
     stopped = events_of(state_path, "adaptive_search_stopped")
     assert stopped[-1]["stop_detail"] == "no_results"
     assert stopped[-1]["page_cap_reached"] is False
+    assert stopped[-1]["raw_batch_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_no_results_page_with_recommended_cards_opens_nothing(monkeypatch, tmp_path):
+    # #215：无结果页附带的推荐卡片不是候选，不打开详情，按 no_results 来源耗尽。
+    _crawler, page, state_path, opened = await search(
+        monkeypatch,
+        tmp_path,
+        [dom_page([card("11"), card("12"), card("13")], no_results=True, has_pager=False,
+                  next_disabled=None, max_page=None, info="", current="")],
+    )
+
+    assert opened == []
+    assert page.trace == []
+    stopped = events_of(state_path, "adaptive_search_stopped")
+    assert stopped[-1]["stop_reason"] == "source_exhausted"
+    assert stopped[-1]["stop_detail"] == "no_results"
     assert stopped[-1]["raw_batch_count"] == 0
 
 

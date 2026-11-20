@@ -15,6 +15,8 @@
 > **授权记录（2026-11-19）：** 操作人授权临时解冻，同步 #211 微博桌面站页面取数、访问门禁与全量扫描口径。
 >
 > **授权记录（2026-11-20）：** 操作人决定微博认证区分机构与个人（#213），授权临时解冻以同步判定口径。
+>
+> **授权记录（2026-11-20）：** 操作人授权临时解冻，同步 #215 微博无结果页判定（忽略推荐卡片）。
 
 本文定义正式抓取的机器语义。平台参数和必需字段 profile：通用平台在
 `config/crawl_targets.json` 中配置；小红书在 `config/xhs_targets.json` 和
@@ -377,8 +379,8 @@ dry-run 只执行计划冻结，因此预期只有 `plan_frozen=completed`，后
   标记与页码矛盾都不算：知乎只认响应 `paging.is_end=true`（`paging_is_end`）；B站只认首页
   `numResults=0`（`no_results`）或页码大于 `numPages`（`empty_page`），停止事件记录
   `source_num_pages`/`source_num_results`；微博（#211）只认搜索页分页控件的下一页按钮带 `disabled`
-（`next_disabled`）、第 1 页有卡片且没有分页控件（`single_page`），或第 1 页没有卡片且显示“找到0条结果”
-（`no_results`），停止事件记录 `source_page_info`、`source_max_page` 与 `page_cap_reached`。微博每个查询最多
+（`next_disabled`）、第 1 页有卡片且没有分页控件（`single_page`），或第 1 页没有分页控件且显示“找到0条结果”或“抱歉，未找到相关结果”
+（`no_results`；此时页面附带的推荐卡片一律忽略，#215），停止事件记录 `source_page_info`、`source_max_page` 与 `page_cap_reached`。微博每个查询最多
 50 页，`page_cap_reached=true` 表示停在平台翻页上限而非内容取尽；是否接受该情形或改为时间窗切分待操作人
 在 #211 决定。
   这些平台的页内空页、缺少结束标记或缺少总数一律写 `runtime_failed`。抖音每轮链上的第 1 页是例外：
