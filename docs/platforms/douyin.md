@@ -218,9 +218,11 @@ checkpoint 仍写入本轮最后的 page、offset、search ID 与停止原因供
 - 不用侧栏代替作者页：侧栏有时不发资料请求、只显示“0粉丝”占位，侧栏打开后还会按“顺序连播”切到该作者
   的其他作品（2026-11-20 侦察，4 次中 2 次没有资料请求）。
 - 字段（#116、#163，键名与 2026-11-20 侦察一致）：
-  - 粉丝只读资料 `user` 节点的 `follower_count`，缺失时读 `mplatform_followers_count`；来源为
-    `creator_profile`，`followers_observed=true`。搜索作者对象里的粉丝数（含占位 0）一律不算已观测。
-  - 关注取 `following_count`，作品数取 `aweme_count`。
+  - 作者统计全部只读作者页资料的 `user` 节点；搜索卡片作者对象里的统计（含占位 0）一律不用，也不在资料
+    响应的其他嵌套对象里查找（#225）。
+  - 粉丝读 `follower_count`，该键缺失时才读 `mplatform_followers_count`；`follower_count` 为 0 照记 0，不用
+    后备键的非 0 值顶替。来源为 `creator_profile`，`followers_observed=true`。
+  - 关注取 `following_count`，作品数取 `aweme_count`，获赞数取 `total_favorited`；缺键为 NULL，不补 0。
   - 作者平台 ID 保存 `author.uid` 原始值（写在 `creator_hash` 键），昵称保存原文；`short_id`、`unique_id`
     （抖音号）、头像和 IP 归属地不写出。
   - 作者主页链接由 `sec_uid` 拼成 `https://www.douyin.com/user/<sec_uid>`，写入 `author_profile_url`：先取
