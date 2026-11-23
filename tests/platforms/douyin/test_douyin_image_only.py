@@ -7,7 +7,12 @@ from unittest.mock import AsyncMock
 from PIL import Image
 import pytest
 
-from support.douyin import config, make_crawler as DouYinCrawler, install_detail_passthrough
+from support.douyin import (
+    attach_search_capture,
+    config,
+    install_detail_passthrough,
+    make_crawler as DouYinCrawler,
+)
 from trippostcollect.platforms.douyin.detail_page import DouyinDetailFetchError
 from trippostcollect.platforms.douyin.models import DouyinImageDownloadError
 from trippostcollect.runtime.image_retry import ImageDownloadFetchError
@@ -213,6 +218,7 @@ async def test_creator_profile_failure_is_recorded_and_later_candidate_continues
     monkeypatch.setattr(config, "KEYWORDS", "test")
     crawler = DouYinCrawler()
     crawler.dy_client = SearchClient()
+    attach_search_capture(crawler, crawler.dy_client)
 
     class _Pages:
         async def open_from_search(self, aweme, *, search_visit_id: str = ""):
@@ -260,6 +266,7 @@ async def test_image_rate_limit_stops_run_without_candidate_skip(
     monkeypatch.setattr(config, "KEYWORDS", "test")
     crawler = DouYinCrawler()
     crawler.dy_client = SearchClient()
+    attach_search_capture(crawler, crawler.dy_client)
     install_detail_passthrough(crawler)
     crawler.get_aweme_images = AsyncMock(
         side_effect=DouyinImageDownloadError(
@@ -293,6 +300,7 @@ async def test_image_failure_is_recorded_seen_and_later_candidate_continues(
     monkeypatch.setattr(config, "KEYWORDS", "test")
     crawler = DouYinCrawler()
     crawler.dy_client = SearchClient()
+    attach_search_capture(crawler, crawler.dy_client)
     install_detail_passthrough(crawler)
     crawler.get_aweme_images = AsyncMock(
         side_effect=[
@@ -338,6 +346,7 @@ async def test_terminal_image_failure_is_recorded_and_later_candidate_continues(
     monkeypatch.setattr(config, "KEYWORDS", "test")
     crawler = DouYinCrawler()
     crawler.dy_client = SearchClient()
+    attach_search_capture(crawler, crawler.dy_client)
     install_detail_passthrough(crawler)
     crawler.get_aweme_images = AsyncMock(
         side_effect=[

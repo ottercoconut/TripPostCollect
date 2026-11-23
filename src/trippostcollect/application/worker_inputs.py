@@ -162,7 +162,6 @@ def worker_config(*, environ: Mapping[str, str] = os.environ) -> SimpleNamespace
         DISABLE_SSL_VERIFY=False,
         # 四站配置：原 xhs/dy/weibo/zhihu_config 的同名键。
         XHS_SPECIFIED_NOTE_URL_LIST=[],
-        DY_SPECIFIED_ID_LIST=[],
         WEIBO_SPECIFIED_ID_LIST=[],
         ZHIHU_SPECIFIED_ID_LIST=[],
     )
@@ -185,10 +184,12 @@ def apply_to_config(inputs: WorkerInputs, config_module) -> None:
     specified_id_list = [id.strip() for id in specified_id.split(",") if id.strip()] if specified_id else []
     if specified_id_list:
         field = {
-            "xhs": "XHS_SPECIFIED_NOTE_URL_LIST", "dy": "DY_SPECIFIED_ID_LIST",
-            "wb": "WEIBO_SPECIFIED_ID_LIST", "zhihu": "ZHIHU_SPECIFIED_ID_LIST",
-        }[inputs.platform]
-        setattr(config_module, field, specified_id_list)
+            "xhs": "XHS_SPECIFIED_NOTE_URL_LIST",
+            "wb": "WEIBO_SPECIFIED_ID_LIST",
+            "zhihu": "ZHIHU_SPECIFIED_ID_LIST",
+        }.get(inputs.platform)
+        if field:
+            setattr(config_module, field, specified_id_list)
 
 
 def env_int_reader(

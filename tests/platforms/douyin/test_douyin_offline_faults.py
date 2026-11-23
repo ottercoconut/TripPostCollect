@@ -14,7 +14,12 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from support.douyin import config, make_crawler as DouYinCrawler, install_detail_passthrough
+from support.douyin import (
+    attach_search_capture,
+    config,
+    install_detail_passthrough,
+    make_crawler as DouYinCrawler,
+)
 
 
 class Transport:
@@ -75,6 +80,7 @@ async def test_search_transport_error_ends_run_without_exhaustion(monkeypatch, t
 
     crawler = DouYinCrawler()
     crawler.dy_client = Client()
+    attach_search_capture(crawler, crawler.dy_client)
 
     with pytest.raises(httpx.ConnectError):
         await crawler.search()
@@ -100,6 +106,7 @@ async def test_search_does_not_request_creator_profile_over_httpx(monkeypatch, t
 
     crawler = DouYinCrawler()
     crawler.dy_client = Client()
+    attach_search_capture(crawler, crawler.dy_client)
     install_detail_passthrough(crawler)
     crawler.get_aweme_images = AsyncMock(return_value=None)
     crawler.update_douyin_aweme = AsyncMock(return_value=None)

@@ -120,7 +120,7 @@ DROPPED_KEYS = {
     "DY_CREATOR_ID_LIST", "WEIBO_CREATOR_ID_LIST", "XHS_CREATOR_ID_LIST",
     "CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES", "CRAWLER_MAX_NOTES_COUNT",
 }
-SPECIFIED_ID_KEYS = {"dy": "DY_SPECIFIED_ID_LIST", "wb": "WEIBO_SPECIFIED_ID_LIST",
+SPECIFIED_ID_KEYS = {"wb": "WEIBO_SPECIFIED_ID_LIST",
                      "zhihu": "ZHIHU_SPECIFIED_ID_LIST", "xhs": "XHS_SPECIFIED_NOTE_URL_LIST"}
 
 
@@ -148,6 +148,7 @@ def test_configure_writes_worker_inputs_to_root_config(name: str, tmp_path: Path
         "ENABLE_IP_PROXY": False, "ENABLE_GET_COMMENTS": False, "ENABLE_GET_SUB_COMMENTS": False,
         "ENABLE_GET_MEIDAS": True,
     }
+    assert "DY_SPECIFIED_ID_LIST" not in config
     for site, key in SPECIFIED_ID_KEYS.items():
         assert config[key] == ([specified] if specified and site == code else []), key
     assert not [key for key in config if key.startswith(DROPPED_PREFIXES) or key in DROPPED_KEYS]

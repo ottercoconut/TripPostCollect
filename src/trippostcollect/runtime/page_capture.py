@@ -149,6 +149,8 @@ class CapturedResponse:
     body_error: str = ""
     # 请求地址只留在内存里，供平台按查询参数挑选响应；不写入账本。
     request_url: str = ""
+    # 解码器抛出带 reason 的异常时保留原因。其他平台的解码失败仍只看 body_error 类名。
+    decode_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -985,12 +987,14 @@ class PageCaptureChannel:
     ) -> None:
         payload: Any = None
         body_error = ""
+        decode_reason = ""
         try:
             raw = await response.body()
             decoder = rule.decode or json.loads
             payload = decoder(raw)
         except Exception as exc:
             body_error = type(exc).__name__
+            decode_reason = str(getattr(exc, "reason", "") or "")
         captured = CapturedResponse(
             rule=rule,
             seq=seq,
@@ -1005,6 +1009,7 @@ class PageCaptureChannel:
             observed_at=observed_at,
             body_error=body_error,
             request_url=str(getattr(response, "url", "") or ""),
+            decode_reason=decode_reason,
         )
         self._store(rule.name, captured)
 

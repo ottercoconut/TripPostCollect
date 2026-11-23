@@ -58,6 +58,16 @@ class ScrollPage:
     async def wait_for_timeout(self, timeout):
         del timeout
 
+    async def evaluate(self, script, arg=None):
+        del script, arg
+        return {
+            "hits": [],
+            "verify_host": False,
+            "captcha_visible": False,
+            "login_panel_visible": False,
+            "hidden_captcha_count": 0,
+        }
+
 
 class SearchResponse:
     def __init__(self, page, url, payload):
@@ -188,7 +198,13 @@ def test_image_client_has_no_search_or_detail_request():
 from types import SimpleNamespace  # noqa: E402
 from unittest.mock import AsyncMock  # noqa: E402
 
-from support.douyin import config, make_crawler as DouYinCrawler, refresh_settings, install_detail_passthrough  # noqa: E402
+from support.douyin import (  # noqa: E402
+    attach_search_capture,
+    config,
+    install_detail_passthrough,
+    make_crawler as DouYinCrawler,
+    refresh_settings,
+)
 from trippostcollect.platforms.douyin import core as douyin_core  # noqa: E402
 
 
@@ -270,6 +286,7 @@ async def test_search_scans_from_first_page_until_has_more_false(monkeypatch, tm
     crawler, state_path = prepare_scan(monkeypatch, tmp_path, legacy_inputs=legacy_inputs)
     client = PagedSearch(last_offset=30)
     crawler.dy_client = client
+    attach_search_capture(crawler, client)
 
     await crawler.search()
 
@@ -294,6 +311,7 @@ async def test_missing_capture_mid_scan_keeps_completed_batches_and_skips_missin
     crawler, state_path = prepare_scan(monkeypatch, tmp_path, legacy_inputs=False)
     client = PagedSearch(last_offset=50, missing_offset=20)
     crawler.dy_client = client
+    attach_search_capture(crawler, client)
 
     await crawler.search()
 
@@ -331,6 +349,7 @@ async def test_fresh_first_page_empty_still_uses_visible_no_result_gate(monkeypa
             return self.text
 
     crawler.dy_client = EmptyFirstPage()
+    attach_search_capture(crawler, crawler.dy_client)
     crawler.context_page = SimpleNamespace(
         url="https://www.douyin.com/search/x",
         locator=lambda selector: Locator("没有找到相关结果" if selector == "body" else ""),

@@ -114,6 +114,5 @@ async def inspect_empty_first_page(page: Any) -> dict[str, Any]:
         "classification": classification,
         "visible_result_count": visible_result_count,
         "matched_no_result_marker": matched_marker,
-        "url": page.url,
         "inspection_errors": errors,
     }

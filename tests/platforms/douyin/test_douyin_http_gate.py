@@ -10,7 +10,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from support.douyin import config, make_crawler as DouYinCrawler, install_detail_passthrough
+from support.douyin import (
+    attach_search_capture,
+    config,
+    install_detail_passthrough,
+    make_crawler as DouYinCrawler,
+)
 from trippostcollect.platforms.douyin import core as douyin_core
 from trippostcollect.platforms.douyin.detail_page import DouyinDetailFetchError
 from trippostcollect.platforms.douyin.models import PlatformRuntimeError
@@ -83,6 +88,7 @@ class SearchClient:
 def search_crawler(client, stored, *, with_profile: bool = True):
     crawler = DouYinCrawler()
     crawler.dy_client = client
+    attach_search_capture(crawler, client)
     crawler.get_aweme_images = AsyncMock(return_value=None)
     install_detail_passthrough(crawler, with_profile=with_profile)
 
@@ -215,6 +221,7 @@ async def test_search_platform_block_marks_runtime_failure_with_code(monkeypatch
 
     crawler = DouYinCrawler()
     crawler.dy_client = BlockedSearch()
+    attach_search_capture(crawler, crawler.dy_client)
     await crawler.search()
 
     stopped = events_of(state_path, "adaptive_search_stopped")[-1]

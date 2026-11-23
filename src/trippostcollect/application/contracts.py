@@ -97,7 +97,6 @@ class DouyinSettings:
     CRAWLER_TYPE: str
     KEYWORDS: str
     START_PAGE: int
-    DY_SPECIFIED_ID_LIST: tuple[str, ...]
     MAX_CONCURRENCY_NUM: int
     CRAWLER_MAX_SLEEP_SEC: float
     ENABLE_CDP_MODE: bool

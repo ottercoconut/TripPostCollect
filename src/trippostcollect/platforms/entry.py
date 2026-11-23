@@ -244,7 +244,6 @@ def douyin_dependencies(config):
     )
 
     values = {field.name: getattr(config, field.name) for field in fields(DouyinSettings)}
-    values["DY_SPECIFIED_ID_LIST"] = tuple(values["DY_SPECIFIED_ID_LIST"])
     settings = DouyinSettings(**values)
     browser_settings = CDPBrowserSettings(**{
         field.name: getattr(config, field.name) for field in fields(CDPBrowserSettings)

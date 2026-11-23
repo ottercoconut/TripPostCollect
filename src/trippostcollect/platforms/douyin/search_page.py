@@ -1,6 +1,7 @@
-"""#222 抖音搜索页：登录确认、搜索访问账本、翻页停顿。
+"""#222 抖音搜索页：登录确认、被动截获和翻页停顿。
 
-搜索响应仍由既有浏览器截获逻辑合并。这里只在每一页被采纳后写入访问账本。
+搜索只消费本轮页面自己发出的 ``/general/search/stream/`` 与 ``/single/``。
+通道按 ``douyin.search_response`` 读取一次响应体。本模块负责匹配、去重、滚轮和访问账本。
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from tempfile import TemporaryDirectory
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
-from trippostcollect.platforms.douyin.models import SearchResponseError
+from trippostcollect.platforms.douyin.models import PlatformRuntimeError, SearchResponseError
 from trippostcollect.platforms.douyin.page_scripts import STATE_SCRIPTS, read_dom
 from trippostcollect.platforms.douyin.parser import (
     decode_douyin_json_body,
@@ -36,7 +37,14 @@ API_RESOURCE_TYPES = frozenset({"xhr", "fetch"})
 CAPTCHA_DETECTED = "captcha_detected"
 RATE_LIMITED = "rate_limited"
 LOGIN_REQUIRED = "login_required"
+BLOCKED_OR_FORBIDDEN = "blocked_or_forbidden"
 CAPTCHA_PHRASES = frozenset({"验证码", "请完成下列验证"})
+SEARCH_HTTP_RUNTIME = {
+    401: LOGIN_REQUIRED,
+    403: BLOCKED_OR_FORBIDDEN,
+    429: RATE_LIMITED,
+}
+SEARCH_POLL_MS = 200
 RATE_LIMIT_PHRASES = frozenset({"操作过于频繁", "请稍后再试", "访问太频繁", "请求过于频繁"})
 
 DOUYIN_USER_PROFILE_RULE = CaptureRule(
@@ -252,12 +260,18 @@ class DouyinPageCapture:
         offset: int = 0,
         search_id: str = "",
     ) -> dict[str, Any]:
-        """只消费本轮搜索页已经截获的响应。后续页最多滚 8 次。"""
+        """只消费本轮搜索页已经截获的响应。首页在预算内轮询；后续页最多滚 8 次。"""
 
-        found = await self._take_search_response(keyword=keyword, offset=offset, search_id=search_id)
-        if found is None and offset > 0 and search_id:
-            await self._scroll_for_search_response(keyword=keyword, offset=offset, search_id=search_id)
+        await self._raise_if_visible_risk()
+        if int(offset) <= 0 and not search_id:
+            found = await self._poll_cached(
+                keyword=keyword, offset=offset, search_id=search_id, attempts=SEARCH_SCROLL_ATTEMPTS,
+            )
+        else:
             found = await self._take_search_response(keyword=keyword, offset=offset, search_id=search_id)
+            if found is None and offset > 0 and search_id:
+                await self._scroll_for_search_response(keyword=keyword, offset=offset, search_id=search_id)
+                found = await self._take_search_response(keyword=keyword, offset=offset, search_id=search_id)
         if found is None:
             logger.error(
                 "[DouyinPageCapture.search_info_by_keyword] browser search response missing, "
@@ -266,9 +280,56 @@ class DouyinPageCapture:
                 bool(search_id),
             )
             raise SearchResponseError(BROWSER_SEARCH_RESPONSE_MISSING)
+        await self._raise_if_visible_risk()
+        self._raise_if_search_http(found)
         self.last_search_http_status = int(found.status or 200)
         payload = found.json if isinstance(found.json, dict) else {}
         return validate_douyin_search_response(payload)
+
+    async def _poll_cached(
+        self,
+        *,
+        keyword: str,
+        offset: int,
+        search_id: str,
+        attempts: int,
+    ) -> CapturedResponse | None:
+        """目标还没进缓存时按固定次数轮询截获通道，不把缺页当成耗尽。"""
+
+        for attempt in range(max(1, attempts)):
+            found = await self._take_search_response(keyword=keyword, offset=offset, search_id=search_id)
+            if found is not None:
+                return found
+            if attempt + 1 < attempts:
+                await self._wait_page(SEARCH_POLL_MS)
+        return None
+
+    async def _wait_page(self, milliseconds: int) -> None:
+        page = self.page
+        waiter = getattr(page, "wait_for_timeout", None) if page is not None else None
+        if waiter is None:
+            await asyncio.sleep(milliseconds / 1000)
+            return
+        await waiter(milliseconds)
+
+    async def _raise_if_visible_risk(self) -> None:
+        page = self.page
+        if page is None:
+            return
+        code = blocking_code(await read_dom(page, "douyin.visible_risk"))
+        if code:
+            logger.error("[DouyinPageCapture.search_info_by_keyword] visible risk code=%s", code)
+            raise PlatformRuntimeError(f"douyin search blocked: {code}", code=code)
+
+    def _raise_if_search_http(self, found: CapturedResponse) -> None:
+        code = SEARCH_HTTP_RUNTIME.get(int(found.status or 0))
+        if code:
+            logger.error(
+                "[DouyinPageCapture.search_info_by_keyword] http status=%s code=%s",
+                found.status,
+                code,
+            )
+            raise PlatformRuntimeError(f"douyin search http {found.status}", code=code)
 
     async def _take_search_response(
         self,
@@ -306,10 +367,15 @@ class DouyinPageCapture:
         for item in self.channel.drain(DOUYIN_SEARCH_RULE.name, after_seq=0):
             if not isinstance(item, CapturedResponse) or item.seq in self._consumed_search:
                 continue
-            if item.body_error or not isinstance(item.json, dict):
+            if search_request_key(item.request_url) != wanted:
                 continue
-            if search_request_key(item.request_url) == wanted:
-                matched.append(item)
+            status_code = SEARCH_HTTP_RUNTIME.get(int(item.status or 0))
+            if status_code:
+                self._raise_if_search_http(item)
+            if item.body_error or not isinstance(item.json, dict):
+                reason = item.decode_reason or item.body_error or "search_response_not_object"
+                raise SearchResponseError(reason)
+            matched.append(item)
         return matched
 
     async def _scroll_for_search_response(

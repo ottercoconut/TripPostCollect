@@ -102,8 +102,13 @@ class DouYinCrawler:
                     raise RuntimeError(
                         f"unsupported douyin crawler type: {self.settings.CRAWLER_TYPE}"
                     )
-                behavior_keyword = self.settings.KEYWORDS.split(",", maxsplit=1)[0].strip()
-                search_url = f"{self.index_url}/search/{quote(behavior_keyword)}?type=general"
+                try:
+                    keyword = self._require_single_keyword()
+                except PlatformRuntimeError as exc:
+                    self._stop_before_search(exc.code)
+                    return
+                search_url = f"{self.index_url}/search/{quote(keyword)}?type=general"
+                self._ensure_search_session()
                 await self.context_page.goto(search_url, wait_until="domcontentloaded")
                 await self.ports.run_required_human_behavior(self.context_page, "douyin")
                 await self.search()
@@ -117,254 +122,326 @@ class DouYinCrawler:
         不跨进程跳到深层 page/offset/search ID，也没有顶部刷新、前沿重绑定或耗尽后 reseed；
         已处理 ID 在作者、详情与媒体请求前由累积器过滤。checkpoint 只记录本轮最后位置供审计。
         """
-        logger.info("[DouYinCrawler.search] Begin search douyin keywords")
+        logger.info("[DouYinCrawler.search] Begin search")
         dy_limit_count = 10  # Must match the search API count parameter.
         accumulator = self.ports.candidates()
         discovery_phase = "frontier"
-        for keyword in self.settings.KEYWORDS.split(","):
-            self.source_keyword = keyword
-            logger.info(f"[DouYinCrawler.search] Current keyword: {keyword}")
+        try:
+            keyword = self._require_single_keyword()
+        except PlatformRuntimeError as exc:
+            accumulator.mark_runtime_failed(exc.code, discovery_phase=discovery_phase)
+            return
+        self.source_keyword = keyword
+        logger.info("[DouYinCrawler.search] page scan started")
+        try:
+            self._ensure_search_session()
+        except PlatformRuntimeError as exc:
+            accumulator.mark_runtime_failed(exc.code, discovery_phase=discovery_phase)
+            return
+        aweme_list: List[str] = []
+        page = 1
+        next_offset = 0
+        dy_search_id = ""
+        source_has_more = None
+        next_search_id = ""
+        resume_page = page
+        resume_offset = next_offset
+        while accumulator.can_continue:
+            requested_page = page
+            requested_offset = next_offset
+            requested_search_id = dy_search_id
+            try:
+                logger.info(
+                    "[DouYinCrawler.search] page=%s offset=%s",
+                    requested_page,
+                    requested_offset,
+                )
+                posts_res = await self._load_search_page(
+                    keyword=keyword,
+                    offset=requested_offset,
+                    search_id=requested_search_id,
+                )
+            except SearchResponseError as exc:
+                logger.error(
+                    "[DouYinCrawler.search] invalid search response page=%s reason=%s",
+                    requested_page,
+                    exc.reason,
+                )
+                accumulator.mark_runtime_failed(
+                    exc.reason,
+                    source_page=requested_page,
+                    source_offset=requested_offset,
+                    source_cursor=requested_search_id,
+                    resume_page=requested_page,
+                    resume_offset=requested_offset,
+                    resume_cursor=requested_search_id,
+                    discovery_phase=discovery_phase,
+                )
+                break
+            except PlatformRuntimeError as exc:
+                logger.error(
+                    "[DouYinCrawler.search] platform runtime failure page=%s code=%s",
+                    requested_page,
+                    exc.code,
+                )
+                accumulator.mark_runtime_failed(
+                    exc.code,
+                    source_page=requested_page,
+                    source_offset=requested_offset,
+                    source_cursor=requested_search_id,
+                    resume_page=requested_page,
+                    resume_offset=requested_offset,
+                    resume_cursor=requested_search_id,
+                    discovery_phase=discovery_phase,
+                )
+                break
+            except DataFetchError:
+                logger.error(
+                    "[DouYinCrawler.search] search request failed page=%s",
+                    requested_page,
+                )
+                accumulator.mark_runtime_failed(
+                    "search_request_failed",
+                    source_page=requested_page,
+                    source_offset=requested_offset,
+                    source_cursor=requested_search_id,
+                    resume_page=requested_page,
+                    resume_offset=requested_offset,
+                    resume_cursor=requested_search_id,
+                    discovery_phase=discovery_phase,
+                )
+                break
+
             if self.capture is not None:
-                self.capture.begin_search()
-            aweme_list: List[str] = []
-            page = 1
-            next_offset = 0
-            dy_search_id = ""
-            source_has_more = None
-            next_search_id = ""
-            resume_page = page
-            resume_offset = next_offset
-            while accumulator.can_continue:
-                requested_page = page
-                requested_offset = next_offset
-                requested_search_id = dy_search_id
-                try:
-                    logger.info(
-                        f"[DouYinCrawler.search] search douyin keyword: {keyword}, "
-                        f"page: {requested_page}, offset: {requested_offset}"
-                    )
-                    posts_res = await self._load_search_page(
-                        keyword=keyword,
-                        offset=requested_offset,
-                        search_id=requested_search_id,
-                    )
-                except SearchResponseError as exc:
-                    logger.error(
-                        f"[DouYinCrawler.search] invalid search response for "
-                        f"keyword: {keyword}, reason: {exc.reason}"
-                    )
-                    accumulator.mark_runtime_failed(
-                        exc.reason,
-                        source_page=requested_page,
-                        source_offset=requested_offset,
-                        source_cursor=requested_search_id,
-                        resume_page=requested_page,
-                        resume_offset=requested_offset,
-                        resume_cursor=requested_search_id,
-                        discovery_phase=discovery_phase,
-                    )
-                    break
-                except PlatformRuntimeError as exc:
-                    logger.error(
-                        f"[DouYinCrawler.search] platform runtime failure for "
-                        f"keyword: {keyword}, code: {exc.code}"
-                    )
-                    accumulator.mark_runtime_failed(
-                        exc.code,
-                        source_page=requested_page,
-                        source_offset=requested_offset,
-                        source_cursor=requested_search_id,
-                        resume_page=requested_page,
-                        resume_offset=requested_offset,
-                        resume_cursor=requested_search_id,
-                        discovery_phase=discovery_phase,
-                    )
-                    break
-                except DataFetchError:
-                    logger.error(
-                        f"[DouYinCrawler.search] search douyin keyword: {keyword} failed"
-                    )
-                    accumulator.mark_runtime_failed(
-                        "search_request_failed",
-                        source_page=requested_page,
-                        source_offset=requested_offset,
-                        source_cursor=requested_search_id,
-                        resume_page=requested_page,
-                        resume_offset=requested_offset,
-                        resume_cursor=requested_search_id,
-                        discovery_phase=discovery_phase,
-                    )
-                    break
+                self.capture.record_search_page(
+                    posts_res,
+                    page_number=requested_page,
+                    http_status=int(getattr(self.capture, "last_search_http_status", 200) or 200),
+                )
+            if "data" not in posts_res or posts_res.get("data") is None:
+                accumulator.mark_runtime_failed(
+                    "missing_data_field",
+                    source_page=requested_page,
+                    source_offset=requested_offset,
+                    source_cursor=requested_search_id,
+                    resume_page=requested_page,
+                    resume_offset=requested_offset,
+                    resume_cursor=requested_search_id,
+                    discovery_phase=discovery_phase,
+                )
+                break
 
-                if self.capture is not None:
-                    self.capture.record_search_page(
-                        posts_res,
-                        page_number=requested_page,
-                        http_status=int(getattr(self.capture, "last_search_http_status", 200) or 200),
-                    )
-                if "data" not in posts_res or posts_res.get("data") is None:
-                    accumulator.mark_runtime_failed(
-                        "missing_data_field",
-                        source_page=requested_page,
-                        source_offset=requested_offset,
-                        source_cursor=requested_search_id,
-                        resume_page=requested_page,
-                        resume_offset=requested_offset,
-                        resume_cursor=requested_search_id,
-                        discovery_phase=discovery_phase,
-                    )
-                    break
-
-                post_items = posts_res.get("data") or []
-                source_has_more = (
-                    posts_res.get("has_more") if "has_more" in posts_res else None
-                )
-                # 响应可带 extra: null（has_more=0 时校验允许）；不能对 None 取 logid。
-                response_logid = (posts_res.get("extra") or {}).get("logid", "")
-                next_search_id = requested_search_id or response_logid
-                resume_page = requested_page + 1
-                resume_offset = requested_offset + dy_limit_count
-                fresh_first_page = bool(
-                    requested_page == 1
-                    and requested_offset == 0
-                    and not requested_search_id
-                )
-                self.ports.append_execution_event(
-                    "douyin_search_response_observed",
-                    {
-                        "platform": "douyin",
-                        "discovery_phase": discovery_phase,
-                        "source_page": requested_page,
-                        "source_offset": requested_offset,
-                        "source_cursor_present": bool(requested_search_id),
-                        "fresh_first_page": fresh_first_page,
-                        "status_code": posts_res.get("status_code"),
-                        "data_count": len(post_items),
-                        "has_more": source_has_more,
-                        "next_search_id_present": bool(next_search_id),
-                        "cursor_source": (
-                            "request_search_id"
-                            if requested_search_id
-                            else "response_logid"
-                        ),
-                        "response_logid_matches_cursor": bool(
-                            response_logid and response_logid == next_search_id
-                        ),
-                    },
-                )
-                accumulator.begin_batch()
-                if not post_items:
-                    if source_has_more in (True, 1) and next_search_id:
-                        page = resume_page
-                        next_offset = resume_offset
-                        dy_search_id = next_search_id
-                        if accumulator.finish_batch(
-                            source_page=requested_page,
-                            source_offset=requested_offset,
-                            source_cursor=requested_search_id,
-                            next_cursor=next_search_id,
-                            source_has_more=source_has_more,
-                            raw_batch_count=0,
-                            resume_page=resume_page,
-                            resume_offset=resume_offset,
-                            resume_cursor=next_search_id,
-                            batch_complete=True,
-                            discovery_phase=discovery_phase,
-                        ):
-                            break
-                        await asyncio.sleep(self.settings.CRAWLER_MAX_SLEEP_SEC)
-                        continue
-                    if fresh_first_page:
-                        page_check = await inspect_empty_first_page(self.context_page)
-                        self.ports.append_execution_event(
-                            "douyin_empty_first_page_checked",
-                            {
-                                "platform": "douyin",
-                                "discovery_phase": discovery_phase,
-                                "source_page": requested_page,
-                                "source_offset": requested_offset,
-                                "source_cursor_present": False,
-                                "api_has_more": source_has_more,
-                                "next_search_id_present": bool(next_search_id),
-                                **page_check,
-                            },
-                        )
-                        if page_check["classification"] != "explicit_no_results":
-                            failure_detail = (
-                                "empty_api_response_with_visible_results"
-                                if page_check["classification"] == "visible_results"
-                                else "ambiguous_empty_first_page"
-                            )
-                            accumulator.mark_runtime_failed(
-                                failure_detail,
-                                source_page=requested_page,
-                                source_offset=requested_offset,
-                                source_cursor=requested_search_id,
-                                resume_page=requested_page,
-                                resume_offset=requested_offset,
-                                resume_cursor=requested_search_id,
-                                discovery_phase=discovery_phase,
-                            )
-                            break
-                    empty_detail = (
-                        "verified_empty_first_page"
-                        if fresh_first_page
-                        else "empty_page"
-                    )
-                    accumulator.mark_source_exhausted(
-                        empty_detail,
+            post_items = posts_res.get("data") or []
+            source_has_more = (
+                posts_res.get("has_more") if "has_more" in posts_res else None
+            )
+            # 响应可带 extra: null（has_more=0 时校验允许）；不能对 None 取 logid。
+            response_logid = (posts_res.get("extra") or {}).get("logid", "")
+            next_search_id = requested_search_id or response_logid
+            resume_page = requested_page + 1
+            resume_offset = requested_offset + dy_limit_count
+            fresh_first_page = bool(
+                requested_page == 1
+                and requested_offset == 0
+                and not requested_search_id
+            )
+            self.ports.append_execution_event(
+                "douyin_search_response_observed",
+                {
+                    "platform": "douyin",
+                    "discovery_phase": discovery_phase,
+                    "source_page": requested_page,
+                    "source_offset": requested_offset,
+                    "source_cursor_present": bool(requested_search_id),
+                    "fresh_first_page": fresh_first_page,
+                    "status_code": posts_res.get("status_code"),
+                    "data_count": len(post_items),
+                    "has_more": source_has_more,
+                    "next_search_id_present": bool(next_search_id),
+                    "cursor_source": (
+                        "request_search_id"
+                        if requested_search_id
+                        else "response_logid"
+                    ),
+                    "response_logid_matches_cursor": bool(
+                        response_logid and response_logid == next_search_id
+                    ),
+                },
+            )
+            accumulator.begin_batch()
+            if not post_items:
+                if source_has_more in (True, 1) and next_search_id:
+                    page = resume_page
+                    next_offset = resume_offset
+                    dy_search_id = next_search_id
+                    if accumulator.finish_batch(
                         source_page=requested_page,
                         source_offset=requested_offset,
                         source_cursor=requested_search_id,
                         next_cursor=next_search_id,
-                        source_has_more=False,
+                        source_has_more=source_has_more,
                         raw_batch_count=0,
-                        resume_page=requested_page,
-                        resume_offset=requested_offset,
-                        resume_cursor=requested_search_id,
+                        resume_page=resume_page,
+                        resume_offset=resume_offset,
+                        resume_cursor=next_search_id,
+                        batch_complete=True,
                         discovery_phase=discovery_phase,
-                        source_visit_id=self._source_visit_id(),
+                    ):
+                        break
+                    await asyncio.sleep(self.settings.CRAWLER_MAX_SLEEP_SEC)
+                    continue
+                if fresh_first_page:
+                    page_check = await inspect_empty_first_page(self.context_page)
+                    self.ports.append_execution_event(
+                        "douyin_empty_first_page_checked",
+                        {
+                            "platform": "douyin",
+                            "discovery_phase": discovery_phase,
+                            "source_page": requested_page,
+                            "source_offset": requested_offset,
+                            "source_cursor_present": False,
+                            "api_has_more": source_has_more,
+                            "next_search_id_present": bool(next_search_id),
+                            **page_check,
+                        },
                     )
-                    break
+                    if page_check["classification"] != "explicit_no_results":
+                        failure_detail = (
+                            "empty_api_response_with_visible_results"
+                            if page_check["classification"] == "visible_results"
+                            else "ambiguous_empty_first_page"
+                        )
+                        accumulator.mark_runtime_failed(
+                            failure_detail,
+                            source_page=requested_page,
+                            source_offset=requested_offset,
+                            source_cursor=requested_search_id,
+                            resume_page=requested_page,
+                            resume_offset=requested_offset,
+                            resume_cursor=requested_search_id,
+                            discovery_phase=discovery_phase,
+                        )
+                        break
+                empty_detail = (
+                    "verified_empty_first_page"
+                    if fresh_first_page
+                    else "empty_page"
+                )
+                accumulator.mark_source_exhausted(
+                    empty_detail,
+                    source_page=requested_page,
+                    source_offset=requested_offset,
+                    source_cursor=requested_search_id,
+                    next_cursor=next_search_id,
+                    source_has_more=False,
+                    raw_batch_count=0,
+                    resume_page=requested_page,
+                    resume_offset=requested_offset,
+                    resume_cursor=requested_search_id,
+                    discovery_phase=discovery_phase,
+                    source_visit_id=self._source_visit_id(),
+                )
+                break
 
-                raw_batch_count = len(post_items)
-                page_aweme_list: List[str] = []
-                processed_count = 0
-                for post_item in post_items:
-                    try:
-                        aweme_info: Dict = (
-                            post_item.get("aweme_info")
-                            or post_item.get("aweme_mix_info", {}).get("mix_items")[0]
+            raw_batch_count = len(post_items)
+            page_aweme_list: List[str] = []
+            processed_count = 0
+            for post_item in post_items:
+                try:
+                    aweme_info: Dict = (
+                        post_item.get("aweme_info")
+                        or post_item.get("aweme_mix_info", {}).get("mix_items")[0]
+                    )
+                except (AttributeError, IndexError, TypeError):
+                    processed_count += 1
+                    if accumulator.consider("", valid=False):
+                        break
+                    continue
+                aweme_id = str(aweme_info.get("aweme_id") or "")
+                if accumulator.is_known(aweme_id):
+                    processed_count += 1
+                    continue
+                if not parser.is_douyin_image_note(aweme_info):
+                    # #116：视频只计入已处理候选，不请求作者资料，也不写内容记录。
+                    processed_count += 1
+                    if accumulator.consider(aweme_id, valid=False):
+                        break
+                    continue
+                # #124：搜索项只来自浏览器截获的搜索卡片。#222：图文打开浮层并截获作者页。
+                content_detail_source = parser.DOUYIN_SEARCH_CONTENT_SOURCE
+                if self.detail_pages is None:
+                    raise RuntimeError("douyin_detail_pages_missing")
+                search_visit_id = ""
+                if self.capture is not None:
+                    search_visit_id = self.capture.last_search_visit_id
+                try:
+                    aweme_info = await self.detail_pages.open_from_search(
+                        aweme_info,
+                        search_visit_id=search_visit_id,
+                    )
+                except DouyinDetailFetchError as exc:
+                    if exc.runtime_blocking:
+                        accumulator.mark_runtime_failed(
+                            exc.code,
+                            source_page=requested_page,
+                            source_offset=requested_offset,
+                            source_cursor=requested_search_id,
+                            resume_page=requested_page,
+                            resume_offset=requested_offset,
+                            resume_cursor=requested_search_id,
+                            discovery_phase=discovery_phase,
                         )
-                    except (AttributeError, IndexError, TypeError):
                         processed_count += 1
-                        if accumulator.consider("", valid=False):
-                            break
-                        continue
-                    aweme_id = str(aweme_info.get("aweme_id") or "")
-                    if accumulator.is_known(aweme_id):
-                        processed_count += 1
-                        continue
-                    if not parser.is_douyin_image_note(aweme_info):
-                        # #116：视频只计入已处理候选，不请求作者资料，也不写内容记录。
-                        processed_count += 1
-                        if accumulator.consider(aweme_id, valid=False):
-                            break
-                        continue
-                    # #124：搜索项只来自浏览器截获的搜索卡片。#222：图文打开浮层并截获作者页。
-                    content_detail_source = parser.DOUYIN_SEARCH_CONTENT_SOURCE
-                    if self.detail_pages is None:
-                        raise RuntimeError("douyin_detail_pages_missing")
-                    search_visit_id = ""
-                    if self.capture is not None:
-                        search_visit_id = self.capture.last_search_visit_id
-                    try:
-                        aweme_info = await self.detail_pages.open_from_search(
-                            aweme_info,
-                            search_visit_id=search_visit_id,
+                        break
+                    should_stop = accumulator.skip_candidate_failure(
+                        aweme_id,
+                        failure_scope="post",
+                        detail="candidate_skipped",
+                        error_code=exc.code,
+                        attempts=exc.attempts,
+                        retryable=False,
+                        source_page=requested_page,
+                        source_offset=requested_offset,
+                        source_cursor=requested_search_id,
+                        discovery_phase=discovery_phase,
+                    )
+                    processed_count += 1
+                    if should_stop:
+                        break
+                    continue
+                author = aweme_info.get("author") or {}
+                creator_profile = aweme_info.get("creator_profile") or {}
+                author_stats = parser._normalized_author_stats(
+                    author,
+                    creator_profile,
+                )
+                statistics = aweme_info.get("statistics") or {}
+                # 与导入门禁对齐：正文证据、正文图和作者资料粉丝缺一项都不下载图片。
+                valid = bool(
+                    parser.douyin_content_detail_observed(aweme_info, aweme_id)
+                    and author.get("nickname")
+                    and parser._extract_note_image_list(aweme_info)
+                    and author_stats.get("followers_observed")
+                    and author_stats.get("author_followers_source") == "creator_profile"
+                    and all(
+                        statistics.get(key) not in (None, "")
+                        for key in (
+                            "digg_count",
+                            "collect_count",
+                            "comment_count",
+                            "share_count",
                         )
-                    except DouyinDetailFetchError as exc:
-                        if exc.runtime_blocking:
+                    )
+                )
+                if valid:
+                    try:
+                        await self.get_aweme_images(aweme_item=aweme_info)
+                    except DouyinImageDownloadError as exc:
+                        logger.error(
+                            "[DouYinCrawler.search] Image materialization failed: "
+                            f"{exc!r}"
+                        )
+                        if is_runtime_blocking_image_error(exc.code):
                             accumulator.mark_runtime_failed(
                                 exc.code,
                                 source_page=requested_page,
@@ -379,11 +456,11 @@ class DouYinCrawler:
                             break
                         should_stop = accumulator.skip_candidate_failure(
                             aweme_id,
-                            failure_scope="post",
-                            detail="candidate_skipped",
+                            failure_scope="image",
+                            detail="image_download_failed",
                             error_code=exc.code,
                             attempts=exc.attempts,
-                            retryable=False,
+                            source_index=exc.source_index,
                             source_page=requested_page,
                             source_offset=requested_offset,
                             source_cursor=requested_search_id,
@@ -393,140 +470,109 @@ class DouYinCrawler:
                         if should_stop:
                             break
                         continue
-                    author = aweme_info.get("author") or {}
-                    creator_profile = aweme_info.get("creator_profile") or {}
-                    author_stats = parser._normalized_author_stats(
-                        author,
-                        creator_profile,
-                    )
-                    statistics = aweme_info.get("statistics") or {}
-                    # 与导入门禁对齐：正文证据、正文图和作者资料粉丝缺一项都不下载图片。
-                    valid = bool(
-                        parser.douyin_content_detail_observed(aweme_info, aweme_id)
-                        and author.get("nickname")
-                        and parser._extract_note_image_list(aweme_info)
-                        and author_stats.get("followers_observed")
-                        and author_stats.get("author_followers_source") == "creator_profile"
-                        and all(
-                            statistics.get(key) not in (None, "")
-                            for key in (
-                                "digg_count",
-                                "collect_count",
-                                "comment_count",
-                                "share_count",
-                            )
-                        )
-                    )
-                    if valid:
-                        try:
-                            await self.get_aweme_images(aweme_item=aweme_info)
-                        except DouyinImageDownloadError as exc:
-                            logger.error(
-                                "[DouYinCrawler.search] Image materialization failed: "
-                                f"{exc!r}"
-                            )
-                            if is_runtime_blocking_image_error(exc.code):
-                                accumulator.mark_runtime_failed(
-                                    exc.code,
-                                    source_page=requested_page,
-                                    source_offset=requested_offset,
-                                    source_cursor=requested_search_id,
-                                    resume_page=requested_page,
-                                    resume_offset=requested_offset,
-                                    resume_cursor=requested_search_id,
-                                    discovery_phase=discovery_phase,
-                                )
-                                processed_count += 1
-                                break
-                            should_stop = accumulator.skip_candidate_failure(
-                                aweme_id,
-                                failure_scope="image",
-                                detail="image_download_failed",
-                                error_code=exc.code,
-                                attempts=exc.attempts,
-                                source_index=exc.source_index,
-                                source_page=requested_page,
-                                source_offset=requested_offset,
-                                source_cursor=requested_search_id,
-                                discovery_phase=discovery_phase,
-                            )
-                            processed_count += 1
-                            if should_stop:
-                                break
-                            continue
-                    await self.update_douyin_aweme(
-                        aweme_item=aweme_info,
-                        content_detail_source=content_detail_source,
-                        expected_aweme_id=aweme_id,
-                    )
-                    processed_count += 1
-                    aweme_list.append(aweme_id)
-                    page_aweme_list.append(aweme_id)
-                    target_valid = valid and topic_relevant_for_web_post(
-                        "douyin",
-                        aweme_info,
-                        fallback_keyword=keyword,
-                    )
-                    should_stop = accumulator.consider(aweme_id, valid=target_valid)
-                    if should_stop:
-                        break
+                await self.update_douyin_aweme(
+                    aweme_item=aweme_info,
+                    content_detail_source=content_detail_source,
+                    expected_aweme_id=aweme_id,
+                )
+                processed_count += 1
+                aweme_list.append(aweme_id)
+                page_aweme_list.append(aweme_id)
+                target_valid = valid and topic_relevant_for_web_post(
+                    "douyin",
+                    aweme_info,
+                    fallback_keyword=keyword,
+                )
+                should_stop = accumulator.consider(aweme_id, valid=target_valid)
+                if should_stop:
+                    break
 
-                logger.info("[DouYinCrawler.batch_get_note_comments] Crawling comment mode is not enabled")
-                batch_complete = processed_count >= raw_batch_count
-                if not batch_complete:
-                    resume_page = requested_page
-                    resume_offset = requested_offset
-                    next_search_id = requested_search_id
-                if accumulator.finish_batch(
+            logger.info("[DouYinCrawler.batch_get_note_comments] Crawling comment mode is not enabled")
+            batch_complete = processed_count >= raw_batch_count
+            if not batch_complete:
+                resume_page = requested_page
+                resume_offset = requested_offset
+                next_search_id = requested_search_id
+            if accumulator.finish_batch(
+                source_page=requested_page,
+                source_offset=requested_offset,
+                source_cursor=requested_search_id,
+                next_cursor=next_search_id,
+                source_has_more=source_has_more,
+                raw_batch_count=raw_batch_count,
+                resume_page=resume_page,
+                resume_offset=resume_offset,
+                resume_cursor=next_search_id,
+                batch_complete=batch_complete,
+                discovery_phase=discovery_phase,
+            ):
+                break
+            if source_has_more in (False, 0):
+                accumulator.mark_source_exhausted(
+                    "has_more_false",
                     source_page=requested_page,
                     source_offset=requested_offset,
                     source_cursor=requested_search_id,
                     next_cursor=next_search_id,
-                    source_has_more=source_has_more,
+                    source_has_more=False,
                     raw_batch_count=raw_batch_count,
                     resume_page=resume_page,
                     resume_offset=resume_offset,
                     resume_cursor=next_search_id,
                     batch_complete=batch_complete,
                     discovery_phase=discovery_phase,
-                ):
-                    break
-                if source_has_more in (False, 0):
-                    accumulator.mark_source_exhausted(
-                        "has_more_false",
-                        source_page=requested_page,
-                        source_offset=requested_offset,
-                        source_cursor=requested_search_id,
-                        next_cursor=next_search_id,
-                        source_has_more=False,
-                        raw_batch_count=raw_batch_count,
-                        resume_page=resume_page,
-                        resume_offset=resume_offset,
-                        resume_cursor=next_search_id,
-                        batch_complete=batch_complete,
-                        discovery_phase=discovery_phase,
-                        source_visit_id=self._source_visit_id(),
-                    )
-                    break
-
-                page = requested_page + 1
-                next_offset = requested_offset + dy_limit_count
-                dy_search_id = next_search_id
-                await asyncio.sleep(self.settings.CRAWLER_MAX_SLEEP_SEC)
-                logger.info(
-                    f"[DouYinCrawler.search] Sleeping for {self.settings.CRAWLER_MAX_SLEEP_SEC} "
-                    f"seconds after page {requested_page}"
+                    source_visit_id=self._source_visit_id(),
                 )
-            logger.info(f"[DouYinCrawler.search] keyword:{keyword}, aweme_list:{aweme_list}")
+                break
+
+            page = requested_page + 1
+            next_offset = requested_offset + dy_limit_count
+            dy_search_id = next_search_id
+            await asyncio.sleep(self.settings.CRAWLER_MAX_SLEEP_SEC)
+            logger.info(
+                f"[DouYinCrawler.search] Sleeping for {self.settings.CRAWLER_MAX_SLEEP_SEC} "
+                f"seconds after page {requested_page}"
+            )
+        logger.info(
+            "[DouYinCrawler.search] finished page_count=%s aweme_count=%s",
+            max(page - 1, 0),
+            len(aweme_list),
+        )
+
+    def _require_single_keyword(self) -> str:
+        """正式页面取数一轮只打开一个搜索页。逗号或多个词是配置错误。"""
+
+        raw = str(self.settings.KEYWORDS or "")
+        keyword = raw.strip()
+        if not keyword or "," in raw:
+            raise PlatformRuntimeError(
+                "douyin search accepts one keyword",
+                code="invalid_search_keywords",
+            )
+        return keyword
+
+    def _ensure_search_session(self) -> None:
+        """导航动作只写一次，并且写在 goto 之前。"""
+
+        if getattr(self, "_search_session_begun", False):
+            return
+        if self.capture is None:
+            raise PlatformRuntimeError(
+                "douyin capture is not installed",
+                code="capture_missing",
+            )
+        self.capture.begin_search()
+        self._search_session_begun = True
 
     async def _load_search_page(self, *, keyword: str, offset: int, search_id: str) -> Dict:
-        """正式路径走页面截获。测试替身仍可挂在 ``dy_client.search_info_by_keyword``。"""
+        """搜索页只来自已安装的页面截获。没有截获通道就是运行级失败。"""
 
-        if self.capture is not None:
-            return await self.capture.search_info_by_keyword(
-                keyword=keyword, offset=offset, search_id=search_id,
+        if self.capture is None:
+            raise PlatformRuntimeError(
+                "douyin capture is not installed",
+                code="capture_missing",
             )
-        return await self.dy_client.search_info_by_keyword(
+        return await self.capture.search_info_by_keyword(
             keyword=keyword, offset=offset, search_id=search_id,
         )
 
@@ -766,7 +812,11 @@ class DouYinCrawler:
             content_detail_source=content_detail_source,
             expected_aweme_id=expected_aweme_id,
         )
-        logger.info(f"[store.douyin.update_douyin_aweme] douyin aweme id:{aweme_item.get('aweme_id')}, title:{content_item.get('title')}")
+        logger.info(
+            "[store.douyin.update_douyin_aweme] aweme_id=%s detail=%s",
+            aweme_item.get("aweme_id"),
+            content_item.get("content_detail_status"),
+        )
         await self.ports.content_sink(self.crawler_type).store_content(content_item=content_item)
 
     async def update_dy_aweme_images(self, aweme_id: str, image_content_items: List[Dict]):

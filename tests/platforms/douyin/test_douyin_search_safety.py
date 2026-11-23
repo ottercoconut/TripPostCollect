@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from support.douyin import config
+from support.douyin import attach_search_capture, config
 from support.douyin import make_crawler as DouYinCrawler, refresh_settings
 from trippostcollect.platforms.douyin.models import SearchResponseError
 from trippostcollect.platforms.douyin.parser import (
@@ -122,6 +122,7 @@ def prepare_empty_search(monkeypatch, tmp_path, *, result_count: int, visible_te
 
     crawler = DouYinCrawler()
     crawler.dy_client = EmptySearchClient()
+    attach_search_capture(crawler, crawler.dy_client)
     crawler.context_page = FakeSearchPage(
         result_count=result_count,
         visible_text=visible_text,
@@ -281,6 +282,7 @@ async def test_visible_results_turn_empty_first_api_page_into_runtime_failure(
     checked = [event for event in events if event["type"] == "douyin_empty_first_page_checked"]
     stopped = [event for event in events if event["type"] == "adaptive_search_stopped"]
     assert checked[-1]["details"]["classification"] == "visible_results"
+    assert "url" not in checked[-1]["details"]
     assert stopped[-1]["details"]["stop_reason"] == "runtime_failed"
     assert stopped[-1]["details"]["stop_detail"] == "empty_api_response_with_visible_results"
     assert stopped[-1]["details"]["resume_page"] == 1
@@ -339,6 +341,7 @@ async def test_followup_pages_keep_initial_search_id_when_logid_rotates(
     )
     client = RotatingLogIdClient()
     crawler.dy_client = client
+    attach_search_capture(crawler, client)
     monkeypatch.setattr(config, "CRAWLER_MAX_SLEEP_SEC", 0)
 
     refresh_settings(crawler)

@@ -6,6 +6,7 @@ import base64
 import json
 import re
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
@@ -15,6 +16,7 @@ from support.douyin import config, make_crawler as DouYinCrawler, refresh_settin
 from trippostcollect.application.visit_gate import VISIT_GATED_PLATFORMS, VISIT_POLICIES, validate_content_visits
 from trippostcollect.platforms.douyin import detail_page
 from trippostcollect.platforms.douyin.detail_page import DouyinDetailFetchError, DouyinDetailPages
+from trippostcollect.platforms.douyin.models import PlatformRuntimeError, SearchResponseError
 from trippostcollect.platforms.douyin.page_scripts import DOM_SCRIPTS, STATE_SCRIPTS
 from trippostcollect.platforms.douyin.search_page import (
     DOUYIN_CAPTURE_RULES,
@@ -81,11 +83,16 @@ class _Mouse:
         page.wheels.append(int(delta_y))
         page.scroll_y = max(0, page.scroll_y + int(delta_y))
         card = page.recoverable_card
-        if card is None or page.scroll_y > page.card_mount_below:
-            return
-        if any(item.get("id") == card.get("id") for item in page.cards):
-            return
-        page.cards.append(card)
+        if card is not None and page.scroll_y <= page.card_mount_below:
+            if not any(item.get("id") == card.get("id") for item in page.cards):
+                page.cards.append(card)
+        if (
+            page.followup_payload is not None
+            and not page.followup_emitted
+            and int(delta_y) > 0
+        ):
+            page.followup_emitted = True
+            page.emit(Response(page, page.followup_payload, url=page.followup_url))
 
 
 class CloseControl:
@@ -441,6 +448,12 @@ class Page:
         self.card_mount_below = 0
         self.recoverable_card: dict[str, Any] | None = None
         self.author_url_delay_ms = 0
+        self.followup_payload: dict[str, Any] | None = None
+        self.followup_url = ""
+        self.followup_emitted = False
+        self.late_search: tuple[Any, str, int] | None = None
+        self.late_emitted = False
+        self.search_waits = 0
         self.advance_after_good_reads = 0
         self.good_reads = 0
         self.author_sec = SEC
@@ -476,6 +489,9 @@ class Page:
             return dict(self.risk)
         if "userAgent" in script:
             return "TestAgent/222"
+        if "innerWidth" in script or "innerHeight" in script:
+            size = self.viewport_size or {"width": 1450, "height": 900}
+            return {"width": int(size["width"]), "height": int(size["height"])}
         raise AssertionError(script[:80])
 
     async def evaluate_handle(self, script: str) -> CloseControl | NullHandle | None:
@@ -506,6 +522,12 @@ class Page:
             and _watched_autoplay_on(self)
         ):
             self.modal_id = "999"
+        if self.late_search is not None and not self.late_emitted:
+            self.search_waits += 1
+            payload, url, after = self.late_search
+            if self.search_waits >= after:
+                self.late_emitted = True
+                self.emit(Response(self, payload, url=url))
 
     async def bring_to_front(self) -> None:
         self.fronts += 1
@@ -1381,3 +1403,134 @@ async def test_user_self_exclusion_compares_path_segments(tmp_path):
         if line.get("kind") == "visit" and line.get("stage") == "creator_profile"
     ]
     assert visits
+
+
+def _search_url(keyword: str, *, offset: int = 0, search_id: str = "", kind: str = "stream") -> str:
+    query = f"keyword={quote(keyword)}&offset={offset}"
+    if search_id:
+        query += f"&search_id={quote(search_id)}"
+    return f"https://www.douyin.com/aweme/v1/web/general/search/{kind}/?{query}"
+
+
+@pytest.mark.asyncio
+async def test_behavior_loaded_next_page_stays_on_the_navigation_trigger(monkeypatch, tmp_path):
+    """行为滚轮提前带出的第 2 页仍挂在 goto 之前的 navigate 上，门禁记 frontend_self_loads。"""
+
+    page = _round_page(ROUND_KEYWORD, {
+        "status_code": 0,
+        "has_more": 1,
+        "extra": {"logid": "round-log"},
+        "data": [{"aweme_info": image_aweme()}],
+    })
+    page.followup_payload = {
+        "status_code": 0,
+        "has_more": 0,
+        "extra": {"logid": "round-log"},
+        "data": [{"aweme_info": video_aweme("303")}],
+    }
+    page.followup_url = _search_url(ROUND_KEYWORD, offset=10, search_id="round-log", kind="single")
+    _arm_author(page)
+    monkeypatch.setenv("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_ENABLED", "1")
+    monkeypatch.setenv(
+        "TRIPPOSTCOLLECT_PROJECT_SCRIPTS",
+        str(Path(__file__).resolve().parents[3] / "scripts"),
+    )
+    crawler, state_path, evidence, _calls = _prepare_round(monkeypatch, tmp_path, page)
+    await crawler.start()
+    assert page.followup_emitted is True
+
+    ledger = evidence.with_name(f"{evidence.stem}.content_visits.jsonl")
+    rows = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines() if line.strip()]
+    visits = [
+        row for row in rows
+        if row.get("kind") == "visit" and row.get("stage") == "search_results"
+    ]
+    actions = {row["id"]: row for row in rows if row.get("kind") == "action"}
+    assert [row["search_page"] for row in visits] == [1, 2]
+    assert actions[visits[0]["trigger"]]["action"] == "navigate"
+    assert visits[1]["trigger"] == visits[0]["trigger"]
+    assert "scroll" not in {row["action"] for row in actions.values()}
+    stopped = _events(state_path, "adaptive_search_stopped")
+    assert stopped[-1]["stop_reason"] == "source_exhausted"
+    records = []
+    for path in (tmp_path / "out").rglob("*.jsonl"):
+        if path.name == "image_manifest.jsonl":
+            continue
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                records.append(json.loads(line))
+    result = validate_content_visits(
+        records,
+        [ledger],
+        platform="douyin",
+        mode="discovery",
+        manifests=list((tmp_path / "out").rglob("image_manifest.jsonl")),
+        stop_event=stopped[-1],
+    )
+    assert result["content_visit_ok"] is True, result
+    assert result["frontend_self_loads"] == 1
+
+
+@pytest.mark.asyncio
+async def test_search_decode_failure_keeps_the_stream_reason(tmp_path):
+    capture, _pages, page = harness(tmp_path)
+    capture.begin_search()
+    page.emit(Response(page, b"not-json", url=_search_url("青岛")))
+    with pytest.raises(SearchResponseError) as raised:
+        await capture.search_info_by_keyword(keyword="青岛", offset=0, search_id="")
+    assert raised.value.reason == "invalid_stream_chunk_header"
+
+
+@pytest.mark.asyncio
+async def test_homepage_capture_waits_until_the_response_arrives(tmp_path):
+    capture, _pages, page = harness(tmp_path)
+    capture.begin_search()
+    payload = {"status_code": 0, "data": [], "has_more": 0, "extra": {"logid": "late"}}
+    page.late_search = (payload, _search_url("青岛"), 2)
+    result = await capture.search_info_by_keyword(keyword="青岛", offset=0, search_id="")
+    assert result["extra"]["logid"] == "late"
+    assert page.late_emitted is True
+
+
+@pytest.mark.asyncio
+async def test_search_http_403_stops_before_exhaustion(tmp_path):
+    capture, _pages, page = harness(tmp_path)
+    capture.begin_search()
+    page.emit(Response(
+        page,
+        {"status_code": 0, "data": [], "has_more": 0, "extra": {"logid": "blocked"}},
+        status=403,
+        url=_search_url("青岛"),
+    ))
+    with pytest.raises(PlatformRuntimeError) as raised:
+        await capture.search_info_by_keyword(keyword="青岛", offset=0, search_id="")
+    assert raised.value.code == "blocked_or_forbidden"
+
+
+@pytest.mark.asyncio
+async def test_visible_risk_is_rechecked_before_a_search_page_is_accepted(tmp_path):
+    capture, _pages, page = harness(tmp_path)
+    capture.begin_search()
+    page.risk = {**page.risk, "captcha_visible": True}
+    page.emit(Response(
+        page,
+        {"status_code": 0, "data": [], "has_more": 0, "extra": {"logid": "risk"}},
+        url=_search_url("青岛"),
+    ))
+    with pytest.raises(PlatformRuntimeError) as raised:
+        await capture.search_info_by_keyword(keyword="青岛", offset=0, search_id="")
+    assert raised.value.code == "captcha_detected"
+
+
+@pytest.mark.asyncio
+async def test_comma_separated_keywords_are_rejected(monkeypatch, tmp_path):
+    page = _round_page(ROUND_KEYWORD, {"status_code": 0, "data": [], "has_more": 0, "extra": {}})
+    crawler, state_path, _evidence, _calls = _prepare_round(monkeypatch, tmp_path, page)
+    monkeypatch.setattr(config, "KEYWORDS", "青岛,崂山")
+    from support.douyin import refresh_settings
+    refresh_settings(crawler)
+    await crawler.search()
+    stopped = _events(state_path, "adaptive_search_stopped")
+    assert stopped[-1]["stop_reason"] == "runtime_failed"
+    assert stopped[-1]["stop_detail"] == "invalid_search_keywords"
+    assert page.gotos == []
