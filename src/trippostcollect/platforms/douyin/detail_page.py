@@ -41,6 +41,9 @@ AUTHOR_URL_POLLS = 40
 AUTHOR_URL_POLL_MS = 200
 AUTOPLAY_SETTLE_POLLS = 6
 AUTOPLAY_SETTLE_POLL_MS = 200
+# 浮层出现后连播开关可能晚一拍渲染；读不到时先在这段预算内复读，仍读不到才停轮。
+AUTOPLAY_READY_POLLS = 10
+AUTOPLAY_READY_POLL_MS = 300
 CLOSE_SETTLE_POLLS = 6
 CLOSE_SETTLE_POLL_MS = 250
 CARD_SEEK_STEPS = 16
@@ -306,6 +309,7 @@ class DouyinDetailPages:
     async def _ensure_autoplay_off(self, aweme_id: str, state: Any) -> None:
         # 读不到当前开关不能当成已关闭：规格默认开启，继续停留会把 modal_id 切走。
         # 这和「关不掉」一样是运行级，避免候选失败把图文写进已处理。
+        state = await self._wait_autoplay_readable(aweme_id, state)
         if not isinstance(state, dict) or state.get("autoplay_readable") is False:
             raise self._runtime(aweme_id, AUTOPLAY_STILL_ON)
         if not state.get("autoplay_on"):
@@ -313,6 +317,15 @@ class DouyinDetailPages:
         await self._click_autoplay(aweme_id)
         if not await self._wait_autoplay_off(aweme_id):
             raise self._runtime(aweme_id, AUTOPLAY_STILL_ON)
+
+    async def _wait_autoplay_readable(self, aweme_id: str, state: Any) -> Any:
+        for _poll in range(AUTOPLAY_READY_POLLS):
+            if isinstance(state, dict) and state.get("autoplay_readable") is not False:
+                return state
+            await self._wait_ms(self.search_page, AUTOPLAY_READY_POLL_MS)
+            self._raise_if_closed(aweme_id)
+            state = await self._read_modal()
+        return state
 
     async def _click_autoplay(self, aweme_id: str) -> None:
         visible = await self._find_autoplay_switch(aweme_id)

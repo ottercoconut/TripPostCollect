@@ -318,6 +318,12 @@ def interpret_modal_state(script: str, page: "Page") -> dict[str, Any]:
         if page.advance_after_good_reads and page.good_reads >= page.advance_after_good_reads:
             page.modal_id = "999"
             modal_id = "999"
+    if modal_id and page.switches_appear_after_reads is not None:
+        if page.switches_appear_after_reads <= 0:
+            page.switches = list(page.pending_switches)
+            page.switches_appear_after_reads = None
+        else:
+            page.switches_appear_after_reads -= 1
     button = _select_autoplay_button(script, page)
     state = {
         "modal_id": modal_id,
@@ -412,6 +418,8 @@ class Page:
             "box": {"x": 420, "y": 760, "width": 36, "height": 20},
         }]
         self.switches_explicit = False
+        self.switches_appear_after_reads: int | None = None
+        self.pending_switches: list[dict[str, Any]] = []
         self.switch_clicks: list[str] = []
         self.autoplay_off_delay_ms = 0
         self.autoplay_settle_at: int | None = None
@@ -1276,6 +1284,21 @@ async def test_unreadable_autoplay_switch_is_runtime_not_already_off(tmp_path):
         await pages.open_from_search(image_aweme())
     assert raised.value.code == "douyin_autoplay_still_on"
     assert raised.value.runtime_blocking is True
+
+
+@pytest.mark.asyncio
+async def test_late_autoplay_switch_is_waited_for_before_stopping(tmp_path):
+    """浮层先出现、连播开关晚一拍渲染：等到开关再关，不按读不到停轮。"""
+
+    _capture, pages, page = harness(tmp_path)
+    _arm_author(page)
+    page.switches = []
+    page.switches_explicit = True
+    page.pending_switches = [_checked_switch("current", in_active=True, checked=True, y=760)]
+    page.switches_appear_after_reads = 3
+    opened = await pages.open_from_search(image_aweme())
+    assert opened["aweme_id"] == AWEME
+    assert "xg-switch-checked" not in page.switches[0]["className"]
 
 
 @pytest.mark.asyncio
