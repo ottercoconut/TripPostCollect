@@ -33,20 +33,23 @@
   - 可见的“操作过于频繁”“请稍后再试”一类提示是 `rate_limited`；
   - 可见的登录面板是 `login_required`。
 
-  这几组判定写在平台代码的常量里。滑块不自动处理（#71 A3）。
+  这几组判定写在平台代码的常量里。滑块不自动处理（#71 A3）。搜索页每一页在采纳前都复查一次这组可见
+  特征（视频页不进详情，不能只靠详情路径复查），详情与作者页同样复查。
 
 ## 搜索
 
 - 搜索只消费浏览器在本轮搜索页上自身发出的请求的响应（#124，`page_response`）。worker 导航到
   `https://www.douyin.com/search/<关键词>?type=general`，并在该页完成行为阶段。
+- 一个任务只接受一个关键词：页面取数一轮只打开一个搜索页。关键词为空或含逗号是配置错误，以
+  `runtime_failed/invalid_search_keywords` 结束，不打开搜索页。
 - 首页 offset 0 是进入搜索页时页面发出的 `/aweme/v1/web/general/search/stream/` 响应，后续页由低频可见
   滚轮触发页面自身的 `/aweme/v1/web/general/search/single/` 请求。不点“图文”等筛选标签。
 - 同一关键词、offset 和 search ID 有多条响应时，合并去重并优先最新的非 `verify_check` 响应；全部为验证
   信号时按风控失败。
 - 每次滚轮前写一段翻页停顿（账本阶段 `search_page`）。连续翻页时目标只比已截获的页深一屏。
-- 目标 offset 未进入截获缓存时，最多执行 8 次可见滚轮；仍未截获即以 `runtime_failed`、
-  `stop_detail=browser_search_response_missing` 停止。首页截获不到同样如此。不猜深页，缺失页的候选
-  不写入已处理集合；不能把“浏览器尚未加载”解释为耗尽。
+- 后续页目标 offset 未进入截获缓存时，最多执行 8 次可见滚轮；首页不滚，按同样的 8 次预算（每次间隔
+  约 200 毫秒）轮询截获通道。仍未截获即以 `runtime_failed`、`stop_detail=browser_search_response_missing`
+  停止。不猜深页，缺失页的候选不写入已处理集合；不能把“浏览器尚未加载”解释为耗尽。
 - 页面上的结果卡片是 `#waterfall_item_{aweme_id}`。卡片里没有 `/note/`、`/video/` 或 `/user/` 链接；
   类型、作者和正文都以截获的搜索响应为准。
 - 搜索访问写入访问账本，每条带：
@@ -56,7 +59,10 @@
   - `has_more`；
   - `search_session`。
 
-  首页访问的触发是导航，后续页是滚轮前写下的 `scroll` 动作。`stream` 与 `single` 共用一条已登记的截获
+  导航动作 `navigate` 写在打开搜索页（`goto`）之前，一轮只写一次，首页访问的触发是这条导航。行为阶段的
+  滚轮可能已经让页面自己加载了后续页：这些页采纳时仍挂在导航上，门禁计为 `frontend_self_loads`，不判失败
+  （与知乎相同）。采纳时还不在缓存里的后续页，先写 `search_page` 翻页停顿，再以滚轮前写下的 `scroll` 动作
+  为触发。`stream` 与 `single` 共用一条已登记的截获
   规则 `douyin.search_response`（路径模板 `/aweme/v1/web/general/search/<kind>/`），响应体只由截获通道读
   一次，首页分块流在解码时重组。请求 URL 只留在内存里，用于按关键词、offset、search ID 匹配，不写入
   账本。访问行在页面采纳该页之后写入，序号是采纳时分配的，不是截获时的序号；平台代码不另挂
@@ -79,7 +85,12 @@
 - `has_more` 缺失或非法；
 - `has_more=true` 但没有下一 `logid`。
 
-`SearchResponseError` 的具体 reason 必须进入停止证据；状态只保存脱敏元数据，不保存完整响应。
+`SearchResponseError` 的具体 reason 必须进入停止证据；状态只保存脱敏元数据，不保存完整响应。首页流解码
+失败（如 `invalid_stream_chunk_header`）或响应不是 JSON 对象，同样带具体 reason 以 `runtime_failed` 停止，
+不当作“没截到”。
+
+截获的搜索响应 HTTP 状态为 401（`login_required`）、403（`blocked_or_forbidden`）、429（`rate_limited`）时，
+与作者资料一样按运行级停止，不进入响应校验和耗尽判断。
 
 `search_nil_info.search_nil_type=verify_check` 固定为 `search_verify_check`。`search_nil_type` 只放行空值与
 `service_empty`（深层链尾 `data=[]`、`has_more=0` 时出现，属正常翻到底）；其他取值表示搜索受限，按
@@ -95,7 +106,8 @@
 - 没有卡片，也没有明确可见“无结果”：`ambiguous_empty_first_page`；
 - 只有页面明确显示无结果：`verified_empty_first_page`，可以证明当前链耗尽。
 
-前两项属于运行失败；下一轮照常从首页重新扫描。
+前两项属于运行失败；下一轮照常从首页重新扫描。核对结果写入执行事件 `douyin_empty_first_page_checked`，
+只留分类、可见卡片数、命中的无结果短语和检查错误，不保存页面 URL（路径里含关键词）。
 
 ## 每轮全量扫描与 checkpoint
 
@@ -131,7 +143,8 @@ checkpoint 仍写入本轮最后的 page、offset、search ID 与停止原因供
 - 只有图文作品打开详情：`aweme_type=68`，或带正文 `images`。视频在搜索响应里就能认出，计入已处理候选，
   不打开详情，不请求作者，不写内容记录，也不下载媒体。
 - 每条未知图文候选都在搜索页真实点击卡片 `#waterfall_item_{aweme_id}`：
-  - 卡片不在可视区时，先用可见滚轮把它带入可视区；
+  - 卡片不在可视区时，先用可见滚轮把它带入可视区；行为阶段可能已把列表滚走，卡片节点不在 DOM 时，先用
+    滚轮向上、再向下逐屏寻找（各最多 16 屏），都找不到才是 `detail_card_missing`；
   - 点击前写一段 `search_results` 停顿（随机 1.2–2.8 秒，连续性为 `completed`）；
   - 点击卡片后，页面在同一标签打开浮层，地址栏变为 `?modal_id={aweme_id}`。
 - 打开浮层后 8 秒内，经已登记的状态脚本读取浮层状态（规则 `douyin.modal_state`，`page_state`）：
@@ -146,14 +159,20 @@ checkpoint 仍写入本轮最后的 page、offset、search ID 与停止原因供
 - **连播**：浮层底部的“连播”开关（`[data-e2e="video-player-auto-play"]`）默认开启。开启时图文播完会
   自动跳到下一条，`modal_id` 随之改变。
   - 开关状态只看按钮是否带 `xg-switch-checked` 类；`aria-checked` 始终为 `true`，不能用。
-  - 每轮第一次打开浮层时，开关若开启，就真实点击一次关闭（账本动作 `toggle_autoplay`），再读一次，
-    必须已关闭。仍开启是运行级阻断：`runtime_failed`，`stop_detail=douyin_autoplay_still_on`。
+  - 浮层里同时有前后几条作品，各有一枚开关。读取和点击都先取当前播放项 `feed-active-video` 内可见的
+    那枚；没有时再取可见、纵坐标在 0–900 之间的开关。开关可能晚于浮层渲染，读不到时先在约 3 秒内复读；
+    仍读不到不能当成已关闭，按 `douyin_autoplay_still_on` 运行级停止。
+  - 每轮第一次打开浮层时，开关若开启，就真实点击一次关闭（账本动作 `toggle_autoplay`），在约 1.2 秒内
+    复读，必须已关闭。仍开启是运行级阻断：`runtime_failed`，`stop_detail=douyin_autoplay_still_on`。
   - 关闭后在本轮后续浮层里保持关闭。之后每次读取浮层状态，开关仍须为关闭；若重新开启，按上一条
     再关一次。
 - 浮层停留随机 5–9 秒（账本阶段 `note_detail`），然后打开作者（见下文）。
-- 关闭浮层：Esc 无效，`[data-e2e="video-close"]` 也点不掉。点击左上角的圆形关闭按钮（账本动作 `close_overlay`）：
-  按几何条件选取，在视口左上 140×140 内、宽高 24–88、接近正方形、最靠左上的可见控件，不写死坐标。打开过作者侧栏时，第一次
-  点击只是从侧栏返回，要再点一次才关闭。地址栏不再带 `modal_id` 才算关闭。连续 3 次点击仍未关闭，是
+- 关闭浮层：Esc 无效，`[data-e2e="video-close"]` 也点不掉。点击左上角的圆形关闭按钮（账本动作 `close_overlay`）。
+  侦察中 `elementFromPoint(67, 67)` 命中的是一个 18×18 的图标，它的父级是 64×64、`cursor: pointer` 的控件，中心
+  正是 (67, 67)，点这个父级才能关闭。所以按几何条件选取：视口左上 140×140 内、宽高 24–88、接近正方形、
+  `cursor: pointer`、包围盒盖住 (67, 67) 的可见控件，取中心离该点最近的一个；没有找到或没有真正点到时不写
+  `close_overlay`。打开过作者侧栏时，第一次点击只是从侧栏返回，要再点一次才关闭。每次点击后在约 1.5 秒内
+  轮询，地址栏不再带 `modal_id` 才算关闭。连续 3 次点击仍未关闭，是
   运行级阻断：`runtime_failed`，`stop_detail=douyin_modal_close_failed`。浮层没关会挡住后续卡片的点击，
   不能带着它继续。
 - 正文与字段：
@@ -184,9 +203,11 @@ checkpoint 仍写入本轮最后的 page、offset、search ID 与停止原因供
   2. 点作者前写一段 `creator_profile` 停顿（1–2 秒），再点击侧栏标题处的作者链接（账本动作
      `click_author`）。这个链接是 `a[target="_blank"][href*="/user/"]`，路径段等于卡片 `author.sec_uid`，
      要排除页面顶部当前账号自己的 `/user/self` 链接。侧栏没有稳定的容器选择器，所以另加几何条件：链接
-     左边缘不小于当前播放项右边缘减 8 像素，且纵坐标不超过 220，播放器内部的作者链接不会被选中。
-- 点击后 8 秒内出现新标签 `https://www.douyin.com/user/{sec_uid}?…`。新标签 URL 中的 `sec_uid` 必须等于
-  搜索卡片 `author.sec_uid`。
+     左边缘不小于当前播放项右边缘减 8 像素，且纵坐标不超过 220，播放器内部的作者链接不会被选中。读不到
+     当前播放项的包围盒时，视为本次没找到链接（`author_link_missing`），不退回任意同 `sec_uid` 链接。
+- 点击后 8 秒内出现新标签；新标签往往先是 `about:blank`，从标签出现起再等最多 8 秒，URL 落到
+  `https://www.douyin.com/user/{sec_uid}?…` 才比对。新标签 URL 中的 `sec_uid` 必须等于搜索卡片 `author.sec_uid`。
+  资料响应从点击作者之后开始截获，不因等待 URL 而后移。
 - 作者数据是作者页自身请求 `/aweme/v1/web/user/profile/other/` 的响应（被动截获，规则 `douyin.user_profile`，
   `page_response`）。只接受 `status_code=0`、`user.sec_uid` 等于目标、`user.uid` 等于卡片 `author.uid` 的那一条。
   同一作者页会出现多条该路径的响应，其中包括当前登录账号自己的资料（2026-11-20 侦察），都不参与。
@@ -233,7 +254,8 @@ checkpoint 仍写入本轮最后的 page、offset、search ID 与停止原因供
   正文图。
 - 搜索、详情和作者都不走浏览器外 HTTP，因此不再产生 `network_unreachable`；正文图片下载仍按
   `image_download_retryable`。
-- 日志只记录 `aweme_id`、计数和状态码；不打印整条记录或资料原始响应。头像只在内存中用于排除，不进入
+- 日志只记录 `aweme_id`、页码、offset、计数、状态码和停止码；不打印关键词、正文（`desc`）、`sec_uid` 原值、
+  整条记录或资料原始响应。头像只在内存中用于排除，不进入
   `model_dump` 和项目 JSONL。
 
 ## 访问门禁
