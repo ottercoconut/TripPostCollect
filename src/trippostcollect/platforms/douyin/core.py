@@ -411,10 +411,7 @@ class DouYinCrawler:
                     continue
                 author = aweme_info.get("author") or {}
                 creator_profile = aweme_info.get("creator_profile") or {}
-                author_stats = parser._normalized_author_stats(
-                    author,
-                    creator_profile,
-                )
+                author_stats = parser._normalized_author_stats(creator_profile)
                 statistics = aweme_info.get("statistics") or {}
                 # 与导入门禁对齐：正文证据、正文图和作者资料粉丝缺一项都不下载图片。
                 valid = bool(

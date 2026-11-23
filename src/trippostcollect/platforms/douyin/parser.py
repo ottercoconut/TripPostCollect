@@ -19,14 +19,12 @@ DOUYIN_RESULT_LINK_SELECTOR = ', '.join(
         '[id^="waterfall_item_"]:visible',
     )
 )
-# #116：作者粉丝量只认作者资料响应 user 节点（不读搜索作者对象、不递归嵌套对象）；键名沿用原
-# follower_keys 的全部候选与顺序，避免实际响应的键名与预期不同时把真实粉丝量误判为缺失。
+# #116、#225：作者粉丝量只认作者页资料响应的 user 节点（不读搜索作者对象、不递归嵌套对象）。
+# 先读 follower_count，缺失时才读 mplatform_followers_count；真实 0 照记，不用后备键的非 0 值顶替。
+# 键名与 2026-11-20 侦察的作者页资料一致。
 DOUYIN_PROFILE_FOLLOWER_KEYS = (
     "follower_count",
-    "followers_count",
     "mplatform_followers_count",
-    "fans_count",
-    "fans",
 )
 # #163：作者资料 user 节点里与认证相关的原值，随记录留作证据。实测对照主页（#163 评论）：主页“认证信息”
 # 的文字即 account_cert_info.label_text，蓝 V 时与 enterprise_verify_reason 相同；verification_type 对蓝 V
@@ -314,31 +312,12 @@ def _creator_user_profile(creator_profile: Dict) -> Dict:
 # @Time    : 2024/1/14 18:46
 # @Desc    :
 # TripPostCollect：T06 按职责迁入；来源 fork 5a68eb5098fcd17308c7fe0b9d53916ae839b303，原许可保留。
-def _author_metric(author: Dict, creator_profile: Dict, *keys: str):
-    profile_user = _creator_user_profile(creator_profile)
-    candidates = []
-    for key in keys:
-        value = _first_nonempty(author.get(key), profile_user.get(key), creator_profile.get(key))
-        if value not in (None, "") and not isinstance(value, (dict, list)):
-            candidates.append(value)
-    expected = {key.lower() for key in keys}
-
-    def walk(data):
-        if isinstance(data, dict):
-            for key, value in data.items():
-                if str(key).lower() in expected and value not in (None, "") and not isinstance(value, (dict, list)):
-                    candidates.append(value)
-                elif isinstance(value, (dict, list)):
-                    walk(value)
-        elif isinstance(data, list):
-            for item in data:
-                walk(item)
-
-    walk(creator_profile)
-    for value in candidates:
-        if str(value) != "0":
-            return value
-    return candidates[0] if candidates else None
+def _profile_metric(creator_profile: Dict, key: str):
+    """#225：作者统计只读作者页资料响应的 user 节点；缺失、空串或非标量时为 None，0 照记。"""
+    value = _profile_user_node(creator_profile).get(key)
+    if value in (None, "") or isinstance(value, (dict, list)):
+        return None
+    return value
 
 
 # -*- coding: utf-8 -*-
@@ -427,27 +406,23 @@ def _profile_verification(profile_user: Dict) -> tuple[int | None, str | None]:
     return None, None
 
 
-def _normalized_author_stats(author: Dict, creator_profile: Dict) -> Dict:
-    # #116：粉丝量只读作者资料响应的 user 节点；搜索作者对象的占位 0 不再记为已观测。
-    profile_user = _profile_user_node(creator_profile)
-    follower_values = [
-        profile_user[key]
-        for key in DOUYIN_PROFILE_FOLLOWER_KEYS
-        if profile_user.get(key) not in (None, "")
-        and not isinstance(profile_user.get(key), (dict, list))
-    ]
-    # 与原实现相同：两个键都在时优先取非 0 值，真实 0 仍算已观测。
+def _normalized_author_stats(creator_profile: Dict) -> Dict:
+    # #116、#225：作者统计只读作者页资料响应的 user 节点；搜索作者对象的值一律不用。
     followers_count = next(
-        (value for value in follower_values if str(value) != "0"),
-        follower_values[0] if follower_values else None,
+        (
+            value
+            for value in (_profile_metric(creator_profile, key) for key in DOUYIN_PROFILE_FOLLOWER_KEYS)
+            if value is not None
+        ),
+        None,
     )
     followers_observed = followers_count is not None
     return {
         "followers_count": followers_count,
         "fans_count": followers_count,
-        "following_count": _author_metric(author, creator_profile, "following_count", "follow_count", "follows"),
-        "aweme_count": _author_metric(author, creator_profile, "aweme_count", "post_count", "posts_count", "video_count"),
-        "author_liked_count": _author_metric(author, creator_profile, "total_favorited", "favorited_count", "liked_count"),
+        "following_count": _profile_metric(creator_profile, "following_count"),
+        "aweme_count": _profile_metric(creator_profile, "aweme_count"),
+        "author_liked_count": _profile_metric(creator_profile, "total_favorited"),
         "followers_observed": followers_observed,
         "author_followers_source": "creator_profile" if followers_observed else "missing",
     }
@@ -616,7 +591,7 @@ def update_douyin_aweme(
     aweme_id = aweme_item.get("aweme_id")
     user_info = aweme_item.get("author", {})
     creator_profile = aweme_item.get("creator_profile") or {}
-    author_stats = _normalized_author_stats(user_info, creator_profile)
+    author_stats = _normalized_author_stats(creator_profile)
     interact_info = aweme_item.get("statistics", {})
     image_assets = _extract_note_image_assets(aweme_item)
     save_content_item = {
