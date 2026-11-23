@@ -47,29 +47,34 @@ DOM_SCRIPTS: dict[str, str] = {
     hidden_captcha_count: hiddenCaptcha,
   };
 }""",
-    # 左上角圆形关闭控件。侦察里 data-e2e 关闭选择器点不掉浮层，有效落点在视口左上角。
-    # 这里返回元素本身，调用方用 evaluate_handle 点击，不写死坐标。
+    # 左上角圆形关闭控件。侦察里 data-e2e 关闭选择器点不掉浮层。
+    # elementFromPoint(67, 67) 命中 18×18 的图标（小于规格下限）和它的父级：
+    # 64×64、cursor 为 pointer 的 DIV，中心正好是 (67, 67)。
+    # 只在规格的 140×140、24–88、接近正方形里挑 cursor 为 pointer、且包围盒盖住该落点的控件，
+    # 再取中心最接近落点的一个。这样点到的是侦察确认过的那一枚，而不是更靠原点的其他方块。
     "douyin.corner_close": """() => {
-  const visible = (el) => {
-    if (!el || !el.isConnected) return false;
-    const style = window.getComputedStyle(el);
-    if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) return false;
-    const rect = el.getBoundingClientRect();
-    return rect.width >= 24 && rect.height >= 24;
-  };
+  const LANDING_X = 67;
+  const LANDING_Y = 67;
   const nodes = document.querySelectorAll("button, [role='button'], div");
   let best = null;
-  let bestScore = 1e9;
+  let bestDist = 1e9;
   for (let i = 0; i < nodes.length; i += 1) {
     const el = nodes[i];
-    if (!visible(el)) continue;
+    if (!el || !el.isConnected) continue;
+    const style = window.getComputedStyle(el);
+    if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) continue;
+    if (style.cursor !== "pointer") continue;
     const rect = el.getBoundingClientRect();
+    if (!(rect.width >= 24 && rect.height >= 24)) continue;
     if (rect.left > 140 || rect.top > 140) continue;
     if (rect.width > 88 || rect.height > 88) continue;
     if (Math.abs(rect.width - rect.height) > 16) continue;
-    const score = rect.left + rect.top;
-    if (score < bestScore) {
-      bestScore = score;
+    if (LANDING_X < rect.left || LANDING_X > rect.right || LANDING_Y < rect.top || LANDING_Y > rect.bottom) continue;
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    const dist = Math.abs(cx - LANDING_X) + Math.abs(cy - LANDING_Y);
+    if (dist < bestDist) {
+      bestDist = dist;
       best = el;
     }
   }
@@ -87,10 +92,39 @@ STATE_SCRIPTS: dict[str, str] = {
   const params = new URLSearchParams(location.search || "");
   const modalId = params.get("modal_id") || "";
   const active = document.querySelector('[data-e2e="feed-active-video"]');
-  const button = document.querySelector('[data-e2e="video-player-auto-play"] button');
+  const visibleButton = (button) => {
+    if (!button || !button.isConnected) return false;
+    const style = window.getComputedStyle(button);
+    if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) return false;
+    const rect = button.getBoundingClientRect();
+    if (rect.width <= 2 || rect.height <= 2) return false;
+    return rect.bottom > 0 && rect.top < window.innerHeight;
+  };
+  let button = null;
+  if (active) {
+    const scoped = active.querySelector('[data-e2e="video-player-auto-play"] button');
+    if (visibleButton(scoped)) button = scoped;
+  }
+  if (!button) {
+    const hosts = Array.from(document.querySelectorAll('[data-e2e="video-player-auto-play"]'));
+    for (let i = 0; i < hosts.length && !button; i += 1) {
+      const rect = hosts[i].getBoundingClientRect();
+      if (!(rect.width > 2 && rect.height > 2 && rect.top < window.innerHeight && rect.bottom > 0)) continue;
+      const candidate = hosts[i].querySelector("button");
+      if (!visibleButton(candidate)) continue;
+      const box = candidate.getBoundingClientRect();
+      if (!(box.y > 0 && box.y < 900)) continue;
+      button = candidate;
+    }
+  }
   const className = button ? String(button.className || "") : "";
-  const checked = /(^|\\s)xg-switch-checked(\\s|$)/.test(className);
-  return { modal_id: modalId, has_active_video: Boolean(active), autoplay_on: checked };
+  const checked = button ? /(^|\\s)xg-switch-checked(\\s|$)/.test(className) : false;
+  return {
+    modal_id: modalId,
+    has_active_video: Boolean(active),
+    autoplay_on: checked,
+    autoplay_readable: Boolean(button),
+  };
 }""",
 }
 
@@ -103,10 +137,6 @@ async def read_dom(page: Any, name: str) -> Any:
 
 
 async def corner_close_handle(page: Any) -> Any:
-    """左上角圆形关闭控件的元素句柄；没有符合几何条件的控件时返回 None。"""
+    """左上角关闭控件的 JSHandle。没有命中时元素为空，调用方仍要释放句柄。"""
 
-    handle = await page.evaluate_handle(DOM_SCRIPTS["douyin.corner_close"])
-    if handle is None:
-        return None
-    element = handle.as_element() if hasattr(handle, "as_element") else handle
-    return element
+    return await page.evaluate_handle(DOM_SCRIPTS["douyin.corner_close"])

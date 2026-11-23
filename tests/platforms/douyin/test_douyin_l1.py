@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 from dataclasses import replace
 from typing import Any
 from urllib.parse import quote
@@ -74,23 +75,67 @@ class _Mouse:
     async def move(self, *args: Any, **kwargs: Any) -> None:
         del args, kwargs
 
-    async def wheel(self, *args: Any) -> None:
-        del args
+    async def wheel(self, delta_x: int = 0, delta_y: int = 0) -> None:
+        del delta_x
+        page = self.page
+        page.wheels.append(int(delta_y))
+        page.scroll_y = max(0, page.scroll_y + int(delta_y))
+        card = page.recoverable_card
+        if card is None or page.scroll_y > page.card_mount_below:
+            return
+        if any(item.get("id") == card.get("id") for item in page.cards):
+            return
+        page.cards.append(card)
 
 
 class CloseControl:
-    def __init__(self, page: "Page") -> None:
+    def __init__(self, page: "Page", node: dict[str, Any]) -> None:
         self.page = page
+        self.node = node
+        self.disposed = False
+
+    def as_element(self) -> "CloseControl":
+        return self
+
+    async def dispose(self) -> None:
+        if self.disposed:
+            return
+        self.disposed = True
+        self.page.disposed_handles += 1
 
     async def click(self, timeout: int | None = None) -> None:
         del timeout
         self.page.clicks.append("close")
+        self.page.closed_node_ids.append(str(self.node.get("id") or ""))
+        if self.node.get("id") != "corner-close":
+            return
         if self.page.close_stuck:
             return
         if self.page.sidebar:
             self.page.sidebar = False
             return
+        delay = int(self.page.close_delay_ms or 0)
+        if delay > 0:
+            self.page.close_settle_at = self.page.virtual_ms + delay
+            return
         self.page.modal_id = ""
+
+
+class NullHandle:
+    """脚本没有返回元素时的句柄。``as_element`` 为空，但仍要释放。"""
+
+    def __init__(self, page: "Page") -> None:
+        self.page = page
+        self.disposed = False
+
+    def as_element(self) -> None:
+        return None
+
+    async def dispose(self) -> None:
+        if self.disposed:
+            return
+        self.disposed = True
+        self.page.disposed_handles += 1
 
 
 class Locator:
@@ -107,7 +152,12 @@ class Locator:
         if "video-avatar" in self.selector:
             return list(page.avatars)
         if "video-player-auto-play" in self.selector:
-            return list(page.switches)
+            items = list(page.switches)
+            if "feed-active-video" in self.selector:
+                items = [item for item in items if item.get("in_active")]
+            if "aria-checked" in self.selector:
+                items = [item for item in items if item.get("aria") is not None]
+            return items
         if selector_is_author_link(self.selector):
             return list(page.author_links)
         if self.selector == '[data-e2e="feed-active-video"]':
@@ -164,8 +214,15 @@ class Locator:
                 self.page.has_active = self.page.active_after_click
                 self.page.autoplay_on = self.page.autoplay_starts_on
         elif kind == "switch":
-            if not self.page.autoplay_stuck:
-                self.page.autoplay_on = False
+            self.page.switch_clicks.append(str(picked[0].get("id") or ""))
+            if self.page.autoplay_stuck:
+                return
+            delay = int(self.page.autoplay_off_delay_ms or 0)
+            if delay > 0:
+                self.page.autoplay_settle_at = self.page.virtual_ms + delay
+                self.page.autoplay_settle_switch = picked[0]
+                return
+            _turn_off_switch(self.page, picked[0])
         elif kind == "avatar":
             self.page.sidebar = True
         elif kind == "author":
@@ -174,6 +231,156 @@ class Locator:
 
 def selector_is_author_link(selector: str) -> bool:
     return selector.startswith("a[target=")
+
+
+def _script_int(pattern: str, script: str, default: int) -> int:
+    match = re.search(pattern, script)
+    return int(match.group(1)) if match else default
+
+
+def _switch_checked(page: "Page", switch: dict[str, Any] | None) -> bool:
+    if switch is None:
+        return False
+    if "className" in switch:
+        return re.search(r"(^|\s)xg-switch-checked(\s|$)", str(switch.get("className") or "")) is not None
+    return bool(page.autoplay_on)
+
+
+def _turn_off_switch(page: "Page", switch: dict[str, Any] | None) -> None:
+    if switch is not None and "className" in switch:
+        switch["className"] = re.sub(
+            r"(^|\s)xg-switch-checked(\s|$)",
+            " ",
+            str(switch.get("className") or ""),
+        ).strip()
+        return
+    page.autoplay_on = False
+
+
+def _button_visible(script: str, switch: dict[str, Any], page: "Page") -> bool:
+    if not switch.get("visible", True):
+        return False
+    if "getBoundingClientRect" not in script:
+        return True
+    box = switch.get("box") if isinstance(switch.get("box"), dict) else {}
+    width = float(box.get("width", 40))
+    height = float(box.get("height", 20))
+    if width <= 2 or height <= 2:
+        return False
+    top = float(box.get("y", 0))
+    bottom = top + height
+    viewport_h = float((page.viewport_size or {}).get("height") or 900)
+    return bottom > 0 and top < viewport_h
+
+
+def _select_autoplay_button(script: str, page: "Page") -> dict[str, Any] | None:
+    """按脚本里的选择器挑连播按钮，而不是按关键字固定返回第一枚。"""
+
+    switches = list(page.switches)
+    if "active.querySelector" not in script:
+        return switches[0] if switches else None
+    for switch in switches:
+        if switch.get("in_active") and _button_visible(script, switch, page):
+            return switch
+    if "900" not in script:
+        return None
+    viewport_h = float((page.viewport_size or {}).get("height") or 900)
+    for switch in switches:
+        box = switch.get("box") if isinstance(switch.get("box"), dict) else {}
+        width = float(box.get("width", 40))
+        height = float(box.get("height", 20))
+        top = float(box.get("y", 0))
+        bottom = top + height
+        if not (width > 2 and height > 2 and top < viewport_h and bottom > 0):
+            continue
+        if not _button_visible(script, switch, page):
+            continue
+        if not (0 < top < 900):
+            continue
+        return switch
+    return None
+
+
+def interpret_modal_state(script: str, page: "Page") -> dict[str, Any]:
+    """等价执行 ``douyin.modal_state``：连播类名、可见性和作用域都跟脚本走。"""
+
+    modal_id = page.modal_id
+    has_active = page.has_active
+    if modal_id and has_active and modal_id != "999":
+        page.good_reads += 1
+        if page.advance_after_good_reads and page.good_reads >= page.advance_after_good_reads:
+            page.modal_id = "999"
+            modal_id = "999"
+    button = _select_autoplay_button(script, page)
+    state = {
+        "modal_id": modal_id,
+        "has_active_video": bool(has_active and modal_id),
+        "autoplay_on": _switch_checked(page, button),
+    }
+    if "autoplay_readable" in script:
+        state["autoplay_readable"] = button is not None
+    return state
+
+
+def _active_autoplay_on(page: "Page") -> bool:
+    active = [switch for switch in page.switches if switch.get("in_active")]
+    return any(_switch_checked(page, switch) for switch in active)
+
+
+def _watched_autoplay_on(page: "Page") -> bool:
+    if page.advance_when_any_visible_checked:
+        return any(
+            switch.get("visible", True) and _switch_checked(page, switch)
+            for switch in page.switches
+        )
+    return _active_autoplay_on(page)
+
+
+def interpret_corner_close(script: str, nodes: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """等价执行 ``douyin.corner_close``：几何阈值、指针光标和侦察落点都从脚本读。"""
+
+    if "rect.left" not in script:
+        return None
+    left_max = _script_int(r"rect\.left\s*>\s*(\d+)", script, 140)
+    top_max = _script_int(r"rect\.top\s*>\s*(\d+)", script, 140)
+    min_size = _script_int(r"rect\.width\s*>=\s*(\d+)", script, 24)
+    max_size = _script_int(r"rect\.width\s*>\s*(\d+)", script, 88)
+    square = _script_int(r"Math\.abs\(rect\.width\s*-\s*rect\.height\)\s*>\s*(\d+)", script, 16)
+    require_pointer = "cursor" in script and "pointer" in script
+    landing_x = re.search(r"LANDING_X\s*=\s*(\d+)", script)
+    landing_y = re.search(r"LANDING_Y\s*=\s*(\d+)", script)
+    landing = (int(landing_x.group(1)), int(landing_y.group(1))) if landing_x and landing_y else None
+    best: dict[str, Any] | None = None
+    best_score = 1e9
+    for node in nodes:
+        if not node.get("visible", True):
+            continue
+        box = node.get("box") if isinstance(node.get("box"), dict) else {}
+        x = float(box.get("x", 0))
+        y = float(box.get("y", 0))
+        width = float(box.get("width", 0))
+        height = float(box.get("height", 0))
+        if width < min_size or height < min_size:
+            continue
+        if x > left_max or y > top_max:
+            continue
+        if width > max_size or height > max_size:
+            continue
+        if abs(width - height) > square:
+            continue
+        if require_pointer and node.get("cursor") != "pointer":
+            continue
+        if landing is not None:
+            point_x, point_y = landing
+            if not (x <= point_x <= x + width and y <= point_y <= y + height):
+                continue
+            score = abs((x + width / 2) - point_x) + abs((y + height / 2) - point_y)
+        else:
+            score = x + y
+        if score < best_score:
+            best_score = score
+            best = node
+    return best
 
 
 class Page:
@@ -189,7 +396,21 @@ class Page:
         }
         self.cards: list[dict[str, Any]] = []
         self.avatars: list[dict[str, Any]] = [{"kind": "avatar", "visible": True}]
-        self.switches: list[dict[str, Any]] = [{"kind": "switch", "visible": True}]
+        self.switches: list[dict[str, Any]] = [{
+            "id": "current",
+            "kind": "switch",
+            "visible": True,
+            "in_active": True,
+            "aria": "true",
+            "box": {"x": 420, "y": 760, "width": 36, "height": 20},
+        }]
+        self.switches_explicit = False
+        self.switch_clicks: list[str] = []
+        self.autoplay_off_delay_ms = 0
+        self.autoplay_settle_at: int | None = None
+        self.autoplay_settle_switch: dict[str, Any] | None = None
+        self.advance_if_active_autoplay = False
+        self.advance_when_any_visible_checked = False
         self.author_links: list[dict[str, Any]] = []
         self.active_box: dict[str, float] | None = {"x": 200, "y": 80, "width": 700, "height": 600}
         self.modal_id = ""
@@ -202,6 +423,24 @@ class Page:
         self.sidebar = False
         self.close_stuck = False
         self.close_missing = False
+        self.close_delay_ms = 0
+        self.close_settle_at: int | None = None
+        self.corner_nodes: list[dict[str, Any]] = [{
+            "id": "corner-close",
+            "visible": True,
+            "cursor": "pointer",
+            "box": {"x": 35, "y": 35, "width": 64, "height": 64},
+        }]
+        self.closed_node_ids: list[str] = []
+        self.disposed_handles = 0
+        self.virtual_ms = 0
+        self.url_settle_target = ""
+        self.url_settle_at: int | None = None
+        self.wheels: list[int] = []
+        self.scroll_y = 0
+        self.card_mount_below = 0
+        self.recoverable_card: dict[str, Any] | None = None
+        self.author_url_delay_ms = 0
         self.advance_after_good_reads = 0
         self.good_reads = 0
         self.author_sec = SEC
@@ -232,35 +471,41 @@ class Page:
         if "HasUserLogin" in script:
             return {"logged_in": self.logged_in}
         if "modal_id" in script and "feed-active-video" in script:
-            return self._modal_state()
+            return interpret_modal_state(script, self)
         if "captcha" in script:
             return dict(self.risk)
         if "userAgent" in script:
             return "TestAgent/222"
         raise AssertionError(script[:80])
 
-    def _modal_state(self) -> dict[str, Any]:
-        modal_id = self.modal_id
-        has_active = self.has_active
-        if modal_id and has_active and modal_id != "999":
-            self.good_reads += 1
-            if self.advance_after_good_reads and self.good_reads >= self.advance_after_good_reads:
-                self.modal_id = "999"
-                modal_id = "999"
-        return {
-            "modal_id": modal_id,
-            "has_active_video": bool(has_active and modal_id),
-            "autoplay_on": self.autoplay_on,
-        }
-
-    async def evaluate_handle(self, script: str) -> CloseControl | None:
-        del script
+    async def evaluate_handle(self, script: str) -> CloseControl | NullHandle | None:
         if self.close_missing:
-            return None
-        return CloseControl(self)
+            return NullHandle(self)
+        node = interpret_corner_close(script, self.corner_nodes)
+        if node is None:
+            return NullHandle(self)
+        return CloseControl(self, node)
 
     async def wait_for_timeout(self, timeout: int) -> None:
-        del timeout
+        self.virtual_ms += int(timeout)
+        if self.url_settle_at is not None and self.virtual_ms >= self.url_settle_at:
+            self.url = self.url_settle_target
+            self.url_settle_at = None
+        if self.autoplay_settle_at is not None and self.virtual_ms >= self.autoplay_settle_at:
+            _turn_off_switch(self, self.autoplay_settle_switch)
+            self.autoplay_settle_at = None
+            self.autoplay_settle_switch = None
+        if self.close_settle_at is not None and self.virtual_ms >= self.close_settle_at:
+            self.modal_id = ""
+            self.close_settle_at = None
+        if (
+            int(timeout) >= 1000
+            and self.advance_if_active_autoplay
+            and self.modal_id
+            and self.modal_id != "999"
+            and _watched_autoplay_on(self)
+        ):
+            self.modal_id = "999"
 
     async def bring_to_front(self) -> None:
         self.fronts += 1
@@ -350,7 +595,12 @@ class Context:
         del link
         if self.page.block_tab:
             return
-        author = Page(f"https://www.douyin.com/user/{self.page.author_sec}?from_tab_name=main")
+        final = f"https://www.douyin.com/user/{self.page.author_sec}?from_tab_name=main"
+        delay = int(self.page.author_url_delay_ms or 0)
+        author = Page("about:blank" if delay else final)
+        if delay:
+            author.url_settle_target = final
+            author.url_settle_at = delay
         author.context = self
         self.pages.append(author)
         if self._on_page is not None:
@@ -928,3 +1178,206 @@ def _arm_author(page: Page) -> None:
         "box": {"x": 1100, "y": 70, "width": 80, "height": 20},
     }]
     page.profiles = [(200, profile_user())]
+
+
+def _checked_switch(switch_id: str, *, in_active: bool, checked: bool, y: float, visible: bool = True) -> dict[str, Any]:
+    return {
+        "id": switch_id,
+        "kind": "switch",
+        "visible": visible,
+        "in_active": in_active,
+        "aria": "true",
+        "className": "xg-switch-checked" if checked else "",
+        "box": {"x": 420 if in_active else 80, "y": y, "width": 36, "height": 20},
+    }
+
+
+@pytest.mark.asyncio
+async def test_autoplay_uses_the_switch_inside_the_active_video(tmp_path):
+    """前一条关、当前开。旧脚本读到第一枚就会当成已关闭，停留期间 modal 被连播切走。"""
+
+    capture, pages, page = harness(tmp_path)
+    _arm_author(page)
+    page.switches = [
+        _checked_switch("prev", in_active=False, checked=False, y=760),
+        _checked_switch("current", in_active=True, checked=True, y=760),
+    ]
+    page.switches_explicit = True
+    page.advance_if_active_autoplay = True
+    opened = await pages.open_from_search(image_aweme())
+    assert opened["creator_profile"]["user"]["uid"] == UID
+    assert page.switch_clicks == ["current"]
+    assert "xg-switch-checked" not in page.switches[1]["className"]
+    assert "xg-switch-checked" not in page.switches[0]["className"]
+    actions = [line["action"] for line in lines_of(capture) if line["kind"] == "action"]
+    assert "toggle_autoplay" in actions
+
+
+@pytest.mark.asyncio
+async def test_autoplay_click_waits_before_reading_the_switch_again(tmp_path):
+    capture, pages, page = harness(tmp_path)
+    _arm_author(page)
+    page.switches = [_checked_switch("current", in_active=True, checked=True, y=760)]
+    page.switches_explicit = True
+    page.autoplay_off_delay_ms = 1000
+    opened = await pages.open_from_search(image_aweme())
+    assert opened["aweme_id"] == AWEME
+    assert "xg-switch-checked" not in page.switches[0]["className"]
+
+
+@pytest.mark.asyncio
+async def test_autoplay_falls_back_to_a_visible_switch_when_the_active_one_is_hidden(tmp_path):
+    capture, pages, page = harness(tmp_path)
+    _arm_author(page)
+    page.switches = [
+        _checked_switch("hidden-off", in_active=True, checked=False, y=760, visible=False),
+        _checked_switch("visible-on", in_active=False, checked=True, y=120),
+    ]
+    page.switches_explicit = True
+    page.advance_if_active_autoplay = True
+    page.advance_when_any_visible_checked = True
+    opened = await pages.open_from_search(image_aweme())
+    assert opened["aweme_id"] == AWEME
+    assert page.switch_clicks == ["visible-on"]
+    assert "xg-switch-checked" not in page.switches[1]["className"]
+    actions = [line["action"] for line in lines_of(capture) if line["kind"] == "action"]
+    assert "toggle_autoplay" in actions
+
+
+@pytest.mark.asyncio
+async def test_unreadable_autoplay_switch_is_runtime_not_already_off(tmp_path):
+    _capture, pages, page = harness(tmp_path)
+    _arm_author(page)
+    page.switches = []
+    page.switches_explicit = True
+    with pytest.raises(DouyinDetailFetchError) as raised:
+        await pages.open_from_search(image_aweme())
+    assert raised.value.code == "douyin_autoplay_still_on"
+    assert raised.value.runtime_blocking is True
+
+
+@pytest.mark.asyncio
+async def test_overlay_close_waits_and_hits_the_recon_landing(tmp_path):
+    """左上角另有更靠原点的方块。旧几何会点到它；关闭后 modal_id 还要过一会儿才消失。"""
+
+    capture, pages, page = harness(tmp_path)
+    _arm_author(page)
+    page.corner_nodes = [
+        {"id": "decoy", "visible": True, "cursor": "auto", "box": {"x": 0, "y": 0, "width": 40, "height": 40}},
+        {"id": "tiny", "visible": True, "cursor": "pointer", "box": {"x": 58, "y": 58, "width": 18, "height": 18}},
+        {
+            "id": "corner-close",
+            "visible": True,
+            "cursor": "pointer",
+            "box": {"x": 35, "y": 35, "width": 64, "height": 64},
+        },
+    ]
+    page.close_delay_ms = 1500
+    opened = await pages.open_from_search(image_aweme())
+    assert opened["aweme_id"] == AWEME
+    assert page.closed_node_ids
+    assert set(page.closed_node_ids) == {"corner-close"}
+    assert page.modal_id == ""
+    assert page.disposed_handles >= len(page.closed_node_ids)
+    actions = [line["action"] for line in lines_of(capture) if line["kind"] == "action"]
+    assert actions.count("close_overlay") == len(page.closed_node_ids)
+
+
+@pytest.mark.asyncio
+async def test_missing_close_control_records_no_action_and_drops_the_handle(tmp_path):
+    capture, pages, page = harness(tmp_path)
+    _arm_author(page)
+    page.corner_nodes = []
+    with pytest.raises(DouyinDetailFetchError) as raised:
+        await pages.open_from_search(image_aweme())
+    assert raised.value.code == "douyin_modal_close_failed"
+    assert raised.value.runtime_blocking is True
+    actions = [line["action"] for line in lines_of(capture) if line["kind"] == "action"]
+    assert "close_overlay" not in actions
+    assert page.clicks.count("close") == 0
+    assert page.disposed_handles >= 1
+
+
+@pytest.mark.asyncio
+async def test_author_tab_starts_blank_and_profile_is_captured_from_the_click(tmp_path):
+    capture, pages, page = harness(tmp_path)
+    _arm_author(page)
+    page.author_url_delay_ms = 400
+    opened = await pages.open_from_search(image_aweme())
+    assert opened["creator_profile"]["user"]["sec_uid"] == SEC
+    visits = [
+        line for line in lines_of(capture)
+        if line.get("kind") == "visit" and line.get("stage") == "creator_profile"
+    ]
+    assert visits and visits[0]["subject_id"] == UID
+
+
+@pytest.mark.asyncio
+async def test_card_missing_from_the_dom_is_wheeled_back_before_skipping(tmp_path):
+    _capture, pages, page = harness(tmp_path)
+    _arm_author(page)
+    page.cards = []
+    page.scroll_y = 3200
+    page.card_mount_below = 400
+    page.recoverable_card = {"kind": "card", "id": AWEME, "visible": True}
+    opened = await pages.open_from_search(image_aweme())
+    assert opened["aweme_id"] == AWEME
+    assert any(delta < 0 for delta in page.wheels)
+    assert page.cards and page.cards[0]["id"] == AWEME
+
+
+@pytest.mark.asyncio
+async def test_missing_active_video_box_does_not_click_an_arbitrary_author_link(monkeypatch, tmp_path):
+    monkeypatch.setattr(detail_page, "DETAIL_RETRY_PAUSE_SECONDS", 0)
+    _capture, pages, page = harness(tmp_path)
+    _arm_author(page)
+    page.active_box = None
+    page.author_links = [
+        {
+            "kind": "author",
+            "href": f"https://www.douyin.com/user/{SEC}",
+            "visible": True,
+            "box": {"x": 220, "y": 400, "width": 80, "height": 20},
+        },
+        {
+            "kind": "author",
+            "href": f"https://www.douyin.com/user/{SEC}",
+            "visible": True,
+            "box": {"x": 1100, "y": 80, "width": 80, "height": 20},
+        },
+    ]
+    with pytest.raises(DouyinDetailFetchError) as raised:
+        await pages.open_from_search(image_aweme())
+    assert raised.value.code == "author_link_missing"
+    assert raised.value.runtime_blocking is False
+    assert "author" not in page.clicks
+
+
+@pytest.mark.asyncio
+async def test_user_self_exclusion_compares_path_segments(tmp_path):
+    sec = "selfQingdao"
+    capture, pages, page = harness(tmp_path)
+    _arm_author(page)
+    page.author_sec = sec
+    page.author_links = [
+        {
+            "kind": "author",
+            "href": "https://www.douyin.com/user/self",
+            "visible": True,
+            "box": {"x": 1100, "y": 40, "width": 40, "height": 16},
+        },
+        {
+            "kind": "author",
+            "href": f"https://www.douyin.com/user/{sec}",
+            "visible": True,
+            "box": {"x": 1100, "y": 80, "width": 140, "height": 18},
+        },
+    ]
+    page.profiles = [(200, profile_user(sec_uid=sec))]
+    opened = await pages.open_from_search(image_aweme(sec_uid=sec))
+    assert opened["creator_profile"]["user"]["sec_uid"] == sec
+    visits = [
+        line for line in lines_of(capture)
+        if line.get("kind") == "visit" and line.get("stage") == "creator_profile"
+    ]
+    assert visits

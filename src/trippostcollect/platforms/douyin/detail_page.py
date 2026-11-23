@@ -37,6 +37,14 @@ AUTHOR_CLICK_PAUSE_SECONDS = (1.0, 2.0)
 MODAL_WAIT_SECONDS = 8.0
 MODAL_POLL_SECONDS = 0.2
 AUTHOR_RESPONSE_TIMEOUT_SECONDS = 15.0
+AUTHOR_URL_POLLS = 40
+AUTHOR_URL_POLL_MS = 200
+AUTOPLAY_SETTLE_POLLS = 6
+AUTOPLAY_SETTLE_POLL_MS = 200
+CLOSE_SETTLE_POLLS = 6
+CLOSE_SETTLE_POLL_MS = 250
+CARD_SEEK_STEPS = 16
+CARD_SEEK_SETTLE_MS = 150
 CLICK_TIMEOUT_MS = 8_000
 
 DETAIL_CARD_MISSING = "detail_card_missing"
@@ -55,7 +63,9 @@ BLOCKED_OR_FORBIDDEN = "blocked_or_forbidden"
 
 CARD_SELECTOR = "#waterfall_item_{aweme_id}"
 AVATAR_SELECTOR = '[data-e2e="feed-active-video"] [data-e2e="video-avatar"]'
-AUTOPLAY_SELECTOR = '[data-e2e="video-player-auto-play"] button'
+SCOPED_AUTOPLAY_SELECTOR = '[data-e2e="feed-active-video"] [data-e2e="video-player-auto-play"] button'
+FALLBACK_AUTOPLAY_SELECTOR = '[data-e2e="video-player-auto-play"] button[aria-checked]'
+AUTOPLAY_FALLBACK_MAX_Y = 900.0
 AUTHOR_LINK_SELECTOR = 'a[target="_blank"][href*="/user/"]'
 ACTIVE_VIDEO_SELECTOR = '[data-e2e="feed-active-video"]'
 # 侧栏标题在播放器右侧、靠近视口顶部。侦察里标题行 y 在 40–130，这里留到 220。
@@ -81,6 +91,35 @@ class DouyinDetailFetchError(DataFetchError):
         self.attempts = max(1, int(attempts))
         self.runtime_blocking = runtime_blocking
         self.retryable = bool(retryable) and not runtime_blocking
+
+
+def author_page_url_matches(url: str, sec_uid: str) -> bool:
+    """作者页必须是 ``https://www.douyin.com/user/{sec_uid}``。``about:blank`` 不算。"""
+
+    if not sec_uid or user_sec_uid(url) != sec_uid:
+        return False
+    parts = urlsplit(str(url or "").strip())
+    return parts.scheme == "https" and parts.netloc == "www.douyin.com"
+
+
+def _element_of(handle: Any) -> Any | None:
+    if handle is None:
+        return None
+    as_element = getattr(handle, "as_element", None)
+    if as_element is None:
+        return handle
+    return as_element()
+
+
+async def _dispose_handle(handle: Any) -> None:
+    if handle is None:
+        return
+    dispose = getattr(handle, "dispose", None)
+    if dispose is None:
+        return
+    result = dispose()
+    if hasattr(result, "__await__"):
+        await result
 
 
 def user_sec_uid(url: str) -> str:
@@ -210,7 +249,15 @@ class DouyinDetailPages:
                 raise self._runtime(aweme_id, BROWSER_TARGET_CLOSED) from exc
             raise self._candidate(aweme_id, DETAIL_CARD_MISSING) from exc
         if count < 1:
-            raise self._candidate(aweme_id, DETAIL_CARD_MISSING)
+            await self._seek_card(card, aweme_id)
+            try:
+                count = await card.count()
+            except (PlaywrightError, PlaywrightTimeoutError) as exc:
+                if _closed_error(exc) or _page_closed(self.search_page):
+                    raise self._runtime(aweme_id, BROWSER_TARGET_CLOSED) from exc
+                raise self._candidate(aweme_id, DETAIL_CARD_MISSING) from exc
+            if count < 1:
+                raise self._candidate(aweme_id, DETAIL_CARD_MISSING)
         target = card.first
         if not await self._is_visible(target):
             try:
@@ -257,16 +304,18 @@ class DouyinDetailPages:
             await asyncio.sleep(MODAL_POLL_SECONDS)
 
     async def _ensure_autoplay_off(self, aweme_id: str, state: Any) -> None:
-        if not isinstance(state, dict) or not state.get("autoplay_on"):
+        # 读不到当前开关不能当成已关闭：规格默认开启，继续停留会把 modal_id 切走。
+        # 这和「关不掉」一样是运行级，避免候选失败把图文写进已处理。
+        if not isinstance(state, dict) or state.get("autoplay_readable") is False:
+            raise self._runtime(aweme_id, AUTOPLAY_STILL_ON)
+        if not state.get("autoplay_on"):
             return
         await self._click_autoplay(aweme_id)
-        checked = await self._read_modal()
-        if isinstance(checked, dict) and checked.get("autoplay_on"):
+        if not await self._wait_autoplay_off(aweme_id):
             raise self._runtime(aweme_id, AUTOPLAY_STILL_ON)
 
     async def _click_autoplay(self, aweme_id: str) -> None:
-        switch = self.search_page.locator(AUTOPLAY_SELECTOR)
-        visible = await self._first_visible(switch, aweme_id)
+        visible = await self._find_autoplay_switch(aweme_id)
         if visible is None:
             raise self._runtime(aweme_id, AUTOPLAY_STILL_ON)
         self.channel.action(
@@ -280,6 +329,45 @@ class DouyinDetailPages:
             if _closed_error(exc) or _page_closed(self.search_page):
                 raise self._runtime(aweme_id, BROWSER_TARGET_CLOSED) from exc
             raise self._runtime(aweme_id, AUTOPLAY_STILL_ON) from exc
+
+    async def _find_autoplay_switch(self, aweme_id: str) -> Any | None:
+        scoped = await self._first_visible(self.search_page.locator(SCOPED_AUTOPLAY_SELECTOR), aweme_id)
+        if scoped is not None:
+            return scoped
+        fallback = self.search_page.locator(FALLBACK_AUTOPLAY_SELECTOR)
+        try:
+            count = await fallback.count()
+        except (PlaywrightError, PlaywrightTimeoutError) as exc:
+            if _closed_error(exc) or _page_closed(self.search_page):
+                raise self._runtime(aweme_id, BROWSER_TARGET_CLOSED) from exc
+            return None
+        for index in range(min(count, 10)):
+            cand = fallback.nth(index)
+            if not await self._is_visible(cand):
+                continue
+            try:
+                box = await cand.bounding_box()
+            except (PlaywrightError, PlaywrightTimeoutError) as exc:
+                if _closed_error(exc) or _page_closed(self.search_page):
+                    raise self._runtime(aweme_id, BROWSER_TARGET_CLOSED) from exc
+                continue
+            if not isinstance(box, dict):
+                continue
+            y = float(box.get("y") or 0)
+            if 0 < y < AUTOPLAY_FALLBACK_MAX_Y:
+                return cand
+        return None
+
+    async def _wait_autoplay_off(self, aweme_id: str) -> bool:
+        for _poll in range(AUTOPLAY_SETTLE_POLLS):
+            await self._wait_ms(self.search_page, AUTOPLAY_SETTLE_POLL_MS)
+            self._raise_if_closed(aweme_id)
+            state = await self._read_modal()
+            if not isinstance(state, dict) or state.get("autoplay_readable") is False:
+                return False
+            if not state.get("autoplay_on"):
+                return True
+        return False
 
     async def _raise_if_advanced(self, aweme_id: str) -> None:
         state = await self._read_modal()
@@ -331,6 +419,7 @@ class DouyinDetailPages:
             target={"aweme_id": aweme_id},
             from_visit=detail_visit,
         )
+        # 资料响应可能在点击当时就进通道。起点取点击前的序号，后面等 URL 时不能后移。
         after_seq = self.channel.ledger.last_seq
         try:
             async with self.channel.context.expect_page(timeout=CLICK_TIMEOUT_MS) as opened:
@@ -342,9 +431,8 @@ class DouyinDetailPages:
         try:
             if _page_closed(author_page):
                 raise self._runtime(aweme_id, BROWSER_TARGET_CLOSED)
+            await self._wait_author_url(author_page, sec_uid, aweme_id)
             await self._raise_if_blocking(author_page, aweme_id)
-            if user_sec_uid(str(getattr(author_page, "url", "") or "")) != sec_uid:
-                raise self._candidate(aweme_id, AUTHOR_URL_MISMATCH)
             captured = await self._take_profile(aweme_id, sec_uid, uid, after_seq)
             user = captured.json.get("user") if isinstance(captured.json, dict) else None
             if not isinstance(user, dict) or str(user.get("sec_uid") or "") != sec_uid:
@@ -365,9 +453,9 @@ class DouyinDetailPages:
         """侧栏标题上的作者链接。
 
         侦察用固定坐标 ``x>1000`` 且 ``40<=y<=130`` 把侧栏标题和顶部 ``/user/self`` 分开，
-        这依赖 1450 宽的窗口。这里改为：``target=_blank`` 的 ``/user/{sec_uid}``，排除
-        ``/user/self``，并且链接左边缘不小于当前播放项右边缘、纵坐标不超过标题带。
-        播放器内的连播作者链接落在播放项内部，不会被选中。
+        这依赖 1450 宽的窗口。这里改为：``target=_blank`` 的 ``/user/{sec_uid}``，路径段等于
+        ``self`` 的当前账号链接除外，并且链接左边缘不小于当前播放项右边缘、纵坐标不超过标题带。
+        读不到播放项包围盒时本次不选任何链接。播放器内的作者链接落在播放项内部，不会被选中。
         """
 
         locator = self.search_page.locator(AUTHOR_LINK_SELECTOR)
@@ -378,6 +466,8 @@ class DouyinDetailPages:
                 raise self._runtime(aweme_id, BROWSER_TARGET_CLOSED) from exc
             return None
         right_edge = await self._active_video_right_edge()
+        if right_edge is None:
+            return None
         for index in range(count):
             item = locator.nth(index)
             if not await self._is_visible(item):
@@ -388,10 +478,8 @@ class DouyinDetailPages:
                 if _closed_error(exc) or _page_closed(self.search_page):
                     raise self._runtime(aweme_id, BROWSER_TARGET_CLOSED) from exc
                 continue
-            if "/user/self" in href or user_sec_uid(href) != sec_uid:
+            if user_sec_uid(href) in {"", "self"} or user_sec_uid(href) != sec_uid:
                 continue
-            if right_edge is None:
-                return item
             try:
                 box = await item.bounding_box()
             except (PlaywrightError, PlaywrightTimeoutError) as exc:
@@ -447,10 +535,20 @@ class DouyinDetailPages:
             state = await self._read_modal()
             if not isinstance(state, dict) or not str(state.get("modal_id") or ""):
                 return
-            await self._click_close(aweme_id)
+            if await self._click_close(aweme_id) and await self._wait_modal_absent(aweme_id):
+                return
         state = await self._read_modal()
         if isinstance(state, dict) and str(state.get("modal_id") or ""):
             raise self._runtime(aweme_id, MODAL_CLOSE_FAILED)
+
+    async def _wait_modal_absent(self, aweme_id: str) -> bool:
+        for _poll in range(CLOSE_SETTLE_POLLS):
+            await self._wait_ms(self.search_page, CLOSE_SETTLE_POLL_MS)
+            self._raise_if_closed(aweme_id)
+            state = await self._read_modal()
+            if not isinstance(state, dict) or not str(state.get("modal_id") or ""):
+                return True
+        return False
 
     async def _best_effort_close(self, aweme_id: str) -> None:
         try:
@@ -463,25 +561,32 @@ class DouyinDetailPages:
             if _closed_error(exc) or _page_closed(self.search_page):
                 raise self._runtime(aweme_id, BROWSER_TARGET_CLOSED) from exc
 
-    async def _click_close(self, aweme_id: str) -> None:
-        self.channel.action(
-            "close_overlay",
-            page_role="primary",
-            target={"aweme_id": aweme_id},
-        )
+    async def _click_close(self, aweme_id: str) -> bool:
+        handle = None
         try:
-            element = await corner_close_handle(self.search_page)
+            handle = await corner_close_handle(self.search_page)
         except (PlaywrightError, PlaywrightTimeoutError) as exc:
             if _closed_error(exc) or _page_closed(self.search_page):
                 raise self._runtime(aweme_id, BROWSER_TARGET_CLOSED) from exc
-            return
-        if element is None:
-            return
+            return False
         try:
-            await element.click(timeout=CLICK_TIMEOUT_MS)
-        except (PlaywrightError, PlaywrightTimeoutError) as exc:
-            if _closed_error(exc) or _page_closed(self.search_page):
-                raise self._runtime(aweme_id, BROWSER_TARGET_CLOSED) from exc
+            element = _element_of(handle)
+            if element is None:
+                return False
+            try:
+                await element.click(timeout=CLICK_TIMEOUT_MS)
+            except (PlaywrightError, PlaywrightTimeoutError) as exc:
+                if _closed_error(exc) or _page_closed(self.search_page):
+                    raise self._runtime(aweme_id, BROWSER_TARGET_CLOSED) from exc
+                return False
+            self.channel.action(
+                "close_overlay",
+                page_role="primary",
+                target={"aweme_id": aweme_id},
+            )
+            return True
+        finally:
+            await _dispose_handle(handle)
 
     async def _close_author_tab(self, page: Any, aweme_id: str) -> None:
         if page is None or _page_closed(page):
@@ -502,6 +607,48 @@ class DouyinDetailPages:
         bring = getattr(self.search_page, "bring_to_front", None)
         if bring is not None and not _page_closed(self.search_page):
             await bring()
+
+    async def _wait_author_url(self, author_page: Any, sec_uid: str, aweme_id: str) -> None:
+        for index in range(AUTHOR_URL_POLLS + 1):
+            if _page_closed(author_page):
+                raise self._runtime(aweme_id, BROWSER_TARGET_CLOSED)
+            url = str(getattr(author_page, "url", "") or "")
+            if author_page_url_matches(url, sec_uid):
+                return
+            if index >= AUTHOR_URL_POLLS:
+                break
+            await self._wait_ms(author_page, AUTHOR_URL_POLL_MS)
+        raise self._candidate(aweme_id, AUTHOR_URL_MISMATCH)
+
+    async def _seek_card(self, card: Any, aweme_id: str) -> None:
+        """卡片不在 DOM 时，先用滚轮回到顶部，再逐屏往下找。"""
+
+        size = getattr(self.search_page, "viewport_size", None) or {}
+        step = max(400, int((size or {}).get("height") or 900) - 120)
+        for delta in (-step,) * CARD_SEEK_STEPS + (step,) * CARD_SEEK_STEPS:
+            try:
+                await self.search_page.mouse.wheel(0, delta)
+            except (PlaywrightError, PlaywrightTimeoutError) as exc:
+                if _closed_error(exc) or _page_closed(self.search_page):
+                    raise self._runtime(aweme_id, BROWSER_TARGET_CLOSED) from exc
+                return
+            await self._wait_ms(self.search_page, CARD_SEEK_SETTLE_MS)
+            try:
+                if await card.count() >= 1:
+                    return
+            except (PlaywrightError, PlaywrightTimeoutError) as exc:
+                if _closed_error(exc) or _page_closed(self.search_page):
+                    raise self._runtime(aweme_id, BROWSER_TARGET_CLOSED) from exc
+                return
+
+    async def _wait_ms(self, page: Any, milliseconds: int) -> None:
+        if milliseconds <= 0:
+            return
+        waiter = getattr(page, "wait_for_timeout", None)
+        if waiter is None:
+            await asyncio.sleep(milliseconds / 1000)
+            return
+        await waiter(milliseconds)
 
     async def _pause(
         self,
