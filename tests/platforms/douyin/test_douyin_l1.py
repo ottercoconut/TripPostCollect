@@ -166,6 +166,9 @@ class Locator:
                 items = [item for item in items if item.get("aria") is not None]
             return items
         if selector_is_author_link(self.selector):
+            if page.author_links_hidden_reads > 0:
+                page.author_links_hidden_reads -= 1
+                return []
             return list(page.author_links)
         if self.selector == '[data-e2e="feed-active-video"]':
             return [{"kind": "active", "box": page.active_box}] if page.active_box else []
@@ -199,6 +202,8 @@ class Locator:
             return None
         if name == "href":
             return picked[0].get("href")
+        if name == "data-e2e":
+            return picked[0].get("e2e")
         return None
 
     async def bounding_box(self) -> dict[str, float] | None:
@@ -427,6 +432,7 @@ class Page:
         self.advance_if_active_autoplay = False
         self.advance_when_any_visible_checked = False
         self.author_links: list[dict[str, Any]] = []
+        self.author_links_hidden_reads = 0
         self.active_box: dict[str, float] | None = {"x": 200, "y": 80, "width": 700, "height": 600}
         self.modal_id = ""
         self.has_active = False
@@ -1372,23 +1378,25 @@ async def test_card_missing_from_the_dom_is_wheeled_back_before_skipping(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_missing_active_video_box_does_not_click_an_arbitrary_author_link(monkeypatch, tmp_path):
+async def test_player_avatar_and_low_links_are_not_taken_for_the_sidebar_title(monkeypatch, tmp_path):
+    """播放器头像同样指向作者且 target=_blank；标题带以下的同作者链接也不是侧栏标题。"""
+
     monkeypatch.setattr(detail_page, "DETAIL_RETRY_PAUSE_SECONDS", 0)
     _capture, pages, page = harness(tmp_path)
     _arm_author(page)
-    page.active_box = None
     page.author_links = [
         {
             "kind": "author",
             "href": f"https://www.douyin.com/user/{SEC}",
+            "e2e": "video-avatar",
             "visible": True,
-            "box": {"x": 220, "y": 400, "width": 80, "height": 20},
+            "box": {"x": 1100, "y": 80, "width": 42, "height": 42},
         },
         {
             "kind": "author",
             "href": f"https://www.douyin.com/user/{SEC}",
             "visible": True,
-            "box": {"x": 1100, "y": 80, "width": 80, "height": 20},
+            "box": {"x": 220, "y": 400, "width": 80, "height": 20},
         },
     ]
     with pytest.raises(DouyinDetailFetchError) as raised:
@@ -1396,6 +1404,34 @@ async def test_missing_active_video_box_does_not_click_an_arbitrary_author_link(
     assert raised.value.code == "author_link_missing"
     assert raised.value.runtime_blocking is False
     assert "author" not in page.clicks
+
+
+@pytest.mark.asyncio
+async def test_sidebar_title_link_is_found_when_the_active_item_covers_the_viewport(tmp_path):
+    """2026-11-23 实测：feed-active-video 盖住整个视口，侧栏标题链接在它“内部”，且晚一拍出现。"""
+
+    _capture, pages, page = harness(tmp_path)
+    _arm_author(page)
+    page.active_box = {"x": 0, "y": 0, "width": 1450, "height": 777}
+    page.author_links = [
+        {
+            "kind": "author",
+            "href": f"https://www.douyin.com/user/{SEC}",
+            "e2e": "video-avatar",
+            "visible": True,
+            "box": {"x": 978, "y": 316, "width": 42, "height": 42},
+        },
+        {
+            "kind": "author",
+            "href": f"https://www.douyin.com/user/{SEC}?from_tab_name=main",
+            "visible": True,
+            "box": {"x": 1052, "y": 63, "width": 102, "height": 48},
+        },
+    ]
+    page.author_links_hidden_reads = 3
+    opened = await pages.open_from_search(image_aweme())
+    assert opened["aweme_id"] == AWEME
+    assert page.clicks.count("author") == 1
 
 
 @pytest.mark.asyncio

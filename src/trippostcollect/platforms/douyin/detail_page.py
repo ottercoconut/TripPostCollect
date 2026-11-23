@@ -70,9 +70,13 @@ SCOPED_AUTOPLAY_SELECTOR = '[data-e2e="feed-active-video"] [data-e2e="video-play
 FALLBACK_AUTOPLAY_SELECTOR = '[data-e2e="video-player-auto-play"] button[aria-checked]'
 AUTOPLAY_FALLBACK_MAX_Y = 900.0
 AUTHOR_LINK_SELECTOR = 'a[target="_blank"][href*="/user/"]'
-ACTIVE_VIDEO_SELECTOR = '[data-e2e="feed-active-video"]'
 # 侧栏标题在播放器右侧、靠近视口顶部。侦察里标题行 y 在 40–130，这里留到 220。
 AUTHOR_TITLE_MAX_Y = 220.0
+# 播放器里的头像本身也是指向同一作者的 target=_blank 链接，不能当成侧栏标题链接。
+PLAYER_AVATAR_E2E = "video-avatar"
+# 侧栏在点头像后约 1 秒出现（2026-11-23 实测）；在这段预算内轮询标题链接。
+AUTHOR_LINK_POLLS = 25
+AUTHOR_LINK_POLL_MS = 200
 CLOSE_ATTEMPTS = 3
 
 
@@ -463,12 +467,22 @@ class DouyinDetailPages:
             await self._close_author_tab(author_page, aweme_id)
 
     async def _panel_author_link(self, sec_uid: str, aweme_id: str) -> Any | None:
-        """侧栏标题上的作者链接。
+        """侧栏标题上的作者链接；侧栏晚于点击出现，在预算内轮询。"""
 
-        侦察用固定坐标 ``x>1000`` 且 ``40<=y<=130`` 把侧栏标题和顶部 ``/user/self`` 分开，
-        这依赖 1450 宽的窗口。这里改为：``target=_blank`` 的 ``/user/{sec_uid}``，路径段等于
-        ``self`` 的当前账号链接除外，并且链接左边缘不小于当前播放项右边缘、纵坐标不超过标题带。
-        读不到播放项包围盒时本次不选任何链接。播放器内的作者链接落在播放项内部，不会被选中。
+        for poll in range(AUTHOR_LINK_POLLS):
+            link = await self._panel_author_link_once(sec_uid, aweme_id)
+            if link is not None:
+                return link
+            if poll + 1 < AUTHOR_LINK_POLLS:
+                await self._wait_ms(self.search_page, AUTHOR_LINK_POLL_MS)
+                self._raise_if_closed(aweme_id)
+        return None
+
+    async def _panel_author_link_once(self, sec_uid: str, aweme_id: str) -> Any | None:
+        """2026-11-23 实测（1450×777 视口）：``feed-active-video`` 盖住整个视口，不能用它的右边缘区分
+        侧栏；侧栏标题链接在纵坐标约 63 处。同作者的 ``target=_blank`` 链接只有两条：播放器头像
+        （``data-e2e=video-avatar``，纵坐标约 316）和侧栏标题。所以排除头像与路径段为 ``self`` 的当前
+        账号链接，只取标题带（纵坐标不超过 220）内路径段等于目标 ``sec_uid`` 的链接。
         """
 
         locator = self.search_page.locator(AUTHOR_LINK_SELECTOR)
@@ -478,18 +492,18 @@ class DouyinDetailPages:
             if _closed_error(exc) or _page_closed(self.search_page):
                 raise self._runtime(aweme_id, BROWSER_TARGET_CLOSED) from exc
             return None
-        right_edge = await self._active_video_right_edge()
-        if right_edge is None:
-            return None
         for index in range(count):
             item = locator.nth(index)
             if not await self._is_visible(item):
                 continue
             try:
                 href = str(await item.get_attribute("href") or "")
+                e2e = str(await item.get_attribute("data-e2e") or "")
             except (PlaywrightError, PlaywrightTimeoutError) as exc:
                 if _closed_error(exc) or _page_closed(self.search_page):
                     raise self._runtime(aweme_id, BROWSER_TARGET_CLOSED) from exc
+                continue
+            if e2e == PLAYER_AVATAR_E2E:
                 continue
             if user_sec_uid(href) in {"", "self"} or user_sec_uid(href) != sec_uid:
                 continue
@@ -499,26 +513,12 @@ class DouyinDetailPages:
                 if _closed_error(exc) or _page_closed(self.search_page):
                     raise self._runtime(aweme_id, BROWSER_TARGET_CLOSED) from exc
                 continue
-            if not isinstance(box, dict):
-                continue
-            if float(box.get("x") or 0) < right_edge:
+            if not isinstance(box, dict) or not box.get("width"):
                 continue
             if float(box.get("y") or 0) > AUTHOR_TITLE_MAX_Y:
                 continue
             return item
         return None
-
-    async def _active_video_right_edge(self) -> float | None:
-        active = self.search_page.locator(ACTIVE_VIDEO_SELECTOR)
-        try:
-            if await active.count() < 1:
-                return None
-            box = await active.first.bounding_box()
-        except (PlaywrightError, PlaywrightTimeoutError):
-            return None
-        if not isinstance(box, dict) or not box.get("width"):
-            return None
-        return float(box["x"]) + float(box["width"]) - 8
 
     async def _take_profile(self, aweme_id: str, sec_uid: str, uid: str, after_seq: int) -> CapturedResponse:
         def predicate(item: Any) -> bool:
