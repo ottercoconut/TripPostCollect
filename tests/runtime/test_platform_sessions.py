@@ -139,7 +139,6 @@ def test_runtime_modules_no_longer_reference_fork_directory() -> None:
         "platforms/weibo/core.py",
         "platforms/douyin/core.py",
         "platforms/zhihu/core.py",
-        "platforms/douyin/login_support.py",
         "runtime/browser.py",
         "runtime/cookies.py",
     ):
@@ -167,34 +166,6 @@ def test_unified_warmup_runs_without_fork_directory(
     monkeypatch.setattr(warmup, "run_target", fake_target)
     args = argparse.Namespace(timeout_seconds=1, targets=["all"], output_dir=str(tmp_path / "out"))
     assert asyncio.run(warmup.main_async(args)) == 0
-
-
-# ---------- 抖音滑块临时图落点 ----------
-
-def test_douyin_slider_images_use_runtime_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    import cv2
-    import numpy as np
-
-    from trippostcollect.platforms.douyin import login_support
-
-    assert paths.DOUYIN_SLIDER_IMAGE_DIR.is_relative_to(paths.RUNTIME_ROOT)
-    target = tmp_path / "douyin_slider_images"
-    monkeypatch.setattr(login_support, "DOUYIN_SLIDER_IMAGE_DIR", target)
-    ok, encoded = cv2.imencode(".jpg", np.zeros((8, 8, 3), dtype="uint8"))
-    assert ok
-    requests = []
-
-    def fake_get(url, headers):
-        requests.append(url)
-        return SimpleNamespace(status_code=200, content=encoded.tobytes())
-
-    monkeypatch.setattr(login_support.httpx, "get", fake_get)
-    slide = login_support.Slide(gap="https://example.invalid/gap.png", bg="https://example.invalid/bg.png")
-    assert slide.img_dir == str(target)
-    assert slide.out == str(target / "out.jpg")
-    assert slide.bg == str(target / "bg.jpg") and Path(slide.bg).is_file()
-    assert slide.gap == str(target / "gap.jpg") and Path(slide.gap).is_file()
-    assert len(requests) == 2
 
 
 # ---------- entry/jsonl 缺省值不指向 fork ----------

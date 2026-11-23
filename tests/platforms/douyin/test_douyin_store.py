@@ -194,7 +194,9 @@ def test_search_author_followers_are_never_observed(author, creator_profile):
         ({"follower_count": 0}, 0),
         ({"follower_count": 12}, 12),
         ({"mplatform_followers_count": 34}, 34),
-        ({"follower_count": 0, "mplatform_followers_count": 56}, 56),
+        # #225：follower_count 的真实 0 照记，不用后备键的非 0 值顶替。
+        ({"follower_count": 0, "mplatform_followers_count": 56}, 0),
+        ({"follower_count": 78, "mplatform_followers_count": 56}, 78),
     ],
 )
 def test_creator_profile_user_node_is_the_only_follower_source(user, expected):
@@ -204,3 +206,28 @@ def test_creator_profile_user_node_is_the_only_follower_source(user, expected):
     assert record["author_followers_source"] == "creator_profile"
     assert record["followers_count"] == expected
     assert record["fans_count"] == expected
+
+
+@pytest.mark.parametrize("key", ["followers_count", "fans_count", "fans"])
+def test_unconfirmed_follower_keys_are_not_read(key):
+    record = project(image_note(creator_profile={"status_code": 0, "user": {key: 99}}))
+
+    assert record["followers_observed"] is False
+    assert record["followers_count"] is None
+
+
+def test_author_counts_come_only_from_the_profile_user_node():
+    """#225：关注、作品、获赞只读作者页资料 user 节点；搜索作者对象和资料里的嵌套对象都不读。"""
+
+    record = project(image_note(
+        author={"uid": "1", "following_count": 9, "aweme_count": 1, "total_favorited": 5},
+        creator_profile={
+            "status_code": 0,
+            "user": {"follower_count": 10, "following_count": 0, "aweme_count": 0},
+            "nested": {"following_count": 7, "aweme_count": 3, "total_favorited": 4},
+        },
+    ))
+
+    assert record["following_count"] == 0
+    assert record["aweme_count"] == 0
+    assert record.get("author_liked_count") is None

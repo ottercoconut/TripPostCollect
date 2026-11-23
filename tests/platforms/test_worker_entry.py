@@ -120,7 +120,7 @@ DROPPED_KEYS = {
     "DY_CREATOR_ID_LIST", "WEIBO_CREATOR_ID_LIST", "XHS_CREATOR_ID_LIST",
     "CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES", "CRAWLER_MAX_NOTES_COUNT",
 }
-SPECIFIED_ID_KEYS = {"dy": "DY_SPECIFIED_ID_LIST", "wb": "WEIBO_SPECIFIED_ID_LIST",
+SPECIFIED_ID_KEYS = {"wb": "WEIBO_SPECIFIED_ID_LIST",
                      "zhihu": "ZHIHU_SPECIFIED_ID_LIST", "xhs": "XHS_SPECIFIED_NOTE_URL_LIST"}
 
 
@@ -148,6 +148,7 @@ def test_configure_writes_worker_inputs_to_root_config(name: str, tmp_path: Path
         "ENABLE_IP_PROXY": False, "ENABLE_GET_COMMENTS": False, "ENABLE_GET_SUB_COMMENTS": False,
         "ENABLE_GET_MEIDAS": True,
     }
+    assert "DY_SPECIFIED_ID_LIST" not in config
     for site, key in SPECIFIED_ID_KEYS.items():
         assert config[key] == ([specified] if specified and site == code else []), key
     assert not [key for key in config if key.startswith(DROPPED_PREFIXES) or key in DROPPED_KEYS]
@@ -187,7 +188,7 @@ def test_configure_does_not_import_any_platform(tmp_path: Path) -> None:
 
 @pytest.mark.installation
 def test_all_worker_platforms_import_in_root_environment_without_exit_slices(tmp_path: Path) -> None:
-    # 抖音在导入时编译 libs/douyin.js，需要 Node；以任意 cwd 验证不依赖仓库目录
+    # 以任意 cwd 验证 worker 导入不依赖仓库目录。
     probe = (
         "import importlib, json\n"
         f"from {ENTRY_MODULE} import configure, load_crawler\n"

@@ -7,8 +7,8 @@ from urllib.parse import urlsplit
 
 from trippostcollect.application.contracts import ImageStagingError
 from trippostcollect.records.identity import platform_nickname, platform_user_id
-from trippostcollect.runtime.helpers import extract_url_params_to_dict, normalize_image_url
-from trippostcollect.platforms.douyin.models import SearchResponseError, VideoUrlInfo
+from trippostcollect.runtime.helpers import normalize_image_url
+from trippostcollect.platforms.douyin.models import SearchResponseError
 
 DOUYIN_RESULT_LINK_SELECTOR = ', '.join(
     (
@@ -19,14 +19,12 @@ DOUYIN_RESULT_LINK_SELECTOR = ', '.join(
         '[id^="waterfall_item_"]:visible',
     )
 )
-# #116：作者粉丝量只认作者资料响应 user 节点（不读搜索作者对象、不递归嵌套对象）；键名沿用原
-# follower_keys 的全部候选与顺序，避免实际响应的键名与预期不同时把真实粉丝量误判为缺失。
+# #116、#225：作者粉丝量只认作者页资料响应的 user 节点（不读搜索作者对象、不递归嵌套对象）。
+# 先读 follower_count，缺失时才读 mplatform_followers_count；真实 0 照记，不用后备键的非 0 值顶替。
+# 键名与 2026-11-20 侦察的作者页资料一致。
 DOUYIN_PROFILE_FOLLOWER_KEYS = (
     "follower_count",
-    "followers_count",
     "mplatform_followers_count",
-    "fans_count",
-    "fans",
 )
 # #163：作者资料 user 节点里与认证相关的原值，随记录留作证据。实测对照主页（#163 评论）：主页“认证信息”
 # 的文字即 account_cert_info.label_text，蓝 V 时与 enterprise_verify_reason 相同；verification_type 对蓝 V
@@ -37,9 +35,8 @@ DOUYIN_PROFILE_VERIFY_EVIDENCE_KEYS = (
     "verification_type",
     "account_cert_info",
 )
-# #116：内容记录如实标注正文来源；两种来源都必须通过 douyin_content_detail_observed。
+# #116：搜索卡片正文来源。记录须通过 douyin_content_detail_observed。
 DOUYIN_SEARCH_CONTENT_SOURCE = "search_aweme_info"
-DOUYIN_DETAIL_CONTENT_SOURCE = "aweme_detail"
 DOUYIN_IMAGE_NOTE_AWEME_TYPES = frozenset({"68"})
 DOUYIN_NO_RESULT_MARKERS = (
     "暂无搜索结果",
@@ -49,129 +46,6 @@ DOUYIN_NO_RESULT_MARKERS = (
     "搜索结果为空",
     "换个关键词试试",
 )
-
-
-def _find_nested_platform_record(
-    value: Any,
-    target_id: str,
-    *,
-    id_keys: tuple[str, ...],
-    shape_keys: tuple[str, ...],
-    depth: int = 0,
-) -> dict[str, Any] | None:
-    if depth > 12:
-        return None
-    if isinstance(value, dict):
-        identity = next(
-            (
-                str(value.get(key) or "")
-                for key in id_keys
-                if value.get(key) not in (None, "")
-            ),
-            "",
-        )
-        if identity == str(target_id) and any(key in value for key in shape_keys):
-            return value
-        for nested in value.values():
-            found = _find_nested_platform_record(
-                nested,
-                target_id,
-                id_keys=id_keys,
-                shape_keys=shape_keys,
-                depth=depth + 1,
-            )
-            if found is not None:
-                return found
-    elif isinstance(value, list):
-        for nested in value:
-            found = _find_nested_platform_record(
-                nested,
-                target_id,
-                id_keys=id_keys,
-                shape_keys=shape_keys,
-                depth=depth + 1,
-            )
-            if found is not None:
-                return found
-    return None
-
-
-#!/usr/bin/env python
-# TripPostCollect：T06 按职责迁入；来源 fork 5a68eb5098fcd17308c7fe0b9d53916ae839b303，原许可保留。
-def _find_douyin_detail(value: Any, aweme_id: str) -> dict[str, Any] | None:
-    return _find_nested_platform_record(
-        value,
-        aweme_id,
-        id_keys=("aweme_id",),
-        shape_keys=("desc", "author", "statistics", "images", "video", "create_time"),
-    )
-
-
-# -*- coding: utf-8 -*-
-# Copyright (c) 2025 relakkes@gmail.com
-#
-# This file is part of MediaCrawler project.
-# Repository: https://github.com/NanmiCoder/MediaCrawler/blob/main/media_platform/douyin/help.py
-# GitHub: https://github.com/NanmiCoder
-# Licensed under NON-COMMERCIAL LEARNING LICENSE 1.1
-#
-
-# 声明：本代码仅供学习和研究目的使用。使用者应遵守以下原则：
-# 1. 不得用于任何商业用途。
-# 2. 使用时应遵守目标平台的使用条款和robots.txt规则。
-# 3. 不得进行大规模爬取或对平台造成运营干扰。
-# 4. 应合理控制请求频率，避免给目标平台带来不必要的负担。
-# 5. 不得用于任何非法或不当的用途。
-#
-# 详细许可条款请参阅项目根目录下的LICENSE文件。
-# 使用本代码即表示您同意遵守上述原则和LICENSE中的所有条款。
-
-
-# -*- coding: utf-8 -*-
-# @Author  : relakkes@gmail.com
-# @Name: Programmer Ajiang-Relakkes
-# @Time    : 2024/6/10 02:24
-# @Desc    : Get a_bogus parameter, for learning and communication only, do not use for commercial purposes, contact author to delete if infringement
-
-# TripPostCollect：T06 按职责迁入；来源 fork 5a68eb5098fcd17308c7fe0b9d53916ae839b303，原许可保留。
-def parse_video_info_from_url(url: str) -> VideoUrlInfo:
-    """
-    Parse video ID from Douyin video URL
-    Supports the following formats:
-    1. Normal video link: https://www.douyin.com/video/7525082444551310602
-    2. Link with modal_id parameter:
-       - https://www.douyin.com/user/MS4wLjABAAAATJPY7LAlaa5X-c8uNdWkvz0jUGgpw4eeXIwu_8BhvqE?modal_id=7525082444551310602
-       - https://www.douyin.com/root/search/python?modal_id=7471165520058862848
-    3. Short link: https://v.douyin.com/iF12345ABC/ (requires client parsing)
-    4. Pure ID: 7525082444551310602
-
-    Args:
-        url: Douyin video link or ID
-    Returns:
-        VideoUrlInfo: Object containing video ID
-    """
-    # If it's a pure numeric ID, return directly
-    if url.isdigit():
-        return VideoUrlInfo(aweme_id=url, url_type="normal")
-
-    # Check if it's a short link (v.douyin.com)
-    if "v.douyin.com" in url or url.startswith("http") and len(url) < 50 and "video" not in url:
-        return VideoUrlInfo(aweme_id="", url_type="short")  # Requires client parsing
-
-    # Try to extract modal_id from URL parameters
-    params = extract_url_params_to_dict(url)
-    modal_id = params.get("modal_id")
-    if modal_id:
-        return VideoUrlInfo(aweme_id=modal_id, url_type="modal")
-
-    # Extract ID from standard video URL: /video/number
-    video_pattern = r'/video/(\d+)'
-    match = re.search(video_pattern, url)
-    if match:
-        aweme_id = match.group(1)
-        return VideoUrlInfo(aweme_id=aweme_id, url_type="normal")
-
-    raise ValueError(f"Unable to parse video ID from URL: {url}")
 
 
 # TripPostCollect：T06 按职责迁入；来源 fork 5a68eb5098fcd17308c7fe0b9d53916ae839b303，原许可保留。
@@ -438,31 +312,12 @@ def _creator_user_profile(creator_profile: Dict) -> Dict:
 # @Time    : 2024/1/14 18:46
 # @Desc    :
 # TripPostCollect：T06 按职责迁入；来源 fork 5a68eb5098fcd17308c7fe0b9d53916ae839b303，原许可保留。
-def _author_metric(author: Dict, creator_profile: Dict, *keys: str):
-    profile_user = _creator_user_profile(creator_profile)
-    candidates = []
-    for key in keys:
-        value = _first_nonempty(author.get(key), profile_user.get(key), creator_profile.get(key))
-        if value not in (None, "") and not isinstance(value, (dict, list)):
-            candidates.append(value)
-    expected = {key.lower() for key in keys}
-
-    def walk(data):
-        if isinstance(data, dict):
-            for key, value in data.items():
-                if str(key).lower() in expected and value not in (None, "") and not isinstance(value, (dict, list)):
-                    candidates.append(value)
-                elif isinstance(value, (dict, list)):
-                    walk(value)
-        elif isinstance(data, list):
-            for item in data:
-                walk(item)
-
-    walk(creator_profile)
-    for value in candidates:
-        if str(value) != "0":
-            return value
-    return candidates[0] if candidates else None
+def _profile_metric(creator_profile: Dict, key: str):
+    """#225：作者统计只读作者页资料响应的 user 节点；缺失、空串或非标量时为 None，0 照记。"""
+    value = _profile_user_node(creator_profile).get(key)
+    if value in (None, "") or isinstance(value, (dict, list)):
+        return None
+    return value
 
 
 # -*- coding: utf-8 -*-
@@ -551,27 +406,23 @@ def _profile_verification(profile_user: Dict) -> tuple[int | None, str | None]:
     return None, None
 
 
-def _normalized_author_stats(author: Dict, creator_profile: Dict) -> Dict:
-    # #116：粉丝量只读作者资料响应的 user 节点；搜索作者对象的占位 0 不再记为已观测。
-    profile_user = _profile_user_node(creator_profile)
-    follower_values = [
-        profile_user[key]
-        for key in DOUYIN_PROFILE_FOLLOWER_KEYS
-        if profile_user.get(key) not in (None, "")
-        and not isinstance(profile_user.get(key), (dict, list))
-    ]
-    # 与原实现相同：两个键都在时优先取非 0 值，真实 0 仍算已观测。
+def _normalized_author_stats(creator_profile: Dict) -> Dict:
+    # #116、#225：作者统计只读作者页资料响应的 user 节点；搜索作者对象的值一律不用。
     followers_count = next(
-        (value for value in follower_values if str(value) != "0"),
-        follower_values[0] if follower_values else None,
+        (
+            value
+            for value in (_profile_metric(creator_profile, key) for key in DOUYIN_PROFILE_FOLLOWER_KEYS)
+            if value is not None
+        ),
+        None,
     )
     followers_observed = followers_count is not None
     return {
         "followers_count": followers_count,
         "fans_count": followers_count,
-        "following_count": _author_metric(author, creator_profile, "following_count", "follow_count", "follows"),
-        "aweme_count": _author_metric(author, creator_profile, "aweme_count", "post_count", "posts_count", "video_count"),
-        "author_liked_count": _author_metric(author, creator_profile, "total_favorited", "favorited_count", "liked_count"),
+        "following_count": _profile_metric(creator_profile, "following_count"),
+        "aweme_count": _profile_metric(creator_profile, "aweme_count"),
+        "author_liked_count": _profile_metric(creator_profile, "total_favorited"),
         "followers_observed": followers_observed,
         "author_followers_source": "creator_profile" if followers_observed else "missing",
     }
@@ -677,7 +528,7 @@ def _extract_note_image_assets(aweme_detail: Dict) -> List[Dict]:
     return assets
 
 
-# TripPostCollect #116：图文判定与正文来源证据，搜索卡片和详情两条路径共用。
+# TripPostCollect #116：图文判定与正文来源证据。搜索卡片按 aweme_type 或正文图识别图文。
 def is_douyin_image_note(aweme_item: Dict) -> bool:
     """aweme_type 或正文图证明是图文；其余候选按视频计入已处理，不写内容记录。"""
     return (
@@ -687,7 +538,7 @@ def is_douyin_image_note(aweme_item: Dict) -> bool:
 
 
 def douyin_content_detail_observed(aweme_item: Dict, expected_aweme_id: str) -> bool:
-    """#116：搜索卡片与详情都必须是同一 aweme_id 的图文，并带非空 desc、发帖时间和作者 uid。
+    """#116：搜索卡片必须是同一 aweme_id 的图文，并带非空 desc、发帖时间和作者 uid。
 
     desc 为空时不能用标题或封面文字顶替。
     """
@@ -740,7 +591,7 @@ def update_douyin_aweme(
     aweme_id = aweme_item.get("aweme_id")
     user_info = aweme_item.get("author", {})
     creator_profile = aweme_item.get("creator_profile") or {}
-    author_stats = _normalized_author_stats(user_info, creator_profile)
+    author_stats = _normalized_author_stats(creator_profile)
     interact_info = aweme_item.get("statistics", {})
     image_assets = _extract_note_image_assets(aweme_item)
     save_content_item = {
@@ -777,6 +628,9 @@ def update_douyin_aweme(
             else "detail_unobserved"
         )
         save_content_item["content_detail_source"] = content_detail_source
+        refs = aweme_item.get("content_visit_refs")
+        if isinstance(refs, dict) and refs:
+            save_content_item["content_visit_refs"] = dict(refs)
         # 冻结旧列契约（db 模式）不含简介、认证证据与主页链接，只在 jsonl 记录中写出（#163）。
         save_content_item.update(_profile_author_extras(creator_profile))
         profile_url = _author_profile_url(user_info, creator_profile)
@@ -810,10 +664,3 @@ def douyin_source_asset_key(uri: str | None, source_url: str) -> str:
     normalized = normalize_image_url(source_url)
     digest = sha256(urlsplit(normalized).path.encode("utf-8")).hexdigest()
     return f"douyin:urlsha256:{digest}"
-
-
-def _douyin_detail_urls(aweme_id: str) -> tuple[str, str]:
-    return (
-        f"https://www.douyin.com/note/{aweme_id}",
-        f"https://www.douyin.com/video/{aweme_id}",
-    )

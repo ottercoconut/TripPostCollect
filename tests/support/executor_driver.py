@@ -151,7 +151,7 @@ def record_for(platform, number):
         "comments_count": 2, "shared_count": 1, "share_count": 1,
         "collected_count": 4, "view_count": 6, "voteup_count": 3,
         "source_keyword": "青岛旅游", "content_detail_status": "detail_observed",
-        "content_detail_source": {"weibo": "mobile_detail", "douyin": "aweme_detail",
+        "content_detail_source": {"weibo": "mobile_detail", "douyin": "search_aweme_info",
                                   "zhihu": "answer_detail", "xhs": "note_detail",
                                   "bilibili": "article_view_api"}[platform],
         "author_followers_source": {"weibo": "search_author", "zhihu": "author_page",
@@ -164,8 +164,7 @@ def record_for(platform, number):
     elif platform == "weibo":
         record.update(note_id=post_id, image_list=[url], image_list_source="mblog.pics")
     elif platform == "douyin":
-        record.update(aweme_id=post_id, aweme_type=68, note_download_url=url,
-                      image_assets=[{"url": url, "uri": post_id}])
+        record.update(aweme_id=post_id, aweme_type=68, note_download_url=url, creator_hash="author-1")
     elif platform == "zhihu":
         record.update(content_id=post_id, content_type="answer", question_id="80", image_list=[url])
     else:
@@ -396,6 +395,78 @@ def write_weibo_visit_ledger(behavior_path, records, entries):
     return search
 
 
+DOUYIN_LEDGER_ID = "22" * 16
+
+
+def write_douyin_visit_ledger(behavior_path, records, entries):
+    """#222 合成账本：搜索截获、点击浮层、点击作者、CDN 图片。"""
+
+    ledger = VisitLedger.create(
+        content_visits_path(behavior_path), platform="douyin", mode="discovery",
+        ledger_id=DOUYIN_LEDGER_ID, clock=lambda: XHS_LEDGER_TIME,
+    )
+
+    def action(kind, target, *, from_visit=None, page_role="primary"):
+        return ledger.append(
+            "action", seq=ledger.next_seq(), page_role=page_role, action=kind, target=target,
+            from_visit=from_visit,
+        )
+
+    def visit(stage, rule, source, *, trigger, subject_id=None, page_role="primary", **audit):
+        return ledger.append(
+            "visit", seq=ledger.next_seq(), page_role=page_role, recorded_at=XHS_LEDGER_TIME,
+            stage=stage, source=source, rule=rule, endpoint=None,
+            status=200 if source in {"page_response", "cdn_direct"} else None,
+            outcome="ok", subject_id=subject_id, trigger=trigger, **audit,
+        )
+
+    def pause(stage, continuity="n/a"):
+        start = ledger.next_seq()
+        ledger.append(
+            "pause", seq=ledger.next_seq(), page_role="primary", stage=stage,
+            start_seq=start, seconds=1.0, continuity=continuity,
+        )
+
+    search = visit(
+        "search_results", "douyin.search_response", "page_response",
+        trigger=action("navigate", {"route": "/search", "query_keys": ["type"]}),
+        search_session="douyin-offline", is_target=True, search_page=1, has_more=False,
+        items=[{"id": record["aweme_id"], "type": "image"} for record in records],
+    )
+    pause("search_results", "completed")
+    for record in records:
+        aweme_id = record["aweme_id"]
+        author_id = str(record.get("creator_hash") or record.get("user_id") or "")
+        record["creator_hash"] = author_id
+        click = action("click_card", {"aweme_id": aweme_id})
+        detail = visit(
+            "note_detail", "douyin.modal_state", "page_state", trigger=click, subject_id=aweme_id,
+        )
+        pause("note_detail")
+        pause("creator_profile")
+        author_click = action("click_author", {"aweme_id": aweme_id}, from_visit=detail)
+        author = visit(
+            "creator_profile", "douyin.user_profile", "page_response", trigger=author_click,
+            subject_id=author_id, url_user_id=author_id,
+        )
+        images = [
+            visit(
+                "note_image", "douyin.content_image", "cdn_direct", trigger=click, subject_id=aweme_id,
+                asset_key=entry.source_asset_key, sha256=entry.sha256,
+            )
+            for entry in entries if entry.platform_post_id == aweme_id
+        ]
+        record["content_visit_refs"] = {
+            "ledger_id": DOUYIN_LEDGER_ID,
+            "search_results": search,
+            "note_detail": detail,
+            "creator_profile": author,
+            "images": images,
+        }
+    ledger.close()
+    return search
+
+
 def write_worker_artifacts(platform, save_path, behavior_path, state, scenario):
     """落盘真实 JSONL、manifest 和 PNG；仅替代 worker，不替代正式门禁。"""
     folder = save_path / platform
@@ -424,7 +495,7 @@ def write_worker_artifacts(platform, save_path, behavior_path, state, scenario):
             ))
             if scenario == "missing_image":
                 staged.path.unlink()
-            if platform in {"xhs", "zhihu", "weibo"}:
+            if platform in {"xhs", "zhihu", "weibo", "douyin"}:
                 # 访问门禁 R5 按 image_assets 逐张核对。
                 record.setdefault("image_assets", []).append({
                     "url": candidate.source_url, "source_index": candidate.source_index,
@@ -436,6 +507,8 @@ def write_worker_artifacts(platform, save_path, behavior_path, state, scenario):
         source_visit_id = write_zhihu_visit_ledger(behavior_path, records, entries)
     elif platform == "weibo":
         source_visit_id = write_weibo_visit_ledger(behavior_path, records, entries)
+    elif platform == "douyin":
+        source_visit_id = write_douyin_visit_ledger(behavior_path, records, entries)
     else:
         source_visit_id = None
     (folder / "search_contents_fixed.jsonl").write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records))

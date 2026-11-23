@@ -40,7 +40,7 @@ def install_worker_hooks(monkeypatch: pytest.MonkeyPatch) -> None:
     entry.install_hooks 在同一时点读取。用例结束时还原它写入的全部模块级开关（含 _xhs_repair）。"""
     from trippostcollect.application import events
 
-    for name in ("_xhs_repair", "_weibo_post_repair", "_douyin_browser_detail_fallback"):
+    for name in ("_xhs_repair", "_weibo_post_repair"):
         monkeypatch.setattr(platform_entry, name, getattr(platform_entry, name))
     monkeypatch.setattr(events, "_batch_publisher", events._batch_publisher)
     platform_entry.install_hooks()

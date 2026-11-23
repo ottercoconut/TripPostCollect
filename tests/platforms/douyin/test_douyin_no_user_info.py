@@ -40,11 +40,20 @@ def _build_aweme_item() -> dict:
             "avatar_medium": {"url_list": ["http://x/avatar_medium.jpg"]},
             "signature": "这是创作者个人签名内容",
             "follower_count": 0,  # 搜索作者对象的占位粉丝数，#116 起不再采信
-            "following_count": 321,
-            "aweme_count": 88,
-            "total_favorited": 7654321,
+            # 搜索作者对象上的统计不采信（#225），作者统计只读下面的作者页资料。
+            "following_count": 1,
+            "aweme_count": 2,
+            "total_favorited": 3,
         },
-        "creator_profile": {"status_code": 0, "user": {"follower_count": 12345}},
+        "creator_profile": {
+            "status_code": 0,
+            "user": {
+                "follower_count": 12345,
+                "following_count": 321,
+                "aweme_count": 88,
+                "total_favorited": 7654321,
+            },
+        },
         "statistics": {
             "digg_count": 100,
             "collect_count": 5,

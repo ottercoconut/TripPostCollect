@@ -29,7 +29,6 @@ ROOT = Path(__file__).resolve().parents[1]
 SQL_FILES = ("crawl_scheduler.sql", "ctf_captures.sql", "source_platforms.sql", "web_posts.sql", "xhs_control.sql")
 # 包内资源 → 唯一编辑真源（规格 G 节“T01/T12 确定的资源与安装策略”）。
 RESOURCE_SOURCES = {
-    "js/douyin.js": "src/trippostcollect/resources/js/douyin.js",
     "licenses/MediaCrawler-LICENSE": "src/trippostcollect/resources/licenses/MediaCrawler-LICENSE",
     "licenses/CloakBrowser-LICENSE": "src/trippostcollect/resources/licenses/CloakBrowser-LICENSE",
     **{f"sql/{name}": f"db/{name}" for name in SQL_FILES},
@@ -38,7 +37,7 @@ RESOURCE_SOURCES = {
 SDIST_REQUIRED = (
     "pyproject.toml", "build_support.py", "MANIFEST.in",
     *(f"db/{name}" for name in SQL_FILES), "docs/formal-crawl-contract.md",
-    "src/trippostcollect/resources/js/douyin.js", "src/trippostcollect/resources/licenses/MediaCrawler-LICENSE",
+    "src/trippostcollect/resources/licenses/MediaCrawler-LICENSE",
 )
 COPY_EXCLUDED = {".git", ".venv", "venv", "tools", "data", "outputs", "temp", "build", "dist",
                  "__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache", "node_modules"}

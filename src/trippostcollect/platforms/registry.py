@@ -157,6 +157,14 @@ def site_keys(include_no_login: bool = True) -> list[str]:
     ]
 
 
+async def read_douyin_homepage_login(context, page) -> bool:
+    """首页 ``HasUserLogin`` 是否为 ``\"1\"``。实现留在抖音平台，避免应用层直接导入平台包。"""
+
+    from trippostcollect.platforms.douyin.search_page import read_homepage_login
+
+    return await read_homepage_login(context, page)
+
+
 async def read_weibo_config_uid(context, page) -> dict[str, bool]:
     """首页 ``$CONFIG.uid`` 的存在与真值。实现留在微博平台，避免应用层直接导入平台包。"""
 

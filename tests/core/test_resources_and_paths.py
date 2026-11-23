@@ -21,7 +21,7 @@ paths = import_module("trippostcollect.core.paths")
 
 
 def test_resource_path_is_inside_package_not_fork() -> None:
-    with resources.path("js/douyin.js") as location:
+    with resources.path("licenses/MediaCrawler-LICENSE") as location:
         assert location.is_file()
         assert "MediaCrawler" not in location.parts
         assert "trippostcollect" in location.parts
@@ -35,8 +35,8 @@ def test_unknown_resource_is_rejected() -> None:
 
 
 def test_resource_text_preserves_bom_handling() -> None:
-    # 原调用以 utf-8-sig 读取 JS；读取接口必须给出与之相同的文本
-    for name in ("js/douyin.js",):
+    # 读取接口按 utf-8-sig 给出文本。
+    for name in ("licenses/MediaCrawler-LICENSE",):
         raw = resources.read_bytes(name)
         assert resources.read_text(name) == raw.decode("utf-8-sig")
 

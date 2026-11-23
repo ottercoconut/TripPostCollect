@@ -12,17 +12,13 @@ import json
 from unittest.mock import AsyncMock, MagicMock
 from urllib.error import URLError
 
-import httpx
 import pytest
 
 from trippostcollect.application.failures import classify_attempt
 from trippostcollect.platforms.bilibili import client as bilibili_client
-from trippostcollect.platforms.douyin import core as douyin_core
 from trippostcollect.platforms.douyin.client import DouYinClient
-from trippostcollect.platforms.douyin.models import PlatformRuntimeError as DouyinRuntimeError
 from trippostcollect.platforms.zhihu.client import ZhiHuClient
 
-from platforms.douyin import test_douyin_offline_faults as douyin_faults
 from platforms.zhihu import test_zhihu_offline_faults as zhihu_faults
 import test_bilibili_issue115 as bili115
 
@@ -53,67 +49,22 @@ def assert_runtime_network_stop(state_path, identity: str, expected_detail: str)
 # ---------- 抖音 ----------
 
 
-@pytest.mark.asyncio
-async def test_douyin_request_transport_error_becomes_network_unreachable():
-    transport = douyin_faults.Transport()
-    ports = douyin_faults.entry.douyin_dependencies(douyin_faults.config)["ports"].client
-    client = DouYinClient(
-        headers={"User-Agent": "t129", "Cookie": ""}, playwright_page=None, cookie_dict={},
-        ports=douyin_faults.replace(ports, make_async_client=transport),
-    )
+def test_douyin_api_client_no_longer_raises_network_unreachable():
+    """#222：搜索、详情和作者不再走浏览器外 HTTP，因此不再从 request() 产生 network_unreachable。"""
 
-    with pytest.raises(DouyinRuntimeError) as caught:
-        await client.request("GET", "https://www.douyin.com/aweme/v1/web/user/profile/other/")
-
-    # 抖音请求层本来就不重试：仍只请求一次，只是异常改为运行级类型。
-    assert caught.value.code == "network_unreachable"
-    assert isinstance(caught.value.__cause__, httpx.ConnectError)
-    assert transport.calls == ["/aweme/v1/web/user/profile/other/"]
-
-
-@pytest.mark.asyncio
-async def test_douyin_creator_profile_network_failure_stops_run_without_skip(monkeypatch, tmp_path):
-    state_path = douyin_faults.prepare(monkeypatch, tmp_path)
-    monkeypatch.setenv("TRIPPOSTCOLLECT_DOUYIN_ENRICH_CREATORS", "1")
-    monkeypatch.setenv("TRIPPOSTCOLLECT_DOUYIN_ENRICH_ONLY_IMAGES", "0")
-    monkeypatch.setenv("TRIPPOSTCOLLECT_DOUYIN_MAX_CREATOR_ENRICH", "30")
-    transport = douyin_faults.Transport()
-    ports = douyin_faults.entry.douyin_dependencies(douyin_faults.config)["ports"].client
-    real_client = DouYinClient(
-        headers={"User-Agent": "t129", "Cookie": ""}, playwright_page=None, cookie_dict={},
-        ports=douyin_faults.replace(ports, make_async_client=transport),
-    )
-
-    class Client:
-        async def search_info_by_keyword(self, **kwargs):
-            return {"status_code": 0, "data": [{"aweme_info": douyin_faults.image_aweme("first")}],
-                    "has_more": 1, "extra": {"logid": "fresh-search-id"}}
-
-        async def get_user_info(self, sec_uid):
-            # 真实 client 的 get_user_info 依赖签名；这里直接走真实 request() 的传输层转换。
-            return await real_client.request("GET", "https://www.douyin.com/aweme/v1/web/user/profile/other/")
-
-    monkeypatch.setattr(douyin_core.asyncio, "sleep", AsyncMock(return_value=None))
-    crawler = douyin_faults.DouYinCrawler()
-    crawler.dy_client = Client()
-
-    await crawler.search()  # 不再崩溃到 worker 顶层
-
-    assert transport.calls == ["/aweme/v1/web/user/profile/other/"]
-    assert_runtime_network_stop(state_path, "first", "network_unreachable")
+    assert not hasattr(DouYinClient, "request")
+    assert not hasattr(DouYinClient, "get_user_info")
+    assert not hasattr(DouYinClient, "get_aweme_media")
 
 
 # ---------- 知乎 ----------
 
 
 def test_zhihu_detail_no_longer_uses_signed_http_client():
-    """#185：知乎详情不再走 httpx，因此不再从 request() 产生 network_unreachable。execjs 仍在。"""
+    """#185：知乎详情不再走 httpx，因此不再从 request() 产生 network_unreachable。"""
 
     assert not hasattr(ZhiHuClient, "request")
     assert not hasattr(ZhiHuClient, "get_answer_info")
-    import execjs
-
-    assert callable(execjs.compile)
 
 
 @pytest.mark.asyncio

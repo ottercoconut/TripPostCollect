@@ -5,12 +5,17 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+import json
+from pathlib import Path
+import tempfile
+from urllib.parse import quote
 
 import pytest
 
-from support.douyin import make_client as DouYinClient
 from trippostcollect.platforms.douyin.models import SearchResponseError
+from trippostcollect.platforms.douyin.search_page import DOUYIN_CAPTURE_RULES, DouyinPageCapture
+from trippostcollect.runtime.page_capture import PageCaptureChannel
+from trippostcollect.runtime.visit_ledger import VisitLedger
 
 
 KEYWORD = "青岛崂山旅游攻略"
@@ -39,34 +44,70 @@ class ScrollPage:
         self.wheels = 0
         self.on_wheel = on_wheel
         self.mouse = Mouse(self)
+        self.listeners: dict[str, list] = {}
+        self.url = "https://www.douyin.com/search/qingdao?type=general"
+        self.pages = [self]
 
     def on(self, event, callback):
-        assert event == "response"
+        self.listeners.setdefault(event, []).append(callback)
+
+    def emit(self, response):
+        for callback in list(self.listeners.get("response", [])):
+            callback(response)
 
     async def wait_for_timeout(self, timeout):
-        pass
+        del timeout
+
+    async def evaluate(self, script, arg=None):
+        del script, arg
+        return {
+            "hits": [],
+            "verify_host": False,
+            "captcha_visible": False,
+            "login_panel_visible": False,
+            "hidden_captcha_count": 0,
+        }
 
 
-def forbid_http(client):
-    """搜索不得经浏览器外 HTTP：get/post/request 与 httpx 工厂任何一个被调用都直接失败。"""
+class SearchResponse:
+    def __init__(self, page, url, payload):
+        self.url = url
+        self.status = 200
+        self.headers = {}
+        self.request = type("Request", (), {
+            "method": "GET",
+            "resource_type": "fetch",
+            "url": url,
+            "frame": type("Frame", (), {"page": page})(),
+            "post_data": None,
+        })()
+        self._body = json.dumps(payload).encode()
 
-    async def forbidden(*args, **kwargs):
-        raise AssertionError("search must not issue a direct HTTP request")
-
-    def forbidden_factory(**kwargs):
-        raise AssertionError("search must not build an HTTP client")
-
-    client.get = forbidden
-    client.post = forbidden
-    client.request = forbidden
-    client.ports = replace(client.ports, make_async_client=forbidden_factory)
-    return client
+    async def body(self):
+        return self._body
 
 
-def observed(client, offset, search_id, payload):
-    client._observed_search_responses.append(
-        {"keyword": KEYWORD, "offset": offset, "search_id": search_id, "payload": payload}
+def open_capture(page):
+    directory = Path(tempfile.mkdtemp())
+    ledger = VisitLedger.create(directory / "content_visits.jsonl", platform="douyin", mode="discovery")
+    channel = PageCaptureChannel(
+        page, platform="douyin", rules=DOUYIN_CAPTURE_RULES, ledger=ledger,
     )
+    capture = DouyinPageCapture(channel)
+    capture.install(page)
+    return capture
+
+
+def search_url(offset, search_id):
+    kind = "stream" if int(offset) == 0 else "single"
+    return (
+        f"https://www.douyin.com/aweme/v1/web/general/search/{kind}/"
+        f"?keyword={quote(KEYWORD)}&offset={int(offset)}&search_id={quote(search_id)}"
+    )
+
+
+def observed(page, offset, search_id, payload):
+    page.emit(SearchResponse(page, search_url(offset, search_id), payload))
 
 
 def page_payload(aweme_id, *, has_more=1, logid="next-log-id"):
@@ -81,12 +122,12 @@ def page_payload(aweme_id, *, has_more=1, logid="next-log-id"):
 @pytest.mark.asyncio
 async def test_missing_followup_offset_after_scroll_budget_is_runtime_failure_without_http():
     page = ScrollPage()
-    client = forbid_http(DouYinClient(headers={"User-Agent": "t124"}, playwright_page=page, cookie_dict={}))
+    capture = open_capture(page)
     # 缓存里只有上一页：目标页仍须由页面滚动触发，不能拿其他 offset 顶替。
-    observed(client, 10, "stable-search-id", page_payload("10"))
+    observed(page, 10, "stable-search-id", page_payload("10"))
 
     with pytest.raises(SearchResponseError) as raised:
-        await client.search_info_by_keyword(keyword=KEYWORD, offset=20, search_id="stable-search-id")
+        await capture.search_info_by_keyword(keyword=KEYWORD, offset=20, search_id="stable-search-id")
 
     assert raised.value.reason == MISSING
     assert page.wheels == 8
@@ -95,63 +136,75 @@ async def test_missing_followup_offset_after_scroll_budget_is_runtime_failure_wi
 @pytest.mark.asyncio
 @pytest.mark.parametrize("with_page", [True, False])
 async def test_missing_first_page_capture_is_runtime_failure_without_http(with_page):
-    page = ScrollPage() if with_page else None
-    client = forbid_http(DouYinClient(headers={"User-Agent": "t124"}, playwright_page=page, cookie_dict={}))
+    page = ScrollPage() if with_page else ScrollPage()
+    capture = open_capture(page)
+    if not with_page:
+        capture.page = None
 
     with pytest.raises(SearchResponseError) as raised:
-        await client.search_info_by_keyword(keyword=KEYWORD, offset=0, search_id="")
+        await capture.search_info_by_keyword(keyword=KEYWORD, offset=0, search_id="")
 
     assert raised.value.reason == MISSING
     # 首页只能来自进入搜索页时截获的 /stream/ 响应，滚动不会产生它。
-    assert page is None or page.wheels == 0
+    assert page.wheels == 0
 
 
 @pytest.mark.asyncio
 async def test_captured_target_offset_is_returned_and_verify_check_still_rejected():
     page = ScrollPage()
-    client = forbid_http(DouYinClient(headers={"User-Agent": "t124"}, playwright_page=page, cookie_dict={}))
-    observed(client, 0, "", page_payload("1", logid="stable-search-id"))
-    observed(client, 10, "stable-search-id", {
+    capture = open_capture(page)
+    observed(page, 0, "", page_payload("1", logid="stable-search-id"))
+    observed(page, 10, "stable-search-id", {
         "status_code": 0, "data": [], "has_more": 0,
         "search_nil_info": {"search_nil_type": "verify_check"},
     })
 
-    first = await client.search_info_by_keyword(keyword=KEYWORD, offset=0, search_id="")
+    first = await capture.search_info_by_keyword(keyword=KEYWORD, offset=0, search_id="")
     assert first["data"][0]["aweme_info"]["aweme_id"] == "1"
     with pytest.raises(SearchResponseError) as raised:
-        await client.search_info_by_keyword(keyword=KEYWORD, offset=10, search_id="stable-search-id")
+        await capture.search_info_by_keyword(keyword=KEYWORD, offset=10, search_id="stable-search-id")
     assert raised.value.reason == "search_verify_check"
     assert page.wheels == 0
 
 
 @pytest.mark.asyncio
 async def test_followup_page_reached_by_one_scroll_is_returned_without_http():
+    page = ScrollPage()
+
     def emit(wheels):
         if wheels == 1:
-            observed(client, 10, "stable-search-id", page_payload("11", has_more=0))
+            observed(page, 10, "stable-search-id", page_payload("11", has_more=0))
 
-    page = ScrollPage(on_wheel=emit)
-    client = forbid_http(DouYinClient(headers={"User-Agent": "t124"}, playwright_page=page, cookie_dict={}))
+    page.on_wheel = emit
+    capture = open_capture(page)
 
-    response = await client.search_info_by_keyword(keyword=KEYWORD, offset=10, search_id="stable-search-id")
+    response = await capture.search_info_by_keyword(keyword=KEYWORD, offset=10, search_id="stable-search-id")
 
     assert response["data"][0]["aweme_info"]["aweme_id"] == "11"
     assert page.wheels == 1
 
 
-def test_client_has_no_direct_search_or_first_page_rebuild():
-    client = DouYinClient(headers={"User-Agent": "t124"}, playwright_page=None, cookie_dict={})
-    assert not hasattr(client, "_build_visible_first_page_fallback")
+def test_image_client_has_no_search_or_detail_request():
+    from trippostcollect.platforms.douyin.client import DouYinClient
+
+    assert not hasattr(DouYinClient, "search_info_by_keyword")
+    assert not hasattr(DouYinClient, "get_user_info")
+    assert not hasattr(DouYinClient, "update_cookies")
 
 
 # ----------------------------- worker search() 全量扫描 -----------------------------
 
 
-import json  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
 from unittest.mock import AsyncMock  # noqa: E402
 
-from support.douyin import config, make_crawler as DouYinCrawler, refresh_settings  # noqa: E402
+from support.douyin import (  # noqa: E402
+    attach_search_capture,
+    config,
+    install_detail_passthrough,
+    make_crawler as DouYinCrawler,
+    refresh_settings,
+)
 from trippostcollect.platforms.douyin import core as douyin_core  # noqa: E402
 
 
@@ -185,16 +238,11 @@ class PagedSearch:
             "extra": {"logid": "stable-search-id" if offset == 0 else f"rotating-{offset}"},
         }
 
-    async def get_user_info(self, sec_uid):
-        return {"status_code": 0, "user": {"follower_count": 7}}
-
 
 def prepare_scan(monkeypatch, tmp_path, *, legacy_inputs):
     state_path = tmp_path / "state.json"
     state_path.write_text('{"events": []}', encoding="utf-8")
     monkeypatch.setenv("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", str(state_path))
-    monkeypatch.setenv("TRIPPOSTCOLLECT_DOUYIN_ENRICH_CREATORS", "1")
-    monkeypatch.setenv("TRIPPOSTCOLLECT_DOUYIN_MAX_CREATOR_ENRICH", "-1")
     monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
     if legacy_inputs:
         # 旧三元组续跑的全部输入：本轮都不得影响起点与停止判定。
@@ -217,6 +265,7 @@ def prepare_scan(monkeypatch, tmp_path, *, legacy_inputs):
     monkeypatch.setattr(douyin_core.asyncio, "sleep", AsyncMock())
     crawler = DouYinCrawler()
     refresh_settings(crawler)
+    install_detail_passthrough(crawler)
     crawler.get_aweme_images = AsyncMock(return_value=None)
     crawler.update_douyin_aweme = AsyncMock(return_value=None)
     return crawler, state_path
@@ -237,6 +286,7 @@ async def test_search_scans_from_first_page_until_has_more_false(monkeypatch, tm
     crawler, state_path = prepare_scan(monkeypatch, tmp_path, legacy_inputs=legacy_inputs)
     client = PagedSearch(last_offset=30)
     crawler.dy_client = client
+    attach_search_capture(crawler, client)
 
     await crawler.search()
 
@@ -261,6 +311,7 @@ async def test_missing_capture_mid_scan_keeps_completed_batches_and_skips_missin
     crawler, state_path = prepare_scan(monkeypatch, tmp_path, legacy_inputs=False)
     client = PagedSearch(last_offset=50, missing_offset=20)
     crawler.dy_client = client
+    attach_search_capture(crawler, client)
 
     await crawler.search()
 
@@ -298,6 +349,7 @@ async def test_fresh_first_page_empty_still_uses_visible_no_result_gate(monkeypa
             return self.text
 
     crawler.dy_client = EmptyFirstPage()
+    attach_search_capture(crawler, crawler.dy_client)
     crawler.context_page = SimpleNamespace(
         url="https://www.douyin.com/search/x",
         locator=lambda selector: Locator("没有找到相关结果" if selector == "body" else ""),
@@ -316,7 +368,6 @@ async def test_fresh_first_page_empty_still_uses_visible_no_result_gate(monkeypa
 import sqlite3  # noqa: E402
 import sys  # noqa: E402
 from importlib import import_module  # noqa: E402
-from pathlib import Path  # noqa: E402
 
 from trippostcollect.db.bootstrap import bootstrap_connection  # noqa: E402
 from trippostcollect.scheduler.discovery import query_fingerprint, save_checkpoint  # noqa: E402

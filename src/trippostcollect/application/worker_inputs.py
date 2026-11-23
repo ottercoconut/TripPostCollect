@@ -162,7 +162,6 @@ def worker_config(*, environ: Mapping[str, str] = os.environ) -> SimpleNamespace
         DISABLE_SSL_VERIFY=False,
         # 四站配置：原 xhs/dy/weibo/zhihu_config 的同名键。
         XHS_SPECIFIED_NOTE_URL_LIST=[],
-        DY_SPECIFIED_ID_LIST=[],
         WEIBO_SPECIFIED_ID_LIST=[],
         ZHIHU_SPECIFIED_ID_LIST=[],
     )
@@ -185,10 +184,12 @@ def apply_to_config(inputs: WorkerInputs, config_module) -> None:
     specified_id_list = [id.strip() for id in specified_id.split(",") if id.strip()] if specified_id else []
     if specified_id_list:
         field = {
-            "xhs": "XHS_SPECIFIED_NOTE_URL_LIST", "dy": "DY_SPECIFIED_ID_LIST",
-            "wb": "WEIBO_SPECIFIED_ID_LIST", "zhihu": "ZHIHU_SPECIFIED_ID_LIST",
-        }[inputs.platform]
-        setattr(config_module, field, specified_id_list)
+            "xhs": "XHS_SPECIFIED_NOTE_URL_LIST",
+            "wb": "WEIBO_SPECIFIED_ID_LIST",
+            "zhihu": "ZHIHU_SPECIFIED_ID_LIST",
+        }.get(inputs.platform)
+        if field:
+            setattr(config_module, field, specified_id_list)
 
 
 def env_int_reader(
@@ -230,24 +231,6 @@ def weibo_input_readers(*, environ: Mapping[str, str] = os.environ):
             fingerprint=environ.get("TRIPPOSTCOLLECT_DISCOVERY_QUERY_FINGERPRINT", ""),
             resume_identities_path=environ.get("TRIPPOSTCOLLECT_RESUME_IDENTITIES_PATH", ""),
         ),
-    )
-
-
-def douyin_browser_detail_fallback_reader(*, environ=os.environ):
-    """在旧 install_hooks 时点读取修复开关，不随详情请求重新取值。"""
-    return lambda: environ.get("TRIPPOSTCOLLECT_DOUYIN_BROWSER_DETAIL_FALLBACK") == "1"
-
-
-def douyin_readers(*, environ=os.environ):
-    """保留抖音每个 env 的默认值、转换及读取时点；#124 起搜索不读续跑与顶部刷新输入。"""
-    from trippostcollect.application.contracts import DouyinReaders
-
-    return DouyinReaders(
-        enrich_creators=lambda: environ.get("TRIPPOSTCOLLECT_DOUYIN_ENRICH_CREATORS"),
-        enrich_only_images=lambda: environ.get("TRIPPOSTCOLLECT_DOUYIN_ENRICH_ONLY_IMAGES", "1"),
-        max_creator_enrich=lambda: environ.get("TRIPPOSTCOLLECT_DOUYIN_MAX_CREATOR_ENRICH", "30"),
-        creator_sleep_seconds=lambda: environ.get("TRIPPOSTCOLLECT_DOUYIN_CREATOR_SLEEP_SECONDS", "0.25"),
-        browser_detail_timeout=lambda: environ.get("TRIPPOSTCOLLECT_DOUYIN_BROWSER_DETAIL_TIMEOUT_MS", "30000"),
     )
 
 

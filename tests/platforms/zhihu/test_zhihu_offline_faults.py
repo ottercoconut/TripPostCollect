@@ -81,9 +81,6 @@ def test_signed_detail_http_is_gone():
     assert not hasattr(ZhiHuClient, "get_answer_info")
     assert not hasattr(ZhiHuClient, "get_article_info")
     assert not hasattr(ZhiHuClient, "get_video_info")
-    import execjs
-
-    assert callable(execjs.compile)
 
 
 @pytest.mark.asyncio
