@@ -202,9 +202,11 @@ checkpoint 仍写入本轮最后的 page、offset、search ID 与停止原因供
      `feed-active-video` 内。
   2. 点作者前写一段 `creator_profile` 停顿（1–2 秒），再点击侧栏标题处的作者链接（账本动作
      `click_author`）。这个链接是 `a[target="_blank"][href*="/user/"]`，路径段等于卡片 `author.sec_uid`，
-     要排除页面顶部当前账号自己的 `/user/self` 链接。侧栏没有稳定的容器选择器，所以另加几何条件：链接
-     左边缘不小于当前播放项右边缘减 8 像素，且纵坐标不超过 220，播放器内部的作者链接不会被选中。读不到
-     当前播放项的包围盒时，视为本次没找到链接（`author_link_missing`），不退回任意同 `sec_uid` 链接。
+     要排除页面顶部当前账号自己的 `/user/self` 链接。侧栏没有稳定的容器选择器。2026-11-23 实测（视口
+     1450×777）：`feed-active-video` 盖住整个视口，不能用它的边缘区分侧栏；同作者的 `target=_blank` 链接只有
+     播放器头像（`data-e2e="video-avatar"`，纵坐标约 316）和侧栏标题（纵坐标约 63）两条。所以排除带
+     `data-e2e="video-avatar"` 的头像链接，只取纵坐标不超过 220 的标题带内的链接。侧栏在点头像后约 1 秒
+     出现，在约 5 秒内轮询；仍找不到是 `author_link_missing`。
 - 点击后 8 秒内出现新标签；新标签往往先是 `about:blank`，从标签出现起再等最多 8 秒，URL 落到
   `https://www.douyin.com/user/{sec_uid}?…` 才比对。新标签 URL 中的 `sec_uid` 必须等于搜索卡片 `author.sec_uid`。
   资料响应从点击作者之后开始截获，不因等待 URL 而后移。
