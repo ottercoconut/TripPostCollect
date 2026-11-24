@@ -12,6 +12,7 @@ from trippostcollect.application.contracts import ZhihuClientPorts
 from trippostcollect.platforms.zhihu.client import ZhiHuClient
 from trippostcollect.platforms.zhihu.models import ZhihuImageDownloadError
 from trippostcollect.platforms.zhihu.models import ZhihuContent
+from trippostcollect.platforms.zhihu.search_capture import ZhihuPageCapture
 from trippostcollect.runtime.image_retry import ImageDownloadFetchError
 
 
@@ -86,6 +87,55 @@ async def test_client_image_request_reuses_session_headers_proxy_and_referer(mon
         "accept": "image/avif,image/webp,image/png,image/jpeg,image/gif,*/*;q=0.8",
         "referer": "https://www.zhihu.com/",
     }
+
+
+def two_image_content() -> ZhihuContent:
+    content = observed_content("answer-two")
+    content.image_list = [
+        "https://pic1.zhimg.com/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_r.jpg",
+        "https://picx.zhimg.com/v2-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb_r.jpg",
+    ]
+    return content
+
+
+@pytest.mark.asyncio
+async def test_note_images_do_not_sleep_between_cdn_direct_visits(monkeypatch, tmp_path):
+    """同一帖多张正文图之间不再固定睡眠，每张仍按 source_index 登记 cdn_direct。"""
+
+    monkeypatch.setattr(config, "ENABLE_GET_MEIDAS", True)
+    monkeypatch.setattr(config, "CRAWLER_MAX_SLEEP_SEC", 2)
+    monkeypatch.setattr(config, "SAVE_DATA_PATH", str(tmp_path))
+    monkeypatch.setenv("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE", str(tmp_path / "behavior.jsonl"))
+    slept: list[float] = []
+
+    async def record_sleep(seconds: float = 0) -> None:
+        slept.append(float(seconds))
+
+    monkeypatch.setattr("trippostcollect.platforms.zhihu.core.asyncio.sleep", record_sleep)
+    crawler = ZhihuCrawler()
+    crawler.zhihu_client = AsyncMock()
+    crawler.zhihu_client.get_content_image.return_value = png_bytes()
+    crawler._page_capture = ZhihuPageCapture.open(object())
+    content = two_image_content()
+
+    await crawler.get_content_images(content)
+
+    assert slept == []
+    ledger = tmp_path / "behavior.content_visits.jsonl"
+    visits = [
+        json.loads(line)
+        for line in ledger.read_text(encoding="utf-8").splitlines()
+        if json.loads(line).get("kind") == "visit"
+    ]
+    assert [visit["source"] for visit in visits] == ["cdn_direct", "cdn_direct"]
+    assert [visit["stage"] for visit in visits] == ["note_image", "note_image"]
+    assert content.content_visit_refs["images"] == [visit["id"] for visit in visits]
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "zhihu" / "image_manifest.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["source_index"] for row in rows] == [0, 1]
+    assert [row["source_asset_key"] for row in rows] == [visit["asset_key"] for visit in visits]
 
 
 @pytest.mark.asyncio

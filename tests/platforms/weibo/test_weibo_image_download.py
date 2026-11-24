@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from io import BytesIO
+import asyncio
 import json
 from dataclasses import replace
 
@@ -11,6 +12,7 @@ import pytest
 from support.weibo_adapter import settings, crawler as make_crawler, client_ports
 from trippostcollect.platforms.weibo.client import WeiboClient, is_sinaimg_url
 from trippostcollect.platforms.weibo.core import WeiboImageDownloadError
+from trippostcollect.platforms.weibo.search_page import WeiboPageCapture
 from trippostcollect.runtime.image_retry import ImageDownloadFetchError
 
 config = settings()
@@ -183,6 +185,50 @@ def _record() -> dict:
         ],
         "content_visit_refs": {"ledger_id": "L", "images": []},
     }
+
+
+@pytest.mark.asyncio
+async def test_note_images_do_not_sleep_between_cdn_direct_visits(monkeypatch, tmp_path):
+    """同一帖多张正文图之间不再固定睡眠，每张仍按 source_index 登记 cdn_direct。"""
+
+    monkeypatch.setenv("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE", str(tmp_path / "behavior.jsonl"))
+    crawler = make_crawler(settings(
+        ENABLE_GET_MEIDAS=True,
+        SAVE_DATA_PATH=str(tmp_path),
+        CRAWLER_MAX_SLEEP_SEC=2,
+    ))
+    slept: list[float] = []
+
+    async def record_sleep(seconds: float = 0) -> None:
+        slept.append(float(seconds))
+
+    monkeypatch.setattr(asyncio, "sleep", record_sleep)
+
+    class Client:
+        async def get_note_image(self, urls):
+            del urls
+            return png_bytes()
+
+    crawler.wb_client = Client()
+    crawler._capture = WeiboPageCapture.open(object())
+    record = _record()
+
+    await crawler.get_note_images(record)
+
+    assert slept == []
+    ledger = tmp_path / "behavior.content_visits.jsonl"
+    visits = [
+        json.loads(line)
+        for line in ledger.read_text(encoding="utf-8").splitlines()
+        if json.loads(line).get("kind") == "visit"
+    ]
+    assert [visit["source"] for visit in visits] == ["cdn_direct", "cdn_direct"]
+    assert [visit["stage"] for visit in visits] == ["note_image", "note_image"]
+    assert [visit["asset_key"] for visit in visits] == [
+        "weibo:pid:pid-first",
+        "weibo:pid:pid-second",
+    ]
+    assert record["content_visit_refs"]["images"] == [visit["id"] for visit in visits]
 
 
 @pytest.mark.asyncio

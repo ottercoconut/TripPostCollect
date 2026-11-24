@@ -822,6 +822,83 @@ async def test_search_ledger_records_each_page_and_skips_video_details(monkeypat
     assert stored[0]["creator_profile"]["user"]["uid"] == UID
 
 
+@pytest.mark.asyncio
+async def test_page_turn_keeps_one_search_page_pause_and_the_search_results_pause(
+    monkeypatch, tmp_path,
+):
+    """翻到下一页只保留滚轮前的 search_page 停顿，点击前的 search_results 停顿仍在。"""
+
+    from trippostcollect.platforms.douyin import core as douyin_core
+
+    state_path = tmp_path / "state.json"
+    state_path.write_text('{"events": []}', encoding="utf-8")
+    monkeypatch.setenv("TRIPPOSTCOLLECT_EXECUTION_STATE_PATH", str(state_path))
+    monkeypatch.delenv("TRIPPOSTCOLLECT_DB_PATH", raising=False)
+    monkeypatch.setattr(config, "KEYWORDS", "青岛")
+    monkeypatch.setattr(config, "START_PAGE", 1)
+    monkeypatch.setattr(config, "CRAWLER_MAX_SLEEP_SEC", 2)
+    monkeypatch.setattr(config, "ENABLE_GET_MEIDAS", False)
+    slept: list[float] = []
+
+    async def record_sleep(seconds: float = 0) -> None:
+        slept.append(float(seconds))
+
+    monkeypatch.setattr(douyin_core.asyncio, "sleep", record_sleep)
+    page = Page("https://www.douyin.com/search/qingdao?type=general")
+    capture, pages, page = harness(tmp_path, page)
+    _arm_author(page)
+    page.profiles = [
+        (200, profile_user(uid="self-user", sec_uid="sec-self")),
+        (200, profile_user()),
+    ]
+    page.emit(Response(
+        page,
+        {
+            "status_code": 0,
+            "has_more": 1,
+            "extra": {"logid": "round-log"},
+            "data": [{"aweme_info": image_aweme()}],
+        },
+        url=_search_url("青岛"),
+    ))
+    page.followup_payload = {
+        "status_code": 0,
+        "has_more": 0,
+        "extra": {"logid": "round-log"},
+        "data": [{"aweme_info": video_aweme("303")}],
+    }
+    page.followup_url = _search_url("青岛", offset=10, search_id="round-log", kind="single")
+    crawler = DouYinCrawler()
+    refresh_settings(crawler)
+    crawler.capture = capture
+    crawler.detail_pages = pages
+    crawler.context_page = page
+
+    async def _store(*args, **kwargs):
+        del args, kwargs
+
+    crawler.update_douyin_aweme = _store
+    await crawler.search()
+
+    assert slept == []
+    rows = lines_of(capture)
+    pauses = [row for row in rows if row.get("kind") == "pause"]
+    search_page_pauses = [row for row in pauses if row.get("stage") == "search_page"]
+    search_results_pauses = [row for row in pauses if row.get("stage") == "search_results"]
+    scrolls = [
+        row for row in rows
+        if row.get("kind") == "action" and row.get("action") == "scroll"
+    ]
+    assert len(search_page_pauses) == 1
+    assert search_page_pauses[0]["seq"] < scrolls[0]["seq"]
+    assert search_results_pauses
+    visits = [
+        row for row in rows
+        if row.get("kind") == "visit" and row.get("stage") == "search_results"
+    ]
+    assert [row["search_page"] for row in visits] == [1, 2]
+
+
 async def _async_none(*args, **kwargs):
     del args, kwargs
 
@@ -1035,8 +1112,6 @@ def _round_page(keyword: str, payload: dict[str, Any]) -> Page:
 
 
 def _prepare_round(monkeypatch: pytest.MonkeyPatch, tmp_path, page: Page):
-    from trippostcollect.platforms.douyin import core as douyin_core
-
     state_path = tmp_path / "state.json"
     state_path.write_text('{"events": []}', encoding="utf-8")
     evidence = tmp_path / "behavior.jsonl"
@@ -1061,7 +1136,6 @@ def _prepare_round(monkeypatch: pytest.MonkeyPatch, tmp_path, page: Page):
         "AUTHOR_CLICK_PAUSE_SECONDS",
     ):
         monkeypatch.setattr(detail_page, name, (0.0, 0.0))
-    monkeypatch.setattr(douyin_core.random, "random", lambda: 0.0)
     context = Context(page)
     calls: list[dict[str, Any]] = []
 

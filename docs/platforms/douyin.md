@@ -46,7 +46,8 @@
   滚轮触发页面自身的 `/aweme/v1/web/general/search/single/` 请求。不点“图文”等筛选标签。
 - 同一关键词、offset 和 search ID 有多条响应时，合并去重并优先最新的非 `verify_check` 响应；全部为验证
   信号时按风控失败。
-- 每次滚轮前写一段翻页停顿（账本阶段 `search_page`）。连续翻页时目标只比已截获的页深一屏。
+- 每次滚轮前写一段翻页停顿（账本阶段 `search_page`）。连续翻页时目标只比已截获的页深一屏。处理完一页后
+  不再另睡 `CRAWLER_MAX_SLEEP_SEC`（#227）。
 - 后续页目标 offset 未进入截获缓存时，最多执行 8 次可见滚轮；首页不滚，按同样的 8 次预算（每次间隔
   约 200 毫秒）轮询截获通道。仍未截获即以 `runtime_failed`、`stop_detail=browser_search_response_missing`
   停止。不猜深页，缺失页的候选不写入已处理集合；不能把“浏览器尚未加载”解释为耗尽。
@@ -294,7 +295,8 @@ checkpoint 仍写入本轮最后的 page、offset、search ID 与停止原因供
   2026-11-20 侦察：页面自身的正文图请求同样发往 `p3-pc-sign.douyinpic.com`、`p9-pc-sign.douyinpic.com`，
   Referer 为 `https://www.douyin.com/`，多数不带 Cookie。
 - 每张成功下载的正文图在访问账本以阶段 `note_image`、来源 `cdn_direct`、规则 `douyin.content_image`
-  登记状态码、资产键和 sha256，供门禁 R5 与 manifest 对账。
+  登记状态码、资产键和 sha256，供门禁 R5 与 manifest 对账。同一帖的正文图连续下载，图与图之间不再固定睡眠
+  （#227）；单张的有限重试与退避不变，429 仍按 `image_rate_limited` 停轮。
 - 平台层写 staging/manifest，根项目按 `note_download_url` 重建候选，再执行通用字节复验、同帖去重、晋升和
   SQLite 事务，见[数据持久化](../data-persistence.md)。
 

@@ -24,7 +24,6 @@
 
 
 # TripPostCollect T05：迁自 MediaCrawler 5a68eb5098fcd17308c7fe0b9d53916ae839b303；仅拆分职责与注入依赖。
-import asyncio
 import logging
 from hashlib import sha256
 from typing import Any, Dict, List, Optional
@@ -471,8 +470,6 @@ class WeiboCrawler:
                 raise WeiboImageDownloadError(
                     note_id, source_index, exc.code, exc.attempts
                 ) from exc
-            if self.config.CRAWLER_MAX_SLEEP_SEC:
-                await asyncio.sleep(self.config.CRAWLER_MAX_SLEEP_SEC)
             if content is None:
                 failure = {
                     **asset,

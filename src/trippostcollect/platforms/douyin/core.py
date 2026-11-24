@@ -22,7 +22,6 @@
 
 import asyncio
 import logging
-import random
 from hashlib import sha256
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
@@ -525,11 +524,6 @@ class DouYinCrawler:
             page = requested_page + 1
             next_offset = requested_offset + dy_limit_count
             dy_search_id = next_search_id
-            await asyncio.sleep(self.settings.CRAWLER_MAX_SLEEP_SEC)
-            logger.info(
-                f"[DouYinCrawler.search] Sleeping for {self.settings.CRAWLER_MAX_SLEEP_SEC} "
-                f"seconds after page {requested_page}"
-            )
         logger.info(
             "[DouYinCrawler.search] finished page_count=%s aweme_count=%s",
             max(page - 1, 0),
@@ -714,7 +708,6 @@ class DouYinCrawler:
                 raise DouyinImageDownloadError(
                     aweme_id, source_index, exc.code, exc.attempts
                 ) from exc
-            await asyncio.sleep(random.random())
             if content is None:
                 await self.record_dy_aweme_image_failure(
                     aweme_id,
