@@ -592,9 +592,8 @@ def row_for_record(
         "comments_count": parse_int(first_value(record, "comment_count", "comments_count", "video_comment")),
         "shares_count": parse_int(first_value(record, "share_count", "shared_count", "video_share_count")),
     }
-    author_platform_id = first_value(
-        record, "author_platform_id", "user_id", "creator_id", "author_id", "mid",
-    )
+    # 不读 mid：微博记录里的 mid 是帖子 ID；B站解析器已把作者 mid 写成 user_id。
+    author_platform_id = first_value(record, "author_platform_id", "user_id", "creator_id", "author_id")
     author = {
         "nickname": first_value(record, "nickname", "user_nickname", "user_name", "author_name"),
         "followers_count": parse_int(
