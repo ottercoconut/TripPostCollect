@@ -266,7 +266,8 @@
   - `Referer: https://weibo.com/`，并带图片 Accept；
   - 不带 Cookie、Origin 或 Content-Type，不经第三方代理。
 - 首选规格失败或超限时，退到下一个规格。每张成功下载的正文图在访问账本以阶段 `note_image`、来源 `cdn_direct`、规则
-  `weibo.content_image` 登记状态码、资产键和 sha256，供门禁 R5 与 manifest 对账。
+  `weibo.content_image` 登记状态码、资产键和 sha256，供门禁 R5 与 manifest 对账。同一帖的正文图连续下载，图与图之间
+  不再固定睡眠（#227）；单张的有限重试与退避不变，429 仍按 `image_rate_limited` 停轮。
 - 平台层写 staging/manifest，根项目再执行通用字节复验、同帖 SHA-256 去重、晋升和事务，见
   [数据持久化](../data-persistence.md)。
 
