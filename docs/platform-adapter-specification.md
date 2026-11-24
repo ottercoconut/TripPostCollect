@@ -750,6 +750,8 @@ staging继续用C1原关键字接口。ImageAsset从M image_manifest:48迁入art
 | repair report；E:316→C/Q | `schema_version,platform,target_count,batch_size,batch_count,batches,candidate_failures,successful_ids,runtime_blocker,successful_count,failed_count`；fallback metrics标`existing_web_posts_metric`，fresh observed零不能被说明为缺失 |
 | 最终摘要／路径；C:7080–7137、X:1516–1553 | 原summary/report/batch_dir/status/import_completion_met/failure_reason包络；终态token=`token,outcome,committed,finalization_confirmed`；job_kind=mediacrawler_search及mediacrawler_runs等路径不改 |
 
+以上是迁移时的历史 wire。#70 起，微博、抖音、知乎、小红书的投影里的 `creator_hash` 已改为 `author_platform_id`（小红书另保留 `user_id`），`author_json` 不再写作者 ID。
+
 WB `_first_present`保留0；ZH模型默认0只有source/observed有效才算观察；Bili粉丝缺失None不变0；
 XHS合法空和unknown依旧分开；DY当前部分truthy默认/来源标记的差异在H列风险，不能用公共缺值helper抹平。
 原始平台时间不补抓取时钟，last_modify_ts不变成published_at；Bili hydrate不覆盖搜索发帖时间。

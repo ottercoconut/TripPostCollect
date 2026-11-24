@@ -65,9 +65,10 @@ SQLite 字段或图片关系中，也不保留 URL-only 参考关系。
 
 ### `author_json` 子字段
 
+作者平台 ID 只在顶层 `author_platform_id` 列，`author_json` 不含作者 ID。schema v25（#70）起，打开库时会删除历史行 `author_json` 里的旧键 `creator_hash`（它逐行等于 `author_platform_id`）；`raw_sample_json` 里的旧键作为历史快照保留。
+
 | JSON 键 | 类型 | 含义 |
 |---|---|---|
-| `creator_hash` | integer/text | 平台作者原始 ID（键名沿用旧名，值不是哈希）；导出时按字符串处理 |
 | `nickname` | text | 平台原始作者昵称 |
 | `followers_count` | integer | 与顶层 `author_followers_count` 对应 |
 | `followers_observed` | boolean | 是否真实观察到粉丝数 |
