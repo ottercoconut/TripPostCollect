@@ -315,7 +315,6 @@ def merge_repair_fallback_metadata(
         merged = _merge_observed_follower_fallback(merged, metadata)
 
     for key in (
-        "creator_hash",
         "creator_url_token",
         "user_nickname",
         "author_profile_url",
@@ -408,7 +407,7 @@ def canonical_url_for_record(platform_key: str, record: dict[str, Any]) -> str |
     if not post_id:
         return None
     if platform_key == "weibo":
-        author_id = first_value(record, "creator_hash", "user_id", "author_id", "author_platform_id")
+        author_id = first_value(record, "author_platform_id", "user_id", "author_id")
         mblogid = first_value(record, "mblogid")
         if author_id and mblogid:
             return f"https://weibo.com/{author_id}/{mblogid}"
@@ -593,9 +592,11 @@ def row_for_record(
         "comments_count": parse_int(first_value(record, "comment_count", "comments_count", "video_comment")),
         "shares_count": parse_int(first_value(record, "share_count", "shared_count", "video_share_count")),
     }
+    author_platform_id = first_value(
+        record, "author_platform_id", "user_id", "creator_id", "author_id", "mid",
+    )
     author = {
         "nickname": first_value(record, "nickname", "user_nickname", "user_name", "author_name"),
-        "creator_hash": first_value(record, "user_id", "creator_id", "creator_hash", "author_id"),
         "followers_count": parse_int(
             first_value(
                 record,
@@ -637,7 +638,7 @@ def row_for_record(
         "canonical_url": canonical_url,
         "title": title,
         "author_display_name": author["nickname"],
-        "author_platform_id": author["creator_hash"],
+        "author_platform_id": author_platform_id,
         "author_profile_url": first_value(record, "author_profile_url", "user_link", "profile_url", "user_url"),
         "author_description": first_value(record, "author_desc", "user_desc", "author_description"),
         "author_followers_count": author["followers_count"],
@@ -730,7 +731,7 @@ def validate_formal_record(
             reasons.append("content_images_detail_unobserved")
     if not published_at_for_record(record):
         reasons.append("missing_published_at")
-    if not first_value(record, "user_id", "creator_id", "creator_hash", "author_id", "mid"):
+    if not first_value(record, "author_platform_id", "user_id", "creator_id", "author_id", "mid"):
         reasons.append("missing_author_id")
     if not first_value(record, "nickname", "user_nickname", "user_name", "author_name", "author"):
         reasons.append("missing_author_name")

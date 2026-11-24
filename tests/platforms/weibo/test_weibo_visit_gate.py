@@ -123,7 +123,7 @@ def good_run(tmp_path: Path, *, pages: int = 1, click: str = "click_card", autho
         )
     record = {
         "note_id": "525",
-        "creator_hash": "88",
+        "author_platform_id": "88",
         "image_assets": [{"source_index": 0, "source_asset_key": asset_key()}],
         "content_visit_refs": {
             "ledger_id": run.ledger.ledger_id,
@@ -245,7 +245,7 @@ def test_repair_chain_accepts_navigate_trigger(tmp_path):
     )
     record = {
         "note_id": "525",
-        "creator_hash": "88",
+        "author_platform_id": "88",
         "image_assets": [{"source_index": 0, "source_asset_key": asset_key()}],
         "content_visit_refs": {
             "ledger_id": run.ledger.ledger_id,

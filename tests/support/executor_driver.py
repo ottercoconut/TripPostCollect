@@ -164,7 +164,7 @@ def record_for(platform, number):
     elif platform == "weibo":
         record.update(note_id=post_id, image_list=[url], image_list_source="mblog.pics")
     elif platform == "douyin":
-        record.update(aweme_id=post_id, aweme_type=68, note_download_url=url, creator_hash="author-1")
+        record.update(aweme_id=post_id, aweme_type=68, note_download_url=url, author_platform_id="author-1")
     elif platform == "zhihu":
         record.update(content_id=post_id, content_type="answer", question_id="80", image_list=[url])
     else:
@@ -365,8 +365,8 @@ def write_weibo_visit_ledger(behavior_path, records, entries):
     for record in records:
         note_id = record["note_id"]
         if record.get("user_id"):
-            record["creator_hash"] = record["user_id"]
-        author_id = str(record.get("creator_hash") or "missing")
+            record["author_platform_id"] = record["user_id"]
+        author_id = str(record.get("author_platform_id") or "missing")
         click = action("click_card", {"note_id": note_id})
         detail = visit(
             "note_detail", "weibo.statuses_show", "page_response", trigger=click,
@@ -436,8 +436,8 @@ def write_douyin_visit_ledger(behavior_path, records, entries):
     pause("search_results", "completed")
     for record in records:
         aweme_id = record["aweme_id"]
-        author_id = str(record.get("creator_hash") or record.get("user_id") or "")
-        record["creator_hash"] = author_id
+        author_id = str(record.get("author_platform_id") or record.get("user_id") or "")
+        record["author_platform_id"] = author_id
         click = action("click_card", {"aweme_id": aweme_id})
         detail = visit(
             "note_detail", "douyin.modal_state", "page_state", trigger=click, subject_id=aweme_id,

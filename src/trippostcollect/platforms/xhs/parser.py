@@ -526,7 +526,7 @@ def update_xhs_note(
         "video_url": video_url,  # Note video url
         "time": note_item.get("time"),  # Note publish time
         "last_update_time": note_item.get("last_update_time", 0),  # Note last update time
-        "creator_hash": raw_user_id,  # 作者平台原始 user_id
+        "author_platform_id": raw_user_id,  # 作者平台原始 user_id
         "user_id": raw_user_id,
         "nickname": raw_nickname,
         "author_profile_url": _creator_profile_url(

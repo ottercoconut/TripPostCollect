@@ -5,7 +5,7 @@
 覆盖 test_weibo_note_masks_user_info:用贴近真实微博结构的 mock note_item 喂根实现
 update_weibo_note,用 FakeStore 捕获拍平后的存储 dict,断言:
 - 不含任何禁用字段键(user_id/avatar/gender/profile_url/ip_location/desc ...)
-- creator_hash 为平台原始用户 ID(整数 ID 归一为字符串),nickname 为原始昵称
+- author_platform_id 为平台原始用户 ID(整数 ID 归一为字符串),nickname 为原始昵称
 - 头像、性别、主页、签名、IP 归属地的原始值不出现在任何存储值里
 
 说明:头像、性别、所在地、IP 与移动站主页不进入记录。简介写入 author_description。
@@ -21,7 +21,7 @@ NOTE_ID = "5123456789"
 # 合法 RFC2822 时间串(weekday 与日期已对齐:2025-06-14 是周六)
 RFC2822_TIME = "Sat Jun 14 12:00:00 +0800 2025"
 
-# 禁用字段名(键)。作者平台 ID 只经 creator_hash 写出,昵称经 nickname 写出。
+# 禁用字段名(键)。作者平台 ID 只经 author_platform_id 写出,昵称经 nickname 写出。
 FORBIDDEN_KEYS = {
     "user_id", "sec_uid", "short_user_id", "user_unique_id",
     "avatar", "user_avatar", "face", "sign", "profile_url", "user_link",
@@ -100,7 +100,7 @@ def _assert_forbidden_values_absent(captured: dict, user: dict, label: str):
 # ----------------------------- 测试 -----------------------------
 
 def test_weibo_note_masks_user_info():
-    """note 拍平后的存储 dict 不含禁用键,creator_hash 与昵称为平台原始值。"""
+    """note 拍平后的存储 dict 不含禁用键,author_platform_id 与昵称为平台原始值。"""
     from support.weibo_privacy import wb
 
     fake = _FakeStore()
@@ -119,8 +119,8 @@ def test_weibo_note_masks_user_info():
 
     _assert_forbidden_values_absent(captured, make_mock_note()["side_user"], "weibo_note")
 
-    # 2. creator_hash 为平台原始用户 ID;微博整数 ID 归一为字符串
-    assert captured.get("creator_hash") == str(RAW_USER_ID)
+    # 2. author_platform_id 为平台原始用户 ID;微博整数 ID 归一为字符串
+    assert captured.get("author_platform_id") == str(RAW_USER_ID)
 
     # 3. 昵称为平台原始昵称
     assert captured.get("nickname") == RAW_NICKNAME

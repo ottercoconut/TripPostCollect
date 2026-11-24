@@ -98,7 +98,6 @@ def load_post_repair_fallbacks(
                 "author_description": row_value("author_description"),
                 "created_time": raw.get("created_time"),
                 "updated_time": raw.get("updated_time"),
-                "creator_hash": raw.get("creator_hash"),
                 "creator_url_token": raw.get("creator_url_token"),
                 "user_nickname": raw.get("user_nickname"),
                 "author_followers_source": raw.get("author_followers_source"),

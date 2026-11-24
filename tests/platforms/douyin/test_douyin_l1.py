@@ -803,7 +803,7 @@ async def test_search_ledger_records_each_page_and_skips_video_details(monkeypat
     assert actions.count("close_overlay") == 2
     record = {
         "aweme_id": AWEME,
-        "creator_hash": UID,
+        "author_platform_id": UID,
         "content_visit_refs": stored[0]["content_visit_refs"],
         "image_assets": [],
     }
@@ -1115,7 +1115,7 @@ async def test_round_trip_records_visit_chain_images_and_exhaustion(monkeypatch,
     record = records[0]
     assert record["content_detail_source"] == "search_aweme_info"
     assert record["content_detail_status"] == "detail_observed"
-    assert record["creator_hash"] == UID
+    assert record["author_platform_id"] == UID
     assert record["image_assets"][0]["source_asset_key"].startswith("douyin:uri:")
     assert calls and "douyinpic.com" in calls[0]["url"]
     headers = {key.lower(): value for key, value in calls[0]["headers"].items()}
@@ -1148,7 +1148,7 @@ async def test_round_trip_records_visit_chain_images_and_exhaustion(monkeypatch,
     )
     assert missing["content_visit_ok"] is False and "R5" in missing["problem_counts"]
     swapped_author = json.loads(json.dumps(record))
-    swapped_author["creator_hash"] = "other-author"
+    swapped_author["author_platform_id"] = "other-author"
     swapped = validate_content_visits(
         [swapped_author], [ledger], platform="douyin", mode="discovery",
         manifests=manifests, stop_event=stopped[-1],

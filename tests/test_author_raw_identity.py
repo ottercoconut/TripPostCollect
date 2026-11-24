@@ -144,7 +144,7 @@ def test_identity_normalization_keeps_raw_values() -> None:
 def test_parser_to_formal_row_keeps_raw_author_identity(platform_key: str) -> None:
     build, author_id, nickname = CASES[platform_key]
     record = build()
-    assert record["creator_hash"] == author_id
+    assert record["author_platform_id"] == author_id
     assert record.get("nickname", record.get("user_nickname")) == nickname
 
     row = row_for_record(
@@ -186,7 +186,7 @@ async def test_xhs_store_writes_raw_identity_regardless_of_legacy_switch(monkeyp
         xhs_note(), source_keyword="青岛旅游", crawler_type="search", save_data_option="jsonl",
         current_timestamp=_clock, content_sink_factory=lambda _crawler_type: Store(),
     )
-    assert captured["creator_hash"] == captured["user_id"] == "5f0000000000000001000001"
+    assert captured["author_platform_id"] == captured["user_id"] == "5f0000000000000001000001"
     assert captured["nickname"] == "海边 的猫"
     assert captured["author_profile_url"].startswith(
         "https://www.xiaohongshu.com/user/profile/5f0000000000000001000001?"
@@ -211,7 +211,7 @@ def test_reimport_of_same_post_replaces_legacy_hashed_author(tmp_path) -> None:
     正式抓取在详情前跳过库中已知帖子，日常抓取不会走到这里；只有详情修复流程或 #50 的
     数据修复会对历史行再次导入。
     """
-    legacy = dict(weibo_record(), creator_hash=LEGACY_HASH, nickname=LEGACY_MASKED)
+    legacy = dict(weibo_record(), author_platform_id=LEGACY_HASH, nickname=LEGACY_MASKED)
     with sqlite3.connect(":memory:") as conn:
         bootstrap_connection(conn, sync_jobs=False)
         post_id, inserted = upsert_web_post(conn, _weibo_row(legacy), project_root=tmp_path,
@@ -224,7 +224,9 @@ def test_reimport_of_same_post_replaces_legacy_hashed_author(tmp_path) -> None:
         ).fetchall()
     assert (updated_id, inserted) == (post_id, False)
     assert [row[:3] for row in rows] == [(post_id, "7654321", "青岛 旅行者")]
-    assert json.loads(rows[0][3])["creator_hash"] == "7654321"
+    author = json.loads(rows[0][3])
+    assert "creator_hash" not in author
+    assert "author_platform_id" not in author
 
 
 def test_repair_fallback_never_replaces_raw_identity_with_legacy_values() -> None:
@@ -233,24 +235,24 @@ def test_repair_fallback_never_replaces_raw_identity_with_legacy_values() -> Non
     #194：知乎作者字段不得从旧行带回。微博仍只在本轮缺失时沿用旧行。
     """
     fallback = {
-        "creator_hash": LEGACY_HASH, "author_platform_id": LEGACY_HASH,
+        "author_platform_id": LEGACY_HASH,
         "user_nickname": LEGACY_MASKED, "author_display_name": LEGACY_MASKED,
     }
     current = zhihu_record()
     merged = merge_repair_fallback_metadata("zhihu", dict(current), fallback)
-    assert (merged["creator_hash"], merged["user_nickname"]) == (ZHIHU_AUTHOR_ID, "八大关的风")
+    assert (merged["author_platform_id"], merged["user_nickname"]) == (ZHIHU_AUTHOR_ID, "八大关的风")
     row = row_for_record("zhihu", merged, artifact_dir="/tmp/artifact",
                          captured_at="2026-10-08T00:00:00+08:00", keyword="青岛旅游")
     assert (row["author_platform_id"], row["author_display_name"]) == (ZHIHU_AUTHOR_ID, "八大关的风")
 
-    missing = dict(current, creator_hash="", user_nickname="")
+    missing = dict(current, author_platform_id="", user_nickname="")
     merged = merge_repair_fallback_metadata("zhihu", missing, fallback)
-    assert merged["creator_hash"] == ""
+    assert merged["author_platform_id"] == ""
     assert merged["user_nickname"] == ""
 
-    weibo_missing = {"creator_hash": "", "user_nickname": ""}
+    weibo_missing = {"author_platform_id": "", "user_nickname": ""}
     merged = merge_repair_fallback_metadata("weibo", weibo_missing, fallback)
-    assert (merged["creator_hash"], merged["user_nickname"]) == (LEGACY_HASH, LEGACY_MASKED)
+    assert (merged["author_platform_id"], merged["user_nickname"]) == (LEGACY_HASH, LEGACY_MASKED)
 
 
 LEGACY_IDENTITY_NAMES = ("anonymize_user_id", "mask_nickname")
@@ -289,7 +291,7 @@ def test_missing_nickname_is_rejected_as_missing_author_name(missing_name) -> No
     )
     record = parsed.record
     assert record is not None
-    assert (record["creator_hash"], record["nickname"]) == ("7654321", "")
+    assert (record["author_platform_id"], record["nickname"]) == ("7654321", "")
     reasons = validate_formal_record("weibo", record, set())["reasons"]
     assert "missing_author_name" in reasons
     assert "missing_author_id" not in reasons

@@ -524,7 +524,7 @@ class ZhihuExtractor:
 
     @staticmethod
     def _apply_author_info(content: ZhihuContent, author_info: ZhihuCreator) -> None:
-        content.creator_hash = author_info.creator_hash
+        content.author_platform_id = author_info.author_platform_id
         content.creator_url_token = author_info.url_token
         content.user_nickname = author_info.user_nickname
         content.author_profile_url = author_info.profile_url
@@ -719,7 +719,7 @@ class ZhihuExtractor:
             if not author:
                 return res
             # 作者平台 ID 取原始 id；主页链接仍由 url_token 拼接。
-            res.creator_hash = platform_user_id(author.get("id"))
+            res.author_platform_id = platform_user_id(author.get("id"))
             res.url_token = author.get("url_token") or author.get("urlToken") or ""
             res.user_nickname = platform_nickname(author.get("name"))
             # 作者页打开前的占位。确认作者页后由 apply_author_page 按实际 /people/ 或 /org/ 覆盖。

@@ -600,7 +600,7 @@ def update_douyin_aweme(
         "title": aweme_item.get("desc", ""),
         "desc": aweme_item.get("desc", ""),
         "create_time": aweme_item.get("create_time"),
-        "creator_hash": platform_user_id(user_info.get("uid")),  # 创作者平台原始 uid
+        "author_platform_id": platform_user_id(user_info.get("uid")),  # 创作者平台原始 uid
         "nickname": platform_nickname(user_info.get("nickname")),  # 用户原始昵称
         "followers_count": author_stats.get("followers_count"),
         "fans_count": author_stats.get("fans_count"),

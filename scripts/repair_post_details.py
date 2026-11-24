@@ -321,7 +321,6 @@ def _repair_fallback_for_row(
             "author_description": row["author_description"],
             "created_time": raw_sample.get("created_time"),
             "updated_time": raw_sample.get("updated_time"),
-            "creator_hash": raw_sample.get("creator_hash"),
             "creator_url_token": raw_sample.get("creator_url_token"),
             "user_nickname": raw_sample.get("user_nickname"),
             "author_followers_source": raw_sample.get("author_followers_source"),

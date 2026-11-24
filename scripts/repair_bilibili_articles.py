@@ -526,7 +526,7 @@ def prepare_search_record(
             "image_urls": preview_urls,
             "pubdate": raw.get("pubdate") or raw.get("published_at") or target_row["published_at"],
             "author": raw.get("author") or raw.get("nickname") or target_row["author_display_name"],
-            "mid": raw.get("mid") or raw.get("user_id") or target_row["author_platform_id"],
+            "mid": target_row["author_platform_id"] or raw.get("mid") or raw.get("user_id"),
             "like": raw.get("like") if raw.get("like") is not None else target_row["post_likes_count"],
             "reply": raw.get("reply") if raw.get("reply") is not None else target_row["post_comments_count"],
             "view": raw.get("view"),

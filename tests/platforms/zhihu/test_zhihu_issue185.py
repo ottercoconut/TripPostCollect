@@ -20,7 +20,7 @@ def answer(content_id: str) -> ZhihuContent:
     return ZhihuContent(
         content_id=content_id, question_id="10", content_type="answer",
         content_text="青岛正文", content_url=f"https://www.zhihu.com/question/10/answer/{content_id}",
-        created_time=1_700_000_000, creator_hash=f"author-{content_id}", user_nickname="作者",
+        created_time=1_700_000_000, author_platform_id=f"author-{content_id}", user_nickname="作者",
         followers_observed=True, image_list=[f"https://pic1.zhimg.com/v2-{content_id}_r.jpg"],
         content_detail_status="detail_observed", content_detail_source="search_content",
     )

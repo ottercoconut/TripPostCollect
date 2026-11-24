@@ -712,7 +712,7 @@ def test_zhihu_missing_image_distinguishes_unobserved_detail() -> None:
         "content_text": "正文",
         "content_url": "https://www.zhihu.com/question/1/answer/answer-1",
         "created_time": 1_700_000_000,
-        "creator_hash": "author-1",
+        "author_platform_id": "author-1",
         "user_nickname": "author",
         "followers_count": 10,
         "followers_observed": True,
