@@ -351,7 +351,7 @@ class ZhihuCrawler:
                             }
                             and content.content_text
                             and content.created_time
-                            and content.creator_hash
+                            and content.author_platform_id
                             and content.user_nickname
                             and image_ready
                             and content.followers_observed

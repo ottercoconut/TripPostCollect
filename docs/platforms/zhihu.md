@@ -74,7 +74,7 @@
   搜索结果上的 `verify_bayes` 与 `badge_v2.title` 不是认证来源。作者页路径不参与认证判断。
   其余标识（`badgeV2`、`badge`、`userType`、`isOrg`、`vipInfo`）去掉键名含 `icon`、`url`、`avatar`、`image`
   的键后写入 `author_page_badges`，只进入 `raw_sample_json`，不进入 `author_json`，不新增数据库列。
-- 作者平台 ID 保存 author/member 原始 `id`（写在 `creator_hash` 键），昵称保存 `name` 原文；
+- 作者平台 ID 保存 author/member 原始 `id`（记录字段 `author_platform_id`，入库只写同名列），昵称保存 `name` 原文；
   `url_token` 另存为 `creator_url_token`，不作为平台 ID。作者页确认后，`author_profile_url` 按实际打开的路径写成
   `https://www.zhihu.com/people/<url_token>` 或 `https://www.zhihu.com/org/<url_token>`。
 - 作者简介取 author/member 的 `headline`，写入 `author_description`。认证口径见上一条。

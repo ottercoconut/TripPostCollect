@@ -350,7 +350,7 @@ async def test_click_opens_tab_and_reads_entity_even_when_search_body_is_complet
         voteup_count=99,
         comment_count=99,
         created_time=1_600_000_000,
-        creator_hash="author-1",
+        author_platform_id="author-1",
         user_nickname="作者",
         followers_observed=True,
         author_followers_source="search_author",
@@ -367,7 +367,7 @@ async def test_click_opens_tab_and_reads_entity_even_when_search_body_is_complet
     assert result.collected_count == 4
     assert not hasattr(result, "share_count")
     assert result.created_time == 1_700_000_000
-    assert result.creator_hash == "author-1"
+    assert result.author_platform_id == "author-1"
     assert result.creator_url_token == "author"
     assert result.followers_count == 11
     assert result.followers_observed is True
@@ -419,7 +419,7 @@ def _search_answer() -> ZhihuContent:
         question_id="10",
         content_type="answer",
         content_text="搜索里已经完整",
-        creator_hash="author-1",
+        author_platform_id="author-1",
         user_nickname="作者",
         creator_url_token="author",
         author_profile_url="https://www.zhihu.com/people/author",
@@ -503,7 +503,7 @@ async def test_missing_count_keys_are_none_and_fail_validation(monkeypatch, tmp_
     page.state_for = lambda card: _state("101", omit=("voteupCount", "commentCount", "favlistsCount", "shareCount"))
     content = ZhihuContent(
         content_id="101", question_id="10", content_type="answer",
-        creator_hash="author-1", user_nickname="作者", followers_observed=True,
+        author_platform_id="author-1", user_nickname="作者", followers_observed=True,
         author_followers_source="search_author", followers_count=3,
         image_list=["https://pic1.zhimg.com/v2-search_r.jpg"],
     )
@@ -535,7 +535,7 @@ def test_explicit_zero_counts_stay_zero_and_pass_metrics():
         "content_detail_status": "detail_observed",
         "content_detail_source": "answer_detail",
         "created_time": 1_700_000_000,
-        "creator_hash": "author-1",
+        "author_platform_id": "author-1",
         "user_nickname": "作者",
         "followers_count": 3,
         "followers_observed": True,
@@ -561,7 +561,7 @@ def test_share_count_is_not_provided_by_zhihu():
         "content_detail_status": "detail_observed",
         "content_detail_source": "answer_detail",
         "created_time": 1_700_000_000,
-        "creator_hash": "author-1",
+        "author_platform_id": "author-1",
         "user_nickname": "作者",
         "followers_count": 3,
         "followers_observed": True,
@@ -586,7 +586,7 @@ def test_followers_from_search_results_are_not_a_formal_source():
         "content_detail_status": "detail_observed",
         "content_detail_source": "answer_detail",
         "created_time": 1_700_000_000,
-        "creator_hash": "author-1",
+        "author_platform_id": "author-1",
         "user_nickname": "作者",
         "followers_count": 3,
         "followers_observed": True,
@@ -682,7 +682,7 @@ async def test_missing_author_link_is_candidate_failure(monkeypatch, tmp_path):
     }]
     content = ZhihuContent(
         content_id="101", question_id="10", content_type="answer",
-        creator_hash="author-1", user_nickname="作者",
+        author_platform_id="author-1", user_nickname="作者",
     )
     with pytest.raises(ZhihuDetailFetchError) as caught:
         await crawler.enrich_search_content_detail(content)
@@ -704,7 +704,7 @@ async def test_author_page_without_user_is_candidate_failure(monkeypatch, tmp_pa
     }]
     content = ZhihuContent(
         content_id="101", question_id="10", content_type="answer",
-        creator_hash="author-1", user_nickname="作者",
+        author_platform_id="author-1", user_nickname="作者",
     )
     with pytest.raises(ZhihuDetailFetchError) as caught:
         await crawler.enrich_search_content_detail(content)
@@ -725,7 +725,7 @@ async def test_author_login_or_verify_stops_the_run(monkeypatch, tmp_path, block
     }]
     content = ZhihuContent(
         content_id="101", question_id="10", content_type="answer",
-        creator_hash="author-1", user_nickname="作者",
+        author_platform_id="author-1", user_nickname="作者",
     )
     with pytest.raises(ZhihuDetailFetchError) as caught:
         await crawler.enrich_search_content_detail(content)
@@ -744,7 +744,7 @@ async def test_missing_work_count_is_none_and_omitted_from_author_json(monkeypat
     }]
     content = ZhihuContent(
         content_id="101", question_id="10", content_type="answer",
-        creator_hash="author-1", user_nickname="作者", followers_observed=True,
+        author_platform_id="author-1", user_nickname="作者", followers_observed=True,
         followers_count=3, image_list=["https://pic1.zhimg.com/v2-search_r.jpg"],
         content_text="搜索", created_time=1,
     )

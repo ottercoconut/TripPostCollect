@@ -58,7 +58,7 @@ class ZhihuContent(BaseModel):
         description="Authoritative source that proved the persisted body complete",
     )
     source_keyword: str = Field(default="", description="Source keyword")
-    creator_hash: str = Field(default="", description="Creator raw platform user ID")
+    author_platform_id: str = Field(default="", description="Creator raw platform user ID")
     creator_url_token: str = Field(default="", description="Creator URL token")
     user_nickname: str = Field(default="", description="User raw nickname")
     author_profile_url: str = Field(default="", description="Creator profile URL")
@@ -96,7 +96,7 @@ class ZhihuCreator(BaseModel):
     """
     Zhihu creator (in-memory only; personal profile is no longer persisted)
     """
-    creator_hash: str = Field(default="", description="Creator raw platform user ID")
+    author_platform_id: str = Field(default="", description="Creator raw platform user ID")
     url_token: str = Field(default="", description="Creator URL token")
     user_nickname: str = Field(default="", description="User raw nickname")
     profile_url: str = Field(default="", description="Creator profile URL")

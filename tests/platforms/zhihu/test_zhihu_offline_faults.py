@@ -65,7 +65,7 @@ def answer(content_id: str) -> ZhihuContent:
         content_text="青岛完整正文",
         content_url=f"https://www.zhihu.com/question/1/answer/{content_id}",
         created_time=1_700_000_000,
-        creator_hash=f"author-{content_id}",
+        author_platform_id=f"author-{content_id}",
         user_nickname="author",
         followers_observed=True,
         image_list=[f"https://pic1.zhimg.com/{content_id}_r.jpg"],

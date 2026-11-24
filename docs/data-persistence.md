@@ -17,6 +17,8 @@
 > **授权记录（2026-11-20）：** 操作人决定微博认证区分机构与个人（#213），授权临时解冻以同步判定口径。
 >
 > **授权记录（2026-11-20）：** 操作人授权临时解冻，同步 #222 抖音页面取数与访问门禁口径。
+>
+> **授权记录（2026-11-24）：** 操作人授权临时解冻，同步 #70 移除 `author_json.creator_hash`（schema v25）。
 
 ## 数据库文件
 
@@ -194,7 +196,7 @@ B站正式调度用专栏/图文 article 搜索发现候选，但必须再取得
 | `title` | `title`；为空时抖音取整段 `desc`，小红书取 `desc` 前 255 字，其他平台为空串 |
 | `content_text` | 仅接受 `content_detail_status=detail_observed` 且 `content_detail_source` 受信任的权威正文：B站 `content_text/content`，微博 `content_text/content`，小红书 `desc`，抖音 `desc`，知乎 `content_text/content`。小红书和知乎可在入库文本中拼接标题与已验证正文，但标题、搜索 `desc/excerpt` 或预览文本不能单独通过 |
 | `author_display_name` | `nickname`、`user_nickname`、`user_name` 或 `author_name`（按此顺序取第一个非空值） |
-| `author_platform_id` | 小红书 `user_id`、`creator_hash` 或其他平台用户 ID |
+| `author_platform_id` | 平台作者原始 ID：小红书 `user_id`，抖音 `uid`，微博用户 `id`，知乎作者 `id`（不是 `url_token`），B站作者 `mid`（解析器写成 `user_id`）。只写入本列，不再复制进 `author_json`；微博记录的 `mid` 是帖子 ID，不作为作者 ID 回退 |
 | `author_followers_count` | 微博详情页 `sideUser` 的 `followers_count`（`author_followers_source=detail_side_user`），小红书作者主页补充字段 `fans_count`、`followers_count` 或 `fans`，知乎作者页 `followerCount`（`author_followers_source=author_page`）归一后的 `followers_count`，抖音只取作者页自身请求 `/user/profile/other/` 的 `user` 节点粉丝字段（`creator_profile`，#222 起为新标签作者页的被动截获；不读搜索作者对象） |
 | `published_at` | 发帖时间，统一保存为 Asia/Shanghai ISO 字符串，如 `2024-04-06T15:35:00+08:00`。优先取平台原始发布时间字段，如 `create_time`、`publish_time`、`time`、`datePublished`；`captured_at` 只表示本项目抓取时间 |
 | `keyword` | 优先保存每条记录的 `source_keyword`；缺失时回退到最终执行摘要的 `keyword`，即本次 child 命令实际使用的检索词。当前通用结构化 store 会逐条写入 `source_keyword`；自动 checkpoint 延续同一查询词，显式 `--recovery-keyword` 才会产生恢复词。旧记录缺少该字段时，回退值不能作为其原始检索词证据 |
@@ -235,6 +237,13 @@ schema v24 删除 `web_posts.post_reposts_count`、`post_views_count` 和 `autho
 `platform_key='bilibili'`，且按整数等于该行 `raw_sample_json.view_count`。通过后删除这三列，并用 `json_remove`
 去掉 `metrics_json` 的 `reposts_count` 与 `views_count`；`raw_sample_json` 保持不变。迁移后核对 B站每行的
 `view_count` 仍在、帖子行数不变。
+
+schema v25 从 `web_posts.author_json` 删除 `creator_hash` 键：它只是 `author_platform_id` 的重复拷贝，作者平台 ID
+只保留在列中。`ensure_content_schema` 调用
+`trippostcollect.db.creator_hash_migration.migrate_remove_author_json_creator_hash`：已登记版本 25 时跳过。
+同一保存点内先校验再改动：键存在的行，其值必须与 `author_platform_id` 按字符串相等（JSON null 只等于列 NULL，
+空串只等于空串，其余按文本比较，不去空白），任一行不一致就回滚并拒绝打开，不改任何行。通过后用 `json_remove`
+删除该键，复核没有残留、`raw_sample_json` 逐行不变，再登记版本。无效 JSON 的行保持原样。
 
 显式使用 `--recovery-keyword` 人工续跑时，最终摘要会合并旧、新两轮记录，
 正常记录的 `web_posts.keyword` 会逐条保存真实来源，因此同一个最终 `artifact_dir` 可以同时

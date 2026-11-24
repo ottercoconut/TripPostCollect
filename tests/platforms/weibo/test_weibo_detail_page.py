@@ -279,7 +279,7 @@ async def test_click_captures_matching_show_and_side_user(monkeypatch, tmp_path)
     assert page.clicks == 1
     assert opened.record["note_id"] == "525"
     assert opened.record["nickname"] == "海边"
-    assert opened.record["creator_hash"] == "88"
+    assert opened.record["author_platform_id"] == "88"
     assert "别人" not in json.dumps(opened.record)
     assert "其他" not in opened.record["content"]
     refs = opened.record["content_visit_refs"]
@@ -518,7 +518,7 @@ async def test_navigate_captures_show_and_side_user(monkeypatch, tmp_path):
     opened = await pages.open_by_navigate("https://weibo.com/88/525")
     record = opened.record
     assert record["note_id"] == "525"
-    assert record["creator_hash"] == "88"
+    assert record["author_platform_id"] == "88"
     assert record["author_followers_source"] == "detail_side_user"
     assert record["note_url"] == "https://weibo.com/88/Abc12"
     visits = {

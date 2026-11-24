@@ -276,7 +276,7 @@ def structural_skip_code(record: dict[str, Any] | None) -> str | None:
         return AUTHOR_PROFILE_MISSING
     if not str(record.get("content") or "").strip():
         return DETAIL_CONTENT_EMPTY
-    if not record.get("creator_hash") or not record.get("nickname"):
+    if not record.get("author_platform_id") or not record.get("nickname"):
         return AUTHOR_PROFILE_MISSING
     if record.get("followers_observed") is not True:
         return AUTHOR_FOLLOWERS_MISSING
@@ -332,7 +332,7 @@ def parse_weibo_detail(
         "image_count": len(assets),
         "image_list_source": IMAGE_LIST_SOURCE,
         "image_assets": assets,
-        "creator_hash": user_id,
+        "author_platform_id": user_id,
         "nickname": platform_nickname(author.get("screen_name")),
         "followers_count": followers,
         "followers_observed": followers_observed,

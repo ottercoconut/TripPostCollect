@@ -26,7 +26,7 @@ def test_merge_search_detail_keeps_search_author_evidence() -> None:
         content_id="answer-1",
         content_type="answer",
         content_text="search excerpt",
-        creator_hash="search-author",
+        author_platform_id="search-author",
         followers_count=123,
         followers_observed=True,
         author_followers_source="search_author",
@@ -36,7 +36,7 @@ def test_merge_search_detail_keeps_search_author_evidence() -> None:
         content_type="answer",
         content_text="full detail",
         image_list=["https://example.test/content.jpg"],
-        creator_hash="detail-author",
+        author_platform_id="detail-author",
         followers_count=0,
         followers_observed=False,
     )
@@ -48,7 +48,7 @@ def test_merge_search_detail_keeps_search_author_evidence() -> None:
     assert merged.image_count == 1
     assert merged.content_detail_status == "detail_observed"
     assert merged.content_detail_source == "answer_detail"
-    assert merged.creator_hash == "search-author"
+    assert merged.author_platform_id == "search-author"
     assert merged.followers_count == 123
     assert merged.followers_observed is True
     assert merged.author_followers_source == "search_author"

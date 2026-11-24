@@ -23,6 +23,7 @@ from trippostcollect.core.paths import (
 )
 from trippostcollect.core import resources
 from trippostcollect.db.avatar_migration import migrate_remove_author_avatars
+from trippostcollect.db.creator_hash_migration import migrate_remove_author_json_creator_hash
 from trippostcollect.db.topic_relevance_migration import migrate_topic_relevance
 from trippostcollect.db.unused_metric_columns_migration import migrate_remove_unused_metric_columns
 from trippostcollect.platforms.registry import SITES
@@ -539,7 +540,7 @@ def ensure_source_platforms(conn: sqlite3.Connection) -> int:
 
 def ensure_content_schema(
     conn: sqlite3.Connection,
-) -> tuple[int, dict[str, Any], dict[str, Any], dict[str, Any]]:
+) -> tuple[int, dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
     platform_count = ensure_source_platforms(conn)
     conn.executescript(_schema_sql(WEB_POSTS_SCHEMA))
     conn.execute("INSERT OR IGNORE INTO schema_migrations(version, name) VALUES (?, ?)", (4, "web_posts"))
@@ -558,7 +559,14 @@ def ensure_content_schema(
     avatar_migration = migrate_remove_author_avatars(conn)
     topic_relevance_migration = migrate_topic_relevance(conn)
     unused_metric_columns_migration = migrate_remove_unused_metric_columns(conn)
-    return platform_count, avatar_migration, topic_relevance_migration, unused_metric_columns_migration
+    creator_hash_migration = migrate_remove_author_json_creator_hash(conn)
+    return (
+        platform_count,
+        avatar_migration,
+        topic_relevance_migration,
+        unused_metric_columns_migration,
+        creator_hash_migration,
+    )
 
 
 def ensure_scheduler_schema(conn: sqlite3.Connection) -> None:
@@ -946,12 +954,14 @@ def bootstrap_connection(
     avatar_migration: dict[str, Any] | None = None
     topic_relevance_migration: dict[str, Any] | None = None
     unused_metric_columns_migration: dict[str, Any] | None = None
+    creator_hash_migration: dict[str, Any] | None = None
     if sync_content:
         (
             platform_count,
             avatar_migration,
             topic_relevance_migration,
             unused_metric_columns_migration,
+            creator_hash_migration,
         ) = ensure_content_schema(conn)
     if sync_scheduler:
         ensure_scheduler_schema(conn)
@@ -966,6 +976,7 @@ def bootstrap_connection(
         "avatar_migration": avatar_migration,
         "topic_relevance_migration": topic_relevance_migration,
         "unused_metric_columns_migration": unused_metric_columns_migration,
+        "creator_hash_migration": creator_hash_migration,
         "scheduler_schema": bool(sync_scheduler),
         "synced_jobs": synced_jobs,
     }

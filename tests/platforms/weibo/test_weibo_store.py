@@ -170,7 +170,7 @@ def test_author_fields_and_verify_blob_omit_absent_keys():
     user = _user()
     del user["verified_type_ext"]
     record = _record(user=user)
-    assert record["creator_hash"] == "88"
+    assert record["author_platform_id"] == "88"
     assert record["nickname"] == "海边"
     assert record["followers_count"] == 10
     assert record["followers_observed"] is True

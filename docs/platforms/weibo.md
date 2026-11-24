@@ -202,7 +202,7 @@
 
   | 来源 | 写入 | 说明 |
   |---|---|---|
-  | `id` | `creator_hash` 键（作者平台 ID） | 整数归一为字符串 |
+  | `id` | `author_platform_id`（作者平台 ID，入库只写同名列） | 整数归一为字符串 |
   | `screen_name` | 昵称 | 原文 |
   | `followers_count` | 粉丝 | int；`followers_observed=true`、`author_followers_source=detail_side_user`；缺键时只认 `followers_count_str` 为纯数字，“万”字串不换算，视为缺失 |
   | `friends_count` | `author_following_count` | |
