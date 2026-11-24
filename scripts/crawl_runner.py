@@ -138,7 +138,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--kind", help="Optional job_kind filter.")
     parser.add_argument("--job-key", help="Run one specific job key.")
     parser.add_argument("--start-page", type=int, help="Recovery-only platform page to start from.")
-    parser.add_argument("--resume-summary", help="Recovery-only prior MediaCrawler summary to include and freeze.")
+    parser.add_argument("--resume-summary", help="Recovery-only prior structured-crawl summary to include and freeze.")
     parser.add_argument("--recovery-keyword", help="Recovery-only alternative keyword used for the continuation.")
     parser.add_argument("--sync-only", action="store_true", help="Only sync config into crawl_jobs.")
     parser.add_argument("--no-sync-config", action="store_true", help="Do not sync config before selecting jobs.")
@@ -341,7 +341,7 @@ def build_command(row: JobRow, args: argparse.Namespace) -> list[str]:
             raise ValueError("XHS formal jobs must use scripts/xhs_runner.py")
         if profile != "social_high_risk":
             raise ValueError(
-                f"Generic MediaCrawler formal job must use social_high_risk: {row['job_key']}"
+                f"Generic structured-crawl formal job must use social_high_risk: {row['job_key']}"
             )
         stale_fields = sorted(REMOVED_FORMAL_QUANTITY_FIELDS & params.keys())
         if stale_fields:

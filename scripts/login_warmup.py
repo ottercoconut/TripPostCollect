@@ -14,7 +14,7 @@ from trippostcollect.application.warmup import (
     main_async as main_async,
     TARGETS as TARGETS,
     ALIASES as ALIASES,
-    warmup_mediacrawler as warmup_mediacrawler,
+    warmup_one as warmup_one,
 )
 from trippostcollect.application.warmup import login_main
 

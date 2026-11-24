@@ -342,7 +342,7 @@ def test_mediacrawler_run_command_redacts_logs_and_summary_tail(
     assert AVATAR_URL not in result["stderr_tail"]
 
 
-def test_mediacrawler_exporter_sanitizes_before_jsonl_serialization(
+def test_export_sanitizer_strips_avatars_before_jsonl_serialization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # T14：原经旧桥 E 的同名转发调用；E 只是转交根净化函数，此处直接用根实现。

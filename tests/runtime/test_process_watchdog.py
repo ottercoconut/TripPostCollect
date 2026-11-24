@@ -1,4 +1,4 @@
-"""TripPostCollect MediaCrawler process watchdog tests."""
+"""子进程看门狗与运行状态上报。"""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from support.signal_driver import isolated_signal_test
 from trippostcollect.xhs.operator_wait import operator_wait_diagnostics_path
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))

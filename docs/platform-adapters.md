@@ -540,10 +540,10 @@ main `b7e52db` 的 [36333548215 验收](https://github.com/ottercoconut/TripPost
 
 | 编号 | 现有测试路径:行与实际函数名 | 目标正反例及覆盖边界 |
 |---|---|---|
-| V01 | `tests/test_mediacrawler_pagination.py:223` `test_unfinished_pagination_is_not_reported_as_source_exhausted` | 有停止证据 vs 分页未结束/阻断；五站阻断误耗尽组合待验证 |
+| V01 | `tests/application/test_pagination.py` `test_unfinished_pagination_is_not_reported_as_source_exhausted`（#70 前在 `tests/test_mediacrawler_pagination.py`） | 有停止证据 vs 分页未结束/阻断；五站阻断误耗尽组合待验证 |
 | V02 | `tests/test_discovery_checkpoints.py:49` `test_query_fingerprint_ignores_runtime_budget_but_tracks_source_options` | 来源变化换指纹、预算变化不换；旧序列化兼容与并发读取可见性待补 |
 | V03 | `tests/test_discovery_checkpoints.py:651` `test_bilibili_frontier_starts_at_saved_page_and_skips_known_author_lookup` | 已知候选提前跳过；中途失败安全 frontier、refresh/deep 全矩阵待验证 |
-| V04 | `tests/test_author_avatar_sanitization.py:184` `test_mediacrawler_exporter_sanitizes_before_jsonl_serialization` | 首次 JSONL 清理；manifest/event/log/fixture 全出口及重复 URL 负例待验证 |
+| V04 | `tests/test_author_avatar_sanitization.py` `test_export_sanitizer_strips_avatars_before_jsonl_serialization`（#70 前名为 `test_mediacrawler_exporter_sanitizes_before_jsonl_serialization`） | 首次 JSONL 清理；manifest/event/log/fixture 全出口及重复 URL 负例待验证 |
 | V05 | `tests/test_post_detail_repair.py:327` `test_repair_fallback_makes_sparse_zhihu_detail_formally_valid` | 仅有关修复正例；五站 fields/source、followers=0、缺 count/source/observed 均需独立核验 |
 | V06 | `M/tests/test_cdp_browser_lifecycle.py:754` `test_manager_rejects_second_launch_attempt` | 第二次启动拒绝；单 Context、login 借用、page 关闭不 fallback 待逐断言核验 |
 | V07 | `tests/test_xhs_batch_checkpoint.py:143` `test_exporter_stops_without_ack_and_does_not_write_sqlite` | 无 ACK 停止、child 不写库；重复/旧/丢失 ACK、提交后崩溃、空 refresh、哈希/租约拒绝待验证 |

@@ -1,4 +1,4 @@
-"""TripPostCollect tests for mediacrawler behavior."""
+"""结构化抓取的行为证据与校验。"""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ import pytest
 
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))

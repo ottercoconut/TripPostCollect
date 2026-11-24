@@ -25,7 +25,7 @@ from trippostcollect.runtime.cookies import cookie_dict, cookie_snapshot_info as
 from trippostcollect.runtime.cookies import write_cookie_snapshot as _write_cookie_snapshot
 from trippostcollect.core.paths import (
     LOGIN_WARMUP_OUTPUT,
-    MEDIACRAWLER_LOGIN_OUTPUT,
+    PLATFORM_LOGIN_OUTPUT,
     PROJECT_ROOT,
     ensure_dir,
 )
@@ -33,7 +33,7 @@ from trippostcollect.runtime.browser_launcher import discover_cdp_browser_path
 
 
 ROOT = PROJECT_ROOT
-DEFAULT_OUTPUT = MEDIACRAWLER_LOGIN_OUTPUT
+DEFAULT_OUTPUT = PLATFORM_LOGIN_OUTPUT
 
 PLATFORMS: dict[str, dict[str, Any]] = {
     "douyin": {
@@ -64,7 +64,7 @@ PLATFORMS: dict[str, dict[str, Any]] = {
     },
 }
 
-MEDIACRAWLER_ALIASES = {
+PLATFORM_ALIASES = {
     "dy": "douyin",
     "douyin": "douyin",
     "抖音": "douyin",
@@ -81,7 +81,7 @@ MEDIACRAWLER_ALIASES = {
 
 
 def media_parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Open MediaCrawler profiles for manual login and verify login markers.")
+    parser = argparse.ArgumentParser(description="Open platform profiles for manual login and verify login markers.")
     parser.add_argument(
         "--platforms",
         nargs="+",
@@ -90,7 +90,7 @@ def media_parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--timeout-seconds", type=int, default=600, help="Maximum wait per platform.")
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT), help="Output root for login verification records.")
-    parser.add_argument("--browser-path", help="Explicit Chrome/Chromium executable path. Defaults to MediaCrawler CDP discovery.")
+    parser.add_argument("--browser-path", help="Explicit Chrome/Chromium executable path. Defaults to CDP browser discovery.")
     parser.add_argument("--no-close-on-success", action="store_true", help="Keep browser window open after login succeeds.")
     parser.add_argument("--skip-reopen-verify", action="store_true", help="Do not reopen the profile to verify login persistence.")
     return parser.parse_args()
@@ -105,7 +105,7 @@ def selected_platforms(values: list[str]) -> list[str]:
         return list(PLATFORMS)
     result: list[str] = []
     for value in values:
-        key = MEDIACRAWLER_ALIASES.get(value)
+        key = PLATFORM_ALIASES.get(value)
         if not key:
             raise SystemExit(f"Unknown platform: {value}")
         if key not in result:
@@ -526,15 +526,12 @@ def write_cookie_snapshot(
     )
 
 
-MEDIACRAWLER_PLATFORMS = PLATFORMS
-warmup_mediacrawler = warmup_one
-
 TARGETS: dict[str, dict[str, str]] = {
     key: {"kind": "mediacrawler", "label": str(config["label"])}
-    for key, config in MEDIACRAWLER_PLATFORMS.items()
+    for key, config in PLATFORMS.items()
 }
 
-ALIASES = dict(MEDIACRAWLER_ALIASES)
+ALIASES = dict(PLATFORM_ALIASES)
 
 
 def parse_args() -> argparse.Namespace:
@@ -611,7 +608,7 @@ async def run_target(
     config = TARGETS[target]
     child_args = implementation_args(args)
     try:
-        result = await warmup_mediacrawler(playwright, target, batch_dir, child_args)
+        result = await warmup_one(playwright, target, batch_dir, child_args)
         normalized = dict(result)
         normalized["target"] = target
         normalized["target_kind"] = config["kind"]

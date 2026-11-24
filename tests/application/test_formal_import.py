@@ -1,4 +1,4 @@
-"""TripPostCollect tests for mediacrawler import."""
+"""结构化抓取的正式入库与图片晋升。"""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ from trippostcollect.artifacts.image_materialization import write_staging_image
 from trippostcollect.db.bootstrap import bootstrap_connection
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
