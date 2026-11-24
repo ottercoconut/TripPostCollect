@@ -62,15 +62,15 @@
        ]
       },
       {
-       "function": "tests/test_mediacrawler_pagination.py::test_valid_records_without_stop_event_never_complete_discovery",
+       "function": "tests/application/test_pagination.py::test_valid_records_without_stop_event_never_complete_discovery",
        "lane": "component"
       },
       {
-       "function": "tests/test_mediacrawler_pagination.py::test_runtime_failed_pagination_overrides_valid_records",
+       "function": "tests/application/test_pagination.py::test_runtime_failed_pagination_overrides_valid_records",
        "lane": "component"
       },
       {
-       "function": "tests/test_mediacrawler_pagination.py::test_source_exhausted_completion_keeps_all_discovered_records",
+       "function": "tests/application/test_pagination.py::test_source_exhausted_completion_keeps_all_discovered_records",
        "lane": "component"
       },
       {
@@ -113,7 +113,7 @@
        "lane": "component"
       },
       {
-       "function": "tests/test_mediacrawler_pagination.py::test_incomplete_run_keeps_latest_safe_batch_after_candidate_skip",
+       "function": "tests/application/test_pagination.py::test_incomplete_run_keeps_latest_safe_batch_after_candidate_skip",
        "lane": "component"
       },
       {
@@ -174,11 +174,11 @@
        ]
       },
       {
-       "function": "tests/test_mediacrawler_pagination.py::test_unverified_douyin_first_page_empty_is_runtime_failure",
+       "function": "tests/application/test_pagination.py::test_unverified_douyin_first_page_empty_is_runtime_failure",
        "lane": "component"
       },
       {
-       "function": "tests/test_mediacrawler_pagination.py::test_verified_douyin_first_page_empty_can_prove_exhaustion",
+       "function": "tests/application/test_pagination.py::test_verified_douyin_first_page_empty_can_prove_exhaustion",
        "lane": "component"
       },
       {
@@ -776,7 +776,7 @@
      "lane": "component"
     },
     {
-     "function": "tests/test_author_avatar_sanitization.py::test_mediacrawler_exporter_sanitizes_before_jsonl_serialization",
+     "function": "tests/test_author_avatar_sanitization.py::test_export_sanitizer_strips_avatars_before_jsonl_serialization",
      "lane": "component"
     },
     {
@@ -912,19 +912,19 @@
    "semantics": "重试、真实格式/字节、失败行、整帖拒绝、晋升后失败、commit确定性与引用保护",
    "shared": [
     {
-     "function": "tests/test_mediacrawler_import.py::test_five_platform_manifests_share_root_verification_promotion_and_import",
+     "function": "tests/application/test_formal_import.py::test_five_platform_manifests_share_root_verification_promotion_and_import",
      "lane": "component"
     },
     {
-     "function": "tests/test_mediacrawler_import.py::test_postcommit_interrupt_preserves_sqlite_referenced_media",
+     "function": "tests/application/test_formal_import.py::test_postcommit_interrupt_preserves_sqlite_referenced_media",
      "lane": "component"
     },
     {
-     "function": "tests/test_mediacrawler_import.py::test_interrupt_before_batch_commit_rolls_back_rows_and_media",
+     "function": "tests/application/test_formal_import.py::test_interrupt_before_batch_commit_rolls_back_rows_and_media",
      "lane": "component"
     },
     {
-     "function": "tests/test_mediacrawler_import.py::test_rollback_preserves_file_referenced_by_another_committed_run",
+     "function": "tests/application/test_formal_import.py::test_rollback_preserves_file_referenced_by_another_committed_run",
      "lane": "component"
     },
     {
@@ -960,7 +960,7 @@
        "lane": "component"
       },
       {
-       "function": "tests/test_mediacrawler_import.py::test_failed_multi_image_promotion_rolls_back_new_long_term_files",
+       "function": "tests/application/test_formal_import.py::test_failed_multi_image_promotion_rolls_back_new_long_term_files",
        "lane": "component"
       },
       {
@@ -1051,11 +1051,11 @@
        "min_count": 6
       },
       {
-       "function": "tests/test_mediacrawler_import.py::test_legacy_zhihu_random_asset_key_still_fails_closed",
+       "function": "tests/application/test_formal_import.py::test_legacy_zhihu_random_asset_key_still_fails_closed",
        "lane": "component"
       },
       {
-       "function": "tests/test_mediacrawler_import.py::test_same_post_images_are_deduplicated_by_verified_sha256_before_import",
+       "function": "tests/application/test_formal_import.py::test_same_post_images_are_deduplicated_by_verified_sha256_before_import",
        "lane": "component"
       },
       {
@@ -1090,11 +1090,11 @@
        "lane": "component"
       },
       {
-       "function": "tests/test_mediacrawler_import.py::test_manifest_or_staging_failure_blocks_whole_post",
+       "function": "tests/application/test_formal_import.py::test_manifest_or_staging_failure_blocks_whole_post",
        "lane": "component"
       },
       {
-       "function": "tests/test_mediacrawler_import.py::test_sqlite_import_failure_rolls_back_newly_promoted_files",
+       "function": "tests/application/test_formal_import.py::test_sqlite_import_failure_rolls_back_newly_promoted_files",
        "lane": "component"
       },
       {
@@ -1119,12 +1119,12 @@
    "semantics": "#1/#2修复语义、真实信号/gate/身份/精确清理、unknown/scan_error不释放；component/OS/socket分组保留",
    "shared": [
     {
-     "file": "tests/test_mediacrawler_process_watchdog.py",
+     "file": "tests/runtime/test_process_watchdog.py",
      "lane": "component",
      "min_count": 36
     },
     {
-     "file": "tests/test_mediacrawler_process_watchdog.py",
+     "file": "tests/runtime/test_process_watchdog.py",
      "lane": "os",
      "min_count": 15
     },
@@ -1148,7 +1148,7 @@
      "basis": "worker 监督、进程组与 CDP 生命周期是平台无关的共享运行时，四个通用站没有本站分支；租约/终态/会话只属小红书 runner（规格 F06）；B站执行器在 mediacrawler_crawl 子进程内自启 Playwright",
      "entries": [
       {
-       "file": "tests/test_mediacrawler_process_watchdog.py",
+       "file": "tests/runtime/test_process_watchdog.py",
        "lane": "component",
        "min_count": 36
       },
@@ -1170,7 +1170,7 @@
      "basis": "worker 监督、进程组与 CDP 生命周期是平台无关的共享运行时，四个通用站没有本站分支；租约/终态/会话只属小红书 runner（规格 F06）",
      "entries": [
       {
-       "file": "tests/test_mediacrawler_process_watchdog.py",
+       "file": "tests/runtime/test_process_watchdog.py",
        "lane": "component",
        "min_count": 36
       },
@@ -1190,7 +1190,7 @@
      "basis": "worker 监督、进程组与 CDP 生命周期是平台无关的共享运行时，四个通用站没有本站分支；租约/终态/会话只属小红书 runner（规格 F06）",
      "entries": [
       {
-       "file": "tests/test_mediacrawler_process_watchdog.py",
+       "file": "tests/runtime/test_process_watchdog.py",
        "lane": "component",
        "min_count": 36
       },
@@ -1210,7 +1210,7 @@
      "basis": "worker 监督、进程组与 CDP 生命周期是平台无关的共享运行时，四个通用站没有本站分支；租约/终态/会话只属小红书 runner（规格 F06）",
      "entries": [
       {
-       "file": "tests/test_mediacrawler_process_watchdog.py",
+       "file": "tests/runtime/test_process_watchdog.py",
        "lane": "component",
        "min_count": 36
       },
@@ -1318,11 +1318,11 @@
        "lane": "component"
       },
       {
-       "function": "tests/test_mediacrawler_behavior.py::test_all_selected_platforms_require_behavior_and_policy_evidence",
+       "function": "tests/application/test_behavior_evidence.py::test_all_selected_platforms_require_behavior_and_policy_evidence",
        "lane": "component"
       },
       {
-       "function": "tests/test_mediacrawler_behavior.py::test_behavior_validation_requires_evidence_for_each_generic_platform",
+       "function": "tests/application/test_behavior_evidence.py::test_behavior_validation_requires_evidence_for_each_generic_platform",
        "lane": "component",
        "params": [
         "bilibili"
@@ -1373,11 +1373,11 @@
        "lane": "component"
       },
       {
-       "function": "tests/test_mediacrawler_behavior.py::test_behavior_stage_writes_complete_evidence",
+       "function": "tests/application/test_behavior_evidence.py::test_behavior_stage_writes_complete_evidence",
        "lane": "component"
       },
       {
-       "function": "tests/test_mediacrawler_behavior.py::test_behavior_validation_requires_evidence_for_each_generic_platform",
+       "function": "tests/application/test_behavior_evidence.py::test_behavior_validation_requires_evidence_for_each_generic_platform",
        "lane": "component",
        "params": [
         "weibo"
@@ -1396,7 +1396,7 @@
      "status": "covered",
      "entries": [
       {
-       "function": "tests/test_mediacrawler_behavior.py::test_behavior_validation_requires_evidence_for_each_generic_platform",
+       "function": "tests/application/test_behavior_evidence.py::test_behavior_validation_requires_evidence_for_each_generic_platform",
        "lane": "component",
        "params": [
         "douyin"
@@ -1431,11 +1431,11 @@
      "status": "covered",
      "entries": [
       {
-       "function": "tests/test_mediacrawler_behavior.py::test_behavior_validation_rejects_wrong_keyword_url",
+       "function": "tests/application/test_behavior_evidence.py::test_behavior_validation_rejects_wrong_keyword_url",
        "lane": "component"
       },
       {
-       "function": "tests/test_mediacrawler_behavior.py::test_behavior_validation_requires_evidence_for_each_generic_platform",
+       "function": "tests/application/test_behavior_evidence.py::test_behavior_validation_requires_evidence_for_each_generic_platform",
        "lane": "component",
        "params": [
         "zhihu"
@@ -1502,7 +1502,7 @@
        "lane": "component"
       },
       {
-       "function": "tests/test_mediacrawler_behavior.py::test_xhs_search_verification_wait_keeps_page_open_until_cleared",
+       "function": "tests/application/test_behavior_evidence.py::test_xhs_search_verification_wait_keeps_page_open_until_cleared",
        "lane": "component"
       },
       {
@@ -1643,7 +1643,7 @@
        "lane": "component"
       },
       {
-       "function": "tests/test_mediacrawler_pagination.py::test_load_zhihu_detail_urls_accepts_only_answer_and_article",
+       "function": "tests/application/test_pagination.py::test_load_zhihu_detail_urls_accepts_only_answer_and_article",
        "lane": "component"
       }
      ]

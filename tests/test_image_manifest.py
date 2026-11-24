@@ -177,7 +177,7 @@ def test_candidates_use_weibo_pid_and_douyin_uri_metadata() -> None:
     ]
 
 
-def test_mediacrawler_weibo_manifest_sample_matches_root_candidates() -> None:
+def test_weibo_manifest_sample_matches_root_candidates() -> None:
     record = {
         "note_id": "wb-note-1",
         "image_list_source": "mblog.pics",
