@@ -73,7 +73,7 @@ def test_run_target_records_failure_and_continues_contract(monkeypatch: pytest.M
     async def fail_warmup(*_args, **_kwargs):
         raise RuntimeError("browser failed")
 
-    monkeypatch.setattr("trippostcollect.application.warmup.warmup_mediacrawler", fail_warmup)
+    monkeypatch.setattr("trippostcollect.application.warmup.warmup_one", fail_warmup)
     args = argparse.Namespace(
         timeout_seconds=10,
         output_dir=str(tmp_path),

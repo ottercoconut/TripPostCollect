@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MediaCrawler-first structured crawl entrypoint."""
+"""Structured crawl entrypoint for the generic platforms."""
 
 from __future__ import annotations
 
@@ -182,7 +182,7 @@ from trippostcollect.runtime.behavior import (
 )
 from trippostcollect.core.paths import (
     COOKIE_SNAPSHOT_FILENAME as COOKIE_SNAPSHOT_FILENAME,
-    MEDIACRAWLER_RUNS_OUTPUT,
+    STRUCTURED_RUNS_OUTPUT,
     PROJECT_ROOT,
 )
 from trippostcollect.core import paths, resources as resources
@@ -357,7 +357,7 @@ from trippostcollect.platforms.bilibili.signer import (
 )
 
 ROOT = PROJECT_ROOT
-DEFAULT_OUTPUT = MEDIACRAWLER_RUNS_OUTPUT
+DEFAULT_OUTPUT = STRUCTURED_RUNS_OUTPUT
 
 
 

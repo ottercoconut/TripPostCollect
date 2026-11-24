@@ -739,7 +739,7 @@ def _run_platform_without_policy(
         "-m",
         "trippostcollect.platforms.entry",
         "--platform",
-        platform["mediacrawler"],
+        platform["worker_code"],
         "--lt",
         args.login_type,
         "--type",
@@ -1339,7 +1339,7 @@ def _run_main(
     elif args.xhs_post_interaction != "none":
         raise SystemExit("--xhs-post-interaction is only supported for XHS")
     elif args.behavior_profile != "social_high_risk":
-        raise SystemExit("generic MediaCrawler platforms require --behavior-profile social_high_risk")
+        raise SystemExit("generic platforms require --behavior-profile social_high_risk")
     resume_records: list[dict[str, Any]] = []
     resume_info: dict[str, Any] | None = None
     resume_identity_values: list[str] = []
@@ -1424,7 +1424,7 @@ def _run_main(
 
     records = list(resume_records)
     for platform_key in platforms:
-        print(f"[mediacrawler] {platform_key}", flush=True)
+        print(f"[structured] {platform_key}", flush=True)
         records.append(
             run_platform(
                 platform_key,

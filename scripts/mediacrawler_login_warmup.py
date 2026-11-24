@@ -20,7 +20,7 @@ from trippostcollect.application.warmup import (
     warmup_one as warmup_one,
     media_main_async as main_async,
     PLATFORMS as PLATFORMS,
-    MEDIACRAWLER_ALIASES as ALIASES,
+    PLATFORM_ALIASES as ALIASES,
     discover_cdp_browser_path as discover_cdp_browser_path,
     required_cookie_names as required_cookie_names,
     ROOT as ROOT,

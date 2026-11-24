@@ -36,7 +36,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", default=str(DEFAULT_CONFIG), help="Crawl target config JSON.")
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT), help="Benchmark output root.")
     parser.add_argument("--sites", nargs="+", help="Optional site_key filter.")
-    parser.add_argument("--headless", action="store_true", help="Force MediaCrawler headless mode.")
+    parser.add_argument("--headless", action="store_true", help="Force headless mode for structured crawls.")
     return parser.parse_args()
 
 
@@ -125,7 +125,7 @@ def load_subprocess_json(path: Path) -> dict[str, Any]:
         return {}
 
 
-def run_mediacrawler_job(job: dict[str, Any], args: argparse.Namespace, batch_dir: Path, db_path: Path) -> dict[str, Any]:
+def run_structured_search_job(job: dict[str, Any], args: argparse.Namespace, batch_dir: Path, db_path: Path) -> dict[str, Any]:
     params = job.get("params") or {}
     platform = str(params.get("platform") or job["site_key"])
     if platform == "xhs":
@@ -358,7 +358,7 @@ def main() -> int:
     records: list[dict[str, Any]] = []
     for job in selected_jobs(config, args.sites):
         if job.get("job_kind") == "mediacrawler_search":
-            records.append(run_mediacrawler_job(job, args, batch_dir, db_path))
+            records.append(run_structured_search_job(job, args, batch_dir, db_path))
         elif job.get("job_kind") == "ctf_resource_crawl":
             records.append(run_ctf_resource_job(job, args, batch_dir, db_path))
         else:

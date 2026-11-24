@@ -462,7 +462,7 @@ def latest_platform_result_counts(
 
 def write_markdown(summary: dict[str, Any], path: Path) -> None:
     lines = [
-        "# MediaCrawler 结构化抓取摘要",
+        "# 结构化抓取摘要",
         "",
         f"- 时间：`{summary['captured_at']}`",
         f"- 关键词：`{summary['keyword']}`",

@@ -166,11 +166,11 @@ class XhsRuntimeSupervisionError(RuntimeError):
 
 
 PLATFORMS: dict[str, dict[str, str]] = {
-    "bilibili": {"mediacrawler": "bili", "label": "B站"},
-    "xhs": {"mediacrawler": "xhs", "label": "小红书"},
-    "weibo": {"mediacrawler": "wb", "label": "微博"},
-    "douyin": {"mediacrawler": "dy", "label": "抖音"},
-    "zhihu": {"mediacrawler": "zhihu", "label": "知乎"},
+    "bilibili": {"worker_code": "bili", "label": "B站"},
+    "xhs": {"worker_code": "xhs", "label": "小红书"},
+    "weibo": {"worker_code": "wb", "label": "微博"},
+    "douyin": {"worker_code": "dy", "label": "抖音"},
+    "zhihu": {"worker_code": "zhihu", "label": "知乎"},
 }
 
 

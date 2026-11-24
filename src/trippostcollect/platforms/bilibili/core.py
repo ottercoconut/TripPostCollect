@@ -243,7 +243,7 @@ def run_bilibili_article_search(
     platform_key = "bilibili"
     platform = PLATFORMS[platform_key]
     platform_data_root = ensure_dir(
-        batch_dir / platform_key / "data" / platform["mediacrawler"]
+        batch_dir / platform_key / "data" / platform["worker_code"]
     )
     save_path = ensure_dir(platform_data_root / "jsonl")
     manifest_path = platform_data_root / "image_manifest.jsonl"

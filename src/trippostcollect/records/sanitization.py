@@ -304,9 +304,9 @@ def public_payload(value: Any) -> Any:
 
 def sanitize_export_item(item: dict[str, Any]) -> dict[str, Any]:
     if os.environ.get("TRIPPOSTCOLLECT_STRIP_AUTHOR_AVATARS") != "1":
-        raise RuntimeError("TripPostCollect MediaCrawler export sanitizer is not enabled")
+        raise RuntimeError("TripPostCollect structured export sanitizer is not enabled")
     sanitized = sanitize_author_avatar_data(item).value
     if not isinstance(sanitized, dict):
-        raise RuntimeError("sanitized MediaCrawler item must remain an object")
+        raise RuntimeError("sanitized export item must remain an object")
     return sanitized
 

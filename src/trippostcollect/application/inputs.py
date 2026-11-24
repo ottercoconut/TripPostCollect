@@ -9,14 +9,14 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qsl
 
 from trippostcollect.core.paths import DEFAULT_DB, LOCAL_MEDIA_ROOT
-from trippostcollect.core.paths import MEDIACRAWLER_RUNS_OUTPUT as DEFAULT_OUTPUT
+from trippostcollect.core.paths import STRUCTURED_RUNS_OUTPUT as DEFAULT_OUTPUT
 
 
 from trippostcollect.application.contracts import PLATFORMS as PLATFORMS
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run MediaCrawler for supported structured social platforms.")
+    parser = argparse.ArgumentParser(description="Run structured crawls for the generic social platforms.")
     parser.add_argument("--keyword", default="青岛旅游", help="Qingdao search keyword.")
     parser.add_argument(
         "--platforms",
@@ -25,7 +25,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="bilibili weibo douyin zhihu; XHS is a low-level target selected only by xhs_runner.py",
     )
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT), help="Output root.")
-    parser.add_argument("--login-type", default="cookie", choices=("cookie", "qrcode", "phone"), help="MediaCrawler login type.")
+    parser.add_argument("--login-type", default="cookie", choices=("cookie", "qrcode", "phone"), help="Login type forwarded to the platform worker.")
     parser.add_argument("--get-media", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
         "--download-images",
@@ -59,7 +59,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--top-refresh-max-pages", type=int, default=0)
     parser.add_argument("--discovery-source-exhausted", action="store_true")
     parser.add_argument("--no-checkpoint-write", action="store_true")
-    parser.add_argument("--no-import", action="store_true", help="Do not import MediaCrawler JSONL records into SQLite.")
+    parser.add_argument("--no-import", action="store_true", help="Do not import structured JSONL records into SQLite.")
     parser.add_argument(
         "--zhihu-detail-urls-file",
         help="Diagnostic-only JSON array of Zhihu answer/article URLs to inspect via detail mode.",
@@ -111,7 +111,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def selected_platforms(values: list[str]) -> list[str]:
     unknown = sorted(set(values) - set(PLATFORMS))
     if unknown:
-        raise SystemExit(f"Unsupported MediaCrawler platform in this project: {', '.join(unknown)}")
+        raise SystemExit(f"Unsupported structured-crawl platform in this project: {', '.join(unknown)}")
     return values
 
 

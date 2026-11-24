@@ -86,7 +86,7 @@ SITES: dict[str, WebSite] = {
         cooldown_minutes=180,
         account_risk_level="high",
         content_focus="search notes, image-text details, visible engagement metrics, creator profile metrics",
-        notes="Use MediaCrawler with headed/CDP mode and a warmed browser profile; do not process video media.",
+        notes="Use headed/CDP mode and a warmed browser profile; do not process video media.",
     ),
     "bilibili": WebSite(
         key="bilibili",
