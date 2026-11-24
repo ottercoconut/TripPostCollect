@@ -15,6 +15,7 @@ from support.douyin import (
 )
 from trippostcollect.platforms.douyin.detail_page import DouyinDetailFetchError
 from trippostcollect.platforms.douyin.models import DouyinImageDownloadError
+from trippostcollect.platforms.douyin.search_page import DouyinPageCapture
 from trippostcollect.runtime.image_retry import ImageDownloadFetchError
 
 
@@ -62,7 +63,6 @@ async def test_strict_image_entry_requests_only_note_image_and_writes_true_forma
 ):
     monkeypatch.setattr(config, "ENABLE_GET_MEIDAS", True)
     monkeypatch.setattr(config, "SAVE_DATA_PATH", str(tmp_path))
-    monkeypatch.setattr("trippostcollect.platforms.douyin.core.random.random", lambda: 0)
     crawler = DouYinCrawler()
     crawler.dy_client = AsyncMock()
     crawler.dy_client.get_note_image.return_value = png_bytes()
@@ -115,7 +115,6 @@ async def test_transient_note_image_failure_recovers_and_records_attempts(
 ):
     monkeypatch.setattr(config, "ENABLE_GET_MEIDAS", True)
     monkeypatch.setattr(config, "SAVE_DATA_PATH", str(tmp_path))
-    monkeypatch.setattr("trippostcollect.platforms.douyin.core.random.random", lambda: 0)
     monkeypatch.setattr(
         "trippostcollect.runtime.image_retry.IMAGE_DOWNLOAD_RETRY_DELAY_SECONDS",
         (0.0, 0.0),
@@ -142,7 +141,6 @@ async def test_transient_note_image_failure_recovers_and_records_attempts(
 async def test_failed_note_image_writes_failed_manifest_only(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "ENABLE_GET_MEIDAS", True)
     monkeypatch.setattr(config, "SAVE_DATA_PATH", str(tmp_path))
-    monkeypatch.setattr("trippostcollect.platforms.douyin.core.random.random", lambda: 0)
     monkeypatch.setattr(
         "trippostcollect.runtime.image_retry.IMAGE_DOWNLOAD_RETRY_DELAY_SECONDS",
         (0.0, 0.0),
@@ -171,7 +169,6 @@ async def test_failed_note_image_writes_failed_manifest_only(monkeypatch, tmp_pa
 async def test_terminal_http_fetch_error_preserves_manifest_evidence(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "ENABLE_GET_MEIDAS", True)
     monkeypatch.setattr(config, "SAVE_DATA_PATH", str(tmp_path))
-    monkeypatch.setattr("trippostcollect.platforms.douyin.core.random.random", lambda: 0)
     crawler = DouYinCrawler()
     crawler.dy_client = AsyncMock()
     crawler.dy_client.get_note_image.side_effect = ImageDownloadFetchError(
@@ -190,6 +187,52 @@ async def test_terminal_http_fetch_error_preserves_manifest_evidence(monkeypatch
     assert row["error_code"] == "image_source_unavailable"
     assert row["http_status"] == 404
     assert row["attempts"] == 1
+
+
+def two_image_aweme(aweme_id: str = "dy-two") -> dict:
+    item = image_aweme(aweme_id)
+    item["images"] = [
+        {"uri": "uri-one", "url_list": ["https://p3-pc-sign.douyinpic.com/one.jpeg"]},
+        {"uri": "uri-two", "url_list": ["https://p9-pc-sign.douyinpic.com/two.jpeg"]},
+    ]
+    return item
+
+
+@pytest.mark.asyncio
+async def test_note_images_do_not_sleep_between_cdn_direct_visits(monkeypatch, tmp_path):
+    """同一帖多张正文图之间不再固定睡眠，每张仍按 source_index 登记 cdn_direct。"""
+
+    monkeypatch.setattr(config, "ENABLE_GET_MEIDAS", True)
+    monkeypatch.setattr(config, "SAVE_DATA_PATH", str(tmp_path))
+    monkeypatch.setenv("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE", str(tmp_path / "behavior.jsonl"))
+    slept: list[float] = []
+
+    async def record_sleep(seconds: float = 0) -> None:
+        slept.append(float(seconds))
+
+    monkeypatch.setattr("trippostcollect.platforms.douyin.core.asyncio.sleep", record_sleep)
+    crawler = DouYinCrawler()
+    crawler.dy_client = AsyncMock()
+    crawler.dy_client.get_note_image.return_value = png_bytes()
+    crawler.capture = DouyinPageCapture.open(object())
+    aweme = two_image_aweme()
+
+    await crawler.get_aweme_images(aweme)
+
+    assert slept == []
+    ledger = tmp_path / "behavior.content_visits.jsonl"
+    visits = [
+        json.loads(line)
+        for line in ledger.read_text(encoding="utf-8").splitlines()
+        if json.loads(line).get("kind") == "visit"
+    ]
+    assert [visit["source"] for visit in visits] == ["cdn_direct", "cdn_direct"]
+    assert [visit["stage"] for visit in visits] == ["note_image", "note_image"]
+    assert [visit["asset_key"] for visit in visits] == [
+        "douyin:uri:uri-one",
+        "douyin:uri:uri-two",
+    ]
+    assert aweme["content_visit_refs"]["images"] == [visit["id"] for visit in visits]
 
 
 class SearchClient:

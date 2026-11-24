@@ -642,7 +642,6 @@ class ZhihuCrawler:
                 raise ZhihuImageDownloadError(
                     content_id, source_index, exc.code, exc.attempts
                 ) from exc
-            await asyncio.sleep(self.settings.CRAWLER_MAX_SLEEP_SEC)
             if payload is None:
                 await self.record_zhihu_content_image_failure(
                     content_id,
