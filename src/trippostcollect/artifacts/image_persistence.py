@@ -187,6 +187,51 @@ def _match_existing_image(
     return same_index[0] if len(same_index) == 1 else None
 
 
+def retain_prior_stored_local_files(
+    image_items: list[dict[str, Any]],
+    existing_images: list[dict[str, Any]],
+) -> None:
+    """复用图沿用旧行 local_file。按 source_asset_key 匹配，sha256 不一致则报错。
+
+    sha256_duplicate_sources 以本次合并结果为准。旧行没有 local_file 字典时不改。
+    """
+
+    by_key: dict[str, list[dict[str, Any]]] = {}
+    for row in existing_images:
+        if row.get("role") != "content":
+            continue
+        key = str(row.get("source_asset_key") or "")
+        if key:
+            by_key.setdefault(key, []).append(row)
+    for item in image_items:
+        if item.get("fetch_status") != "reused" or item.get("role") != "content":
+            continue
+        key = str(item.get("source_asset_key") or "")
+        matches = by_key.get(key) or []
+        if len(matches) != 1:
+            raise ImagePersistenceError(
+                f"reused content image has no unique stored row for source_asset_key {key}"
+            )
+        prior = matches[0]
+        if str(prior.get("sha256") or "") != str(item.get("sha256") or ""):
+            raise ImagePersistenceError(
+                f"reused content image sha256 does not match stored row for source_asset_key {key}"
+            )
+        prior_file = prior.get("local_file")
+        if not isinstance(prior_file, dict):
+            continue
+        new_file = item.get("local_file")
+        preserved = {
+            field: value
+            for field, value in prior_file.items()
+            if field != "sha256_duplicate_sources"
+        }
+        duplicates = new_file.get("sha256_duplicate_sources") if isinstance(new_file, dict) else None
+        if duplicates:
+            preserved["sha256_duplicate_sources"] = duplicates
+        item["local_file"] = preserved
+
+
 def prepare_image_rows(
     platform_key: str,
     image_items: list[dict[str, Any]],
@@ -196,6 +241,7 @@ def prepare_image_rows(
     media_root: Path,
     require_local_images: bool,
 ) -> list[dict[str, Any]]:
+    retain_prior_stored_local_files(image_items, existing_images)
     prepared: list[dict[str, Any]] = []
     used_ids: set[int] = set()
     for item in image_items:
@@ -230,7 +276,15 @@ def prepare_image_rows(
         raw_image_payload = {
             key: value
             for key, value in item.items()
-            if key not in {"local_path", "width", "height", "mime_type", "sha256", "local_file"}
+            if key not in {
+                "local_path",
+                "width",
+                "height",
+                "mime_type",
+                "sha256",
+                "local_file",
+                "fetch_status",
+            }
         }
         if local_metadata:
             raw_image_payload["local_file"] = local_metadata["local_file"]

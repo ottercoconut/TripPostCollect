@@ -158,6 +158,11 @@ def parse_args() -> argparse.Namespace:
             "regardless of content_detail_status."
         ),
     )
+    parser.add_argument(
+        "--keep-stored-images",
+        action="store_true",
+        help="Weibo --refresh-all only: keep stored content-image bytes and skip CDN downloads.",
+    )
     return parser.parse_args()
 
 
@@ -440,6 +445,7 @@ def build_child_command(
     output_root: Path,
     targets_path: Path,
     headless: bool,
+    keep_stored_images: bool = False,
 ) -> list[str]:
     command = [
         sys.executable,
@@ -466,9 +472,32 @@ def build_child_command(
         str(LOCAL_MEDIA_ROOT.resolve()),
         "--no-checkpoint-write",
     ]
+    if keep_stored_images:
+        command.append("--keep-stored-images")
     if not headless:
         command.append("--headed")
     return command
+
+
+def _child_image_counts(summary: dict[str, Any]) -> tuple[int, int]:
+    image = summary.get("image_materialization") if isinstance(summary, dict) else None
+    if not isinstance(image, dict):
+        return 0, 0
+    downloaded = image.get("images_downloaded", image.get("downloaded_images") or 0)
+    reused = image.get("images_reused") or 0
+    try:
+        return int(downloaded or 0), int(reused or 0)
+    except (TypeError, ValueError):
+        return 0, 0
+
+
+def _sum_child_image_counts(summaries: list[dict[str, Any]]) -> dict[str, int]:
+    downloaded = reused = 0
+    for summary in summaries:
+        one_downloaded, one_reused = _child_image_counts(summary)
+        downloaded += one_downloaded
+        reused += one_reused
+    return {"images_downloaded": downloaded, "images_reused": reused}
 
 
 def load_child_summary(path_value: str) -> dict[str, Any]:
@@ -985,6 +1014,8 @@ def _validate_repair_modes(args: argparse.Namespace) -> None:
         raise SystemExit("--dedupe-images requires --platform zhihu")
     if args.refresh_all and args.platform not in {"zhihu", "weibo"}:
         raise SystemExit("--refresh-all requires --platform zhihu or weibo")
+    if args.keep_stored_images and not (args.platform == "weibo" and args.refresh_all):
+        raise SystemExit("--keep-stored-images requires --platform weibo --refresh-all")
     if args.dedupe_images and (args.post_ids or args.max_items):
         raise SystemExit("--dedupe-images does not accept --post-id or --max-items")
 
@@ -1153,6 +1184,7 @@ def main() -> int:
             output_root=run_dir / "children" / f"batch-{index:04d}",
             targets_path=targets_path,
             headless=args.headless,
+            keep_stored_images=args.keep_stored_images,
         )
         batch_plans.append(
             {
@@ -1189,6 +1221,7 @@ def main() -> int:
         "manifest": str(manifest_path),
         "commands": str(commands_path),
         "selection": "refresh_all" if args.refresh_all else "pending_detail",
+        "keep_stored_images": bool(args.keep_stored_images),
     }
     state = FrozenExecutionState.create(
         state_path,
@@ -1210,6 +1243,9 @@ def main() -> int:
         "target_sample": targets[:10],
         "rejected_sample": rejected[:10],
         "started_at": utc_iso(),
+        "keep_stored_images": bool(args.keep_stored_images),
+        "images_downloaded": 0,
+        "images_reused": 0,
     }
     if args.refresh_all:
         base_summary["selection"] = "refresh_all"
@@ -1347,9 +1383,12 @@ def main() -> int:
             else:
                 batch_candidate_failures = child_candidate_failures(child_summary)
                 candidate_failures.extend(batch_candidate_failures)
+            downloaded_count, reused_count = _child_image_counts(child_summary)
             batch_result = {
                 "batch": batch_plan["batch"],
                 "target_count": batch_plan["target_count"],
+                "images_downloaded": downloaded_count,
+                "images_reused": reused_count,
                 "exit_code": int(child_run["returncode"]),
                 "summary": child_summary_path,
                 "import_completion_met": bool(child_summary.get("import_completion_met")),
@@ -1576,8 +1615,10 @@ def main() -> int:
                     forced_termination=forced_termination,
                     exception=interrupt_exception,
                 )
+            image_totals = _sum_child_image_counts(child_summaries)
             summary = {
                 **base_summary,
+                **image_totals,
                 "status": outcome,
                 "error": fatal_error,
                 "backup": backup,

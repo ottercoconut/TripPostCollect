@@ -99,6 +99,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--time-window-job-key", default="", help="Job key recorded in time-window errors.")
     parser.add_argument(
+        "--keep-stored-images",
+        action="store_true",
+        help="Weibo post-repair only: reuse stored content images instead of downloading them again.",
+    )
+    parser.add_argument(
         "--repair-targets-file",
         help=(
             "Frozen JSON array of repair target objects containing platform_post_id, "

@@ -27,7 +27,9 @@ from trippostcollect.runtime.visit_ledger import (
 
 # 访问来源口径与正式契约一致：L1 为页面响应或页面状态；L2 为页面内主动请求；cdn_direct 是
 # 浏览器外直连图片 CDN 的登记例外。Playwright `page.request` / `context.request`（L3）不可声明。
-KNOWN_VISIT_SOURCES = frozenset({"page_response", "page_state", "page_fetch_l2", "cdn_direct"})
+KNOWN_VISIT_SOURCES = frozenset(
+    {"page_response", "page_state", "page_fetch_l2", "cdn_direct", "local_media"}
+)
 PACED_STAGES = ("search_results", "search_page", "note_detail", "creator_profile")
 CONTINUITY_STAGES = frozenset({"search_results", "search_page"})
 DETAIL_PAUSE_END_ACTIONS = frozenset({"flip_image", "click_author", "close_overlay", "click_card", "navigate"})
@@ -69,12 +71,21 @@ class VisitPolicy:
     # #211：作者访问是详情标签上的页面响应，不另点作者名。同一标签、晚于打开详情的那次触发，
     # subject_id 等于记录上的作者 ID。小红书与知乎仍走点击作者名的 R4。
     creator_from_detail_page_response: bool = False
+    # 正文图备选规格按模式声明。discovery 不放条目，因此不接受本地复用。
+    note_image_fallbacks: Mapping[str, StageSpec] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         for mode, specs in self.stages.items():
             for stage, spec in specs.items():
                 if spec.source not in KNOWN_VISIT_SOURCES:
                     raise ValueError(f"{self.platform}:{mode}:{stage} declares unknown source {spec.source}")
+        for mode, spec in self.note_image_fallbacks.items():
+            if mode not in self.chains:
+                raise ValueError(f"{self.platform} note image fallback mode is unknown: {mode}")
+            if spec.source not in KNOWN_VISIT_SOURCES:
+                raise ValueError(
+                    f"{self.platform}:{mode}:note_image fallback declares unknown source {spec.source}"
+                )
 
     def spec(self, mode: str, stage: str) -> StageSpec:
         return self.stages[mode][stage]
@@ -196,6 +207,9 @@ VISIT_POLICIES: dict[str, VisitPolicy] = {
         },
         target_filter="",
         required_stages=weibo_required_stages,
+        note_image_fallbacks={
+            "repair": StageSpec("weibo.stored_image", "local_media"),
+        },
         record_user_field="author_platform_id",
         detail_page_role="detail",
         checks_filter_entry=False,
@@ -367,17 +381,43 @@ def _load_indexes(
     return indexes
 
 
-def _manifest_hashes(manifests: Iterable[str | Path]) -> dict[tuple[str, str], str]:
-    hashes: dict[tuple[str, str], str] = {}
+def _manifest_hashes(
+    manifests: Iterable[str | Path],
+) -> dict[tuple[str, str], tuple[str, str]]:
+    """(post_id, asset_key) -> (sha256, fetch_status)。只收录成功取得的 downloaded / reused。"""
+
+    hashes: dict[tuple[str, str], tuple[str, str]] = {}
     for raw in sorted({str(Path(path)) for path in manifests}):
         try:
             entries = parse_manifest(Path(raw).read_bytes())
         except (OSError, ImageManifestError, ValueError):
             continue
         for entry in entries:
-            if entry.fetch_status == "downloaded" and entry.sha256:
-                hashes[(str(entry.platform_post_id), str(entry.source_asset_key))] = str(entry.sha256)
+            if entry.fetch_status in {"downloaded", "reused"} and entry.sha256:
+                hashes[(str(entry.platform_post_id), str(entry.source_asset_key))] = (
+                    str(entry.sha256),
+                    entry.fetch_status,
+                )
     return hashes
+
+
+def _reject_discovery_stored_reuse(
+    indexes: Mapping[str, _LedgerIndex],
+    manifests: Iterable[str | Path],
+    report: _Report,
+) -> None:
+    """discovery 批次里出现 local_media 或 reused 即失败。repair 不走这里。"""
+
+    for index in indexes.values():
+        if any(line.get("source") == "local_media" for line in index.visits):
+            report.fail("R5", index.ledger_id)
+    for raw in sorted({str(Path(path)) for path in manifests}):
+        try:
+            entries = parse_manifest(Path(raw).read_bytes())
+        except (OSError, ImageManifestError, ValueError):
+            continue
+        if any(entry.fetch_status == "reused" for entry in entries):
+            report.fail("R5", Path(raw).name)
 
 
 def _resolve(
@@ -431,7 +471,7 @@ def _check_record(
     policy: VisitPolicy,
     mode: str,
     indexes: Mapping[str, _LedgerIndex],
-    hashes: Mapping[tuple[str, str], str],
+    hashes: Mapping[tuple[str, str], tuple[str, str]],
     report: _Report,
     used_details: Counter[str],
     used_images: Counter[str],
@@ -559,13 +599,25 @@ def _check_record(
             assert found is not None
             image_index, image = found
             asset_key = str(asset.get("source_asset_key") or "")
+            acquired = hashes.get((note_id, asset_key))
+            manifest_sha, manifest_status = acquired if acquired is not None else (None, None)
+            primary = _visit_matches(image, image_spec, "note_image")
+            fallback = policy.note_image_fallbacks.get(mode)
+            alternate = fallback is not None and _visit_matches(image, fallback, "note_image")
+            if primary and manifest_status == "downloaded":
+                status_ok = image.get("status") == 200
+            elif alternate and manifest_status == "reused":
+                status_ok = image.get("status") is None
+            else:
+                status_ok = False
             if not (
                 image_index is detail_index
-                and _visit_matches(image, image_spec, "note_image")
+                and (primary or alternate)
+                and status_ok
                 and image.get("subject_id") == note_id
-                and image.get("status") == 200
                 and image.get("asset_key") == asset_key
-                and image.get("sha256") == hashes.get((note_id, asset_key))
+                and manifest_sha is not None
+                and image.get("sha256") == manifest_sha
                 and _seq(image) > _seq(first_trigger)
             ):
                 images_ok = False
@@ -727,6 +779,8 @@ def validate_content_visits(
     if not indexes:
         report.fail("LEDGER", "<no-ledger>")
     hashes = _manifest_hashes(manifests)
+    if mode == "discovery":
+        _reject_discovery_stored_reuse(indexes, manifests, report)
     used_details: Counter[str] = Counter()
     used_images: Counter[str] = Counter()
     checked = 0

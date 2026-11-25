@@ -686,6 +686,38 @@ class PageCaptureChannel:
             **audit,
         )
 
+    def record_stored_image(
+        self,
+        *,
+        stage: str,
+        rule: str,
+        subject_id: str | None,
+        asset_key: str,
+        sha256: str,
+        page_role: str = "primary",
+    ) -> str:
+        """登记复用的本地正文图。不写 cdn_direct，不写 HTTP 状态。"""
+
+        self._raise_if_faulted()
+        if not str(asset_key or "") or not str(sha256 or ""):
+            raise ValueError("stored image visit requires asset_key and sha256")
+        seq = self.next_seq()
+        return self._write_visit(
+            seq=seq,
+            page_role=page_role,
+            at=self._clock(),
+            stage=stage,
+            source="local_media",
+            rule=rule,
+            endpoint=None,
+            status=None,
+            outcome="ok",
+            subject_id=subject_id,
+            trigger=None,
+            asset_key=asset_key,
+            sha256=sha256,
+        )
+
     async def read_state(
         self,
         page: Any,

@@ -4,11 +4,17 @@ from __future__ import annotations
 
 
 import json
+import os
 import re
+import secrets
 import sqlite3
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+
+from trippostcollect.artifacts.image_staging import MAX_IMAGE_BYTES, ImageStagingError, inspect_image_bytes
+from trippostcollect.core import paths as core_paths
 
 
 # #211：这些作者字段必须来自本次 sideUser，修复回退不得从旧行带回。
@@ -29,6 +35,200 @@ MISSING_WEIBO_AUTHOR_PLATFORM_ID = "missing_author_platform_id"
 
 def without_weibo_side_user_fields(fields: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in fields.items() if key not in WEIBO_SIDE_USER_FIELDS}
+
+
+def reject_keep_stored_images_scope(*, enabled: bool, post_repair: bool, platforms: list[str]) -> None:
+    if enabled and (not post_repair or platforms != ["weibo"]):
+        raise SystemExit("--keep-stored-images requires --post-repair and --platforms weibo")
+
+
+def load_stored_content_images(
+    db_path: str | Path | None,
+    platform_key: str,
+    post_ids: set[str],
+) -> list[dict[str, Any]]:
+    """只读查出本批可复用的正文图。同帖同键有两个 sha256 时丢掉该键。
+
+    ``sha256_duplicate_sources`` 里的键映射到同一文件。worker 不读数据库。
+    """
+
+    if not db_path or not post_ids:
+        return []
+    path = Path(db_path).expanduser().resolve()
+    if not path.is_file():
+        return []
+    grouped: dict[tuple[str, str], dict[tuple[Any, ...], dict[str, Any]]] = {}
+
+    def consider(post_id: str, key: str, entry: dict[str, Any]) -> None:
+        asset_key = str(key or "").strip()
+        if not post_id or not asset_key:
+            return
+        identity = (
+            entry["sha256"],
+            entry["local_path"],
+            entry["mime_type"],
+            entry["width"],
+            entry["height"],
+        )
+        slot = grouped.setdefault((post_id, asset_key), {})
+        slot[identity] = {**entry, "platform_post_id": post_id, "source_asset_key": asset_key}
+
+    wanted = sorted({str(value).strip() for value in post_ids if str(value).strip()})
+    uri = f"file:{path}?mode=ro"
+    with sqlite3.connect(uri, uri=True) as conn:
+        conn.row_factory = sqlite3.Row
+        for offset in range(0, len(wanted), 500):
+            batch = wanted[offset : offset + 500]
+            placeholders = ",".join("?" for _ in batch)
+            rows = conn.execute(
+                f"""
+                SELECT p.platform_post_id, i.sha256, i.local_path, i.mime_type,
+                       i.width, i.height, i.raw_image_json
+                FROM web_post_images AS i
+                JOIN web_posts AS p ON p.id = i.web_post_id
+                WHERE p.platform_key = ?
+                  AND p.platform_post_id IN ({placeholders})
+                  AND i.image_role = 'content'
+                  AND COALESCE(i.sha256, '') <> ''
+                  AND COALESCE(i.local_path, '') <> ''
+                  AND COALESCE(i.mime_type, '') <> ''
+                  AND i.width IS NOT NULL AND i.width > 0
+                  AND i.height IS NOT NULL AND i.height > 0
+                ORDER BY p.platform_post_id, i.image_index
+                """,
+                [platform_key, *batch],
+            ).fetchall()
+            for row in rows:
+                post_id = str(row["platform_post_id"] or "").strip()
+                try:
+                    raw = json.loads(str(row["raw_image_json"] or ""))
+                except (TypeError, json.JSONDecodeError):
+                    raw = {}
+                if not isinstance(raw, dict):
+                    raw = {}
+                entry = {
+                    "platform_post_id": post_id,
+                    "source_asset_key": "",
+                    "sha256": str(row["sha256"]),
+                    "local_path": str(row["local_path"]),
+                    "mime_type": str(row["mime_type"]),
+                    "width": int(row["width"]),
+                    "height": int(row["height"]),
+                }
+                consider(post_id, str(raw.get("source_asset_key") or ""), entry)
+                local_file = raw.get("local_file")
+                duplicates = local_file.get("sha256_duplicate_sources") if isinstance(local_file, dict) else None
+                if not isinstance(duplicates, list):
+                    continue
+                for duplicate in duplicates:
+                    if not isinstance(duplicate, dict):
+                        continue
+                    consider(post_id, str(duplicate.get("source_asset_key") or ""), entry)
+    kept = [
+        next(iter(identities.values()))
+        for identities in grouped.values()
+        if len(identities) == 1
+    ]
+    kept.sort(key=lambda item: (item["platform_post_id"], item["source_asset_key"]))
+    return kept
+
+
+def load_stored_image_index(path: str | Path) -> dict[tuple[str, str], dict[str, Any]]:
+    """(platform_post_id, source_asset_key) -> 清单项。读失败时返回空表。"""
+
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, list):
+        return {}
+    index: dict[tuple[str, str], dict[str, Any]] = {}
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        post_id = str(item.get("platform_post_id") or "").strip()
+        key = str(item.get("source_asset_key") or "").strip()
+        if post_id and key:
+            index[(post_id, key)] = item
+    return index
+
+
+def _symlink_component(path: Path) -> bool:
+    current = path
+    for _ in range(64):
+        if current.is_symlink():
+            return True
+        if current.parent == current:
+            return False
+        current = current.parent
+    return True
+
+
+def open_stored_image(
+    entry: dict[str, Any],
+    *,
+    project_root: Path | None = None,
+    media_root: Path | None = None,
+) -> tuple[bytes, Path] | str:
+    """校验通过时返回 (字节, 文件路径)；否则返回原因码，不含路径与正文。"""
+
+    root = project_root if project_root is not None else core_paths.PROJECT_ROOT
+    media = media_root if media_root is not None else core_paths.LOCAL_MEDIA_ROOT
+    text = str(entry.get("local_path") or "")
+    raw = Path(text)
+    if not text or raw.is_absolute():
+        return "path_escape"
+    candidate = root / raw
+    if _symlink_component(candidate):
+        return "symlink"
+    if not candidate.is_file():
+        return "missing_file"
+    try:
+        media_resolved = media.resolve(strict=True)
+        resolved = candidate.resolve(strict=True)
+    except OSError:
+        return "path_escape"
+    if resolved != media_resolved and media_resolved not in resolved.parents:
+        return "path_escape"
+    try:
+        content = resolved.read_bytes()
+    except OSError:
+        return "missing_file"
+    if not content or len(content) > MAX_IMAGE_BYTES:
+        return "size_limit"
+    if sha256(content).hexdigest() != str(entry.get("sha256") or ""):
+        return "sha256_mismatch"
+    try:
+        inspected = inspect_image_bytes(content)
+    except ImageStagingError as exc:
+        return "size_limit" if exc.code == "image_too_large" else "format_mismatch"
+    try:
+        expected_width = int(entry.get("width"))
+        expected_height = int(entry.get("height"))
+    except (TypeError, ValueError):
+        return "dimension_mismatch"
+    if (
+        inspected.mime_type != str(entry.get("mime_type") or "")
+        or inspected.width != expected_width
+        or inspected.height != expected_height
+    ):
+        return "dimension_mismatch"
+    return content, resolved
+
+
+def write_stored_content_images(path: str | Path, rows: list[dict[str, Any]]) -> Path:
+    """把旧图清单原子写到本批目录。"""
+
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload = (json.dumps(rows, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+    part = target.with_name(f".{target.name}.{secrets.token_hex(4)}.part")
+    with part.open("xb") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(part, target)
+    return target
 
 
 def load_post_repair_fallbacks(

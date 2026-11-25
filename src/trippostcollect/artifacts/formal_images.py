@@ -362,6 +362,7 @@ def materialize_formal_record_images(
     failures: list[dict[str, Any]] = []
     expected_images = 0
     downloaded_images = 0
+    stored_reused_images = 0
     validated_images = 0
     unique_images = 0
     sha256_duplicate_images = 0
@@ -450,8 +451,12 @@ def materialize_formal_record_images(
                 entry.fetch_status == "downloaded"
                 for _, entry, _, _ in matched_manifest_rows
             )
+            stored_reused_images += sum(
+                entry.fetch_status == "reused"
+                for _, entry, _, _ in matched_manifest_rows
+            )
             validated_rows: list[
-                tuple[ImageCandidate, ValidatedImage, Path, int, Path]
+                tuple[ImageCandidate, ValidatedImage, Path, int, Path, str]
             ] = []
             for candidate, entry, manifest_path, manifest_line in matched_manifest_rows:
                 _runtime_progress(progress_callback)
@@ -478,7 +483,14 @@ def materialize_formal_record_images(
                     )
                 validated_images += 1
                 validated_rows.append(
-                    (candidate, validated, manifest_path, manifest_line, staging_root)
+                    (
+                        candidate,
+                        validated,
+                        manifest_path,
+                        manifest_line,
+                        staging_root,
+                        entry.fetch_status,
+                    )
                 )
 
             for entry, manifest_path, _ in reconciliation_rows:
@@ -508,7 +520,7 @@ def materialize_formal_record_images(
             legacy_manifest_reconciliations.extend(post_reconciliations)
 
             retained_rows: list[
-                tuple[ImageCandidate, ValidatedImage, Path, int, Path]
+                tuple[ImageCandidate, ValidatedImage, Path, int, Path, str]
             ] = []
             retained_by_sha256: dict[str, int] = {}
             duplicate_sources_by_retained: dict[int, list[Sha256DuplicateSource]] = {}
@@ -518,6 +530,7 @@ def materialize_formal_record_images(
                 manifest_path,
                 manifest_line,
                 staging_root,
+                fetch_status,
             ) in validated_rows:
                 retained_position = retained_by_sha256.get(validated.sha256)
                 if retained_position is None:
@@ -529,6 +542,7 @@ def materialize_formal_record_images(
                             manifest_path,
                             manifest_line,
                             staging_root,
+                            fetch_status,
                         )
                     )
                     continue
@@ -537,6 +551,7 @@ def materialize_formal_record_images(
                     _,
                     retained_manifest_path,
                     retained_manifest_line,
+                    _,
                     _,
                 ) = retained_rows[retained_position]
                 duplicate = Sha256DuplicateSource(
@@ -581,6 +596,7 @@ def materialize_formal_record_images(
                 manifest_path,
                 manifest_line,
                 staging_root,
+                fetch_status,
             ) in enumerate(retained_rows):
                 _runtime_progress(progress_callback)
                 persistence_candidate = replace(candidate, source_index=retained_index)
@@ -593,6 +609,7 @@ def materialize_formal_record_images(
                 )
                 promoted = replace(
                     promoted,
+                    fetch_status=fetch_status,
                     manifest_source_index=candidate.source_index,
                     manifest_path=_project_relative_evidence_path(manifest_path, root),
                     manifest_line=manifest_line,
@@ -673,6 +690,8 @@ def materialize_formal_record_images(
         "complete_posts": len(complete_identities),
         "expected_images": expected_images,
         "downloaded_images": downloaded_images,
+        "images_downloaded": downloaded_images,
+        "images_reused": stored_reused_images,
         "validated_images": validated_images,
         "unique_images": unique_images,
         "sha256_duplicate_images": sha256_duplicate_images,
