@@ -745,6 +745,7 @@ _EVIDENCE_KEYS = {
     "final_page_kind",
     "show_responses_unmatched",
     "show_request_failures",
+    "show_response_pending",
     "waited_seconds",
 }
 _UNMATCHED_KEYS = {"status", "ok", "id_matched", "body_error"}
@@ -1074,8 +1075,43 @@ async def test_bad_identity_unavailable_evidence_is_empty_observation(monkeypatc
         "final_page_kind": None,
         "show_responses_unmatched": [],
         "show_request_failures": 0,
+        "show_response_pending": None,
         "waited_seconds": None,
     }
+
+
+@pytest.mark.asyncio
+async def test_pending_show_body_is_visible_in_evidence(monkeypatch, tmp_path):
+    page, capture, _context = _bind(monkeypatch, tmp_path)
+    pages = WeiboDetailPages(capture, page)
+    pages._after_seq = capture.channel.ledger.last_seq
+    monkeypatch.setattr(
+        capture.channel, "latest_pending_seq", lambda _rule: capture.channel.ledger.last_seq + 1,
+    )
+    assert pages._attempt_evidence("525")["show_response_pending"] is True
+    monkeypatch.setattr(capture.channel, "latest_pending_seq", lambda _rule: 0)
+    assert pages._attempt_evidence("525")["show_response_pending"] is False
+    await capture.aclose()
+
+
+@pytest.mark.asyncio
+async def test_faulted_channel_does_not_replace_the_candidate_failure(monkeypatch, tmp_path):
+    from trippostcollect.runtime.page_capture import CaptureChannelError
+
+    page, capture, _context = _bind(monkeypatch, tmp_path)
+    pages = WeiboDetailPages(capture, page)
+    pages._after_seq = 0
+
+    def broken(*_args, **_kwargs):
+        raise CaptureChannelError("faulted")
+
+    monkeypatch.setattr(capture.channel, "drain", broken)
+    error = pages._candidate("525", DETAIL_TAB_NOT_OPENED)
+    assert error.code == DETAIL_TAB_NOT_OPENED
+    assert error.runtime_blocking is False
+    assert error.evidence["show_responses_unmatched"] == []
+    assert error.evidence["show_response_pending"] is None
+    await capture.aclose()
 
 
 def _video_show() -> dict:

@@ -35,7 +35,9 @@ from trippostcollect.platforms.weibo.search_page import (
     WEIBO_VISITOR_URL_RE,
     blocking_code_for_page,
 )
-from trippostcollect.runtime.page_capture import CaptureFailure, CapturedResponse
+from trippostcollect.runtime.page_capture import (
+    CaptureChannelError, CaptureFailure, CapturedResponse,
+)
 
 
 logger = logging.getLogger("TripPostCollect")
@@ -174,6 +176,7 @@ def public_detail_evidence(evidence: Any) -> dict[str, Any] | None:
         "final_page_kind",
         "show_responses_unmatched",
         "show_request_failures",
+        "show_response_pending",
         "waited_seconds",
     )):
         return None
@@ -195,6 +198,7 @@ def public_detail_evidence(evidence: Any) -> dict[str, Any] | None:
     kind = evidence.get("final_page_kind")
     nav = evidence.get("navigation_status")
     waited = evidence.get("waited_seconds")
+    pending = evidence.get("show_response_pending")
     failures = evidence.get("show_request_failures")
     waited_value = None
     if isinstance(waited, (int, float)) and not isinstance(waited, bool):
@@ -205,6 +209,7 @@ def public_detail_evidence(evidence: Any) -> dict[str, Any] | None:
         "final_page_kind": kind if kind in {"detail", "login", "error_page", "search", "other", "closed"} else None,
         "show_responses_unmatched": unmatched,
         "show_request_failures": failure_count,
+        "show_response_pending": pending if isinstance(pending, bool) else None,
         "waited_seconds": waited_value,
     }
 
@@ -646,9 +651,11 @@ class WeiboDetailPages:
 
         unmatched: list[dict[str, Any]] = []
         failures = 0
+        pending: bool | None = None
         after_seq = self._after_seq
         if after_seq is not None:
-            for item in self.channel.drain(WEIBO_SHOW_RULE.name, after_seq=after_seq):
+            items, pending = self._observed_show(after_seq)
+            for item in items:
                 if isinstance(item, CaptureFailure):
                     failures += 1
                     continue
@@ -669,8 +676,19 @@ class WeiboDetailPages:
             "final_page_kind": _final_page_kind(self._opened),
             "show_responses_unmatched": unmatched,
             "show_request_failures": failures,
+            "show_response_pending": pending,
             "waited_seconds": None if waited is None else float(round(float(waited), 1)),
         }
+
+    def _observed_show(self, after_seq: int) -> tuple[list[Any], bool | None]:
+        """证据只是附带信息：通道已故障时留空，让原来的候选失败照常抛出。"""
+
+        rule = WEIBO_SHOW_RULE.name
+        try:
+            items = self.channel.drain(rule, after_seq=after_seq)
+            return items, self.channel.latest_pending_seq(rule) > after_seq
+        except CaptureChannelError:
+            return [], None
 
     def _candidate(self, mid: str, code: str, *, retryable: bool = True) -> WeiboDetailFetchError:
         evidence = self._attempt_evidence(mid) if code in _EVIDENCE_CODES else None

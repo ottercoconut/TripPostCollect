@@ -498,6 +498,7 @@ def _clean_evidence(raw: Any) -> dict[str, Any] | None:
     nav = raw.get("navigation_status")
     waited = raw.get("waited_seconds")
     failures = raw.get("show_request_failures")
+    pending = raw.get("show_response_pending")
     waited_value = None
     if isinstance(waited, (int, float)) and not isinstance(waited, bool):
         waited_value = float(round(float(waited), 1))
@@ -506,6 +507,7 @@ def _clean_evidence(raw: Any) -> dict[str, Any] | None:
         "final_page_kind",
         "show_responses_unmatched",
         "show_request_failures",
+        "show_response_pending",
         "waited_seconds",
     )):
         return None
@@ -516,6 +518,7 @@ def _clean_evidence(raw: Any) -> dict[str, Any] | None:
         "show_request_failures": (
             failures if isinstance(failures, int) and not isinstance(failures, bool) and failures >= 0 else 0
         ),
+        "show_response_pending": pending if isinstance(pending, bool) else None,
         "waited_seconds": waited_value,
     }
 
