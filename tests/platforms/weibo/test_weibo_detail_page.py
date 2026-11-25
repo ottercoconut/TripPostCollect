@@ -10,6 +10,7 @@ from pathlib import Path
 
 from PIL import Image
 import httpx
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 import pytest
 
 from support.page_events import FakeContext, FakePage
@@ -22,6 +23,7 @@ from trippostcollect.platforms.weibo.detail_page import (
     DETAIL_CARD_MISSING,
     DETAIL_CONTENT_EMPTY,
     DETAIL_SHOW_MISSING,
+    DETAIL_TAB_NOT_OPENED,
     DETAIL_UNAVAILABLE,
     LOGIN_REQUIRED,
     RATE_LIMITED,
@@ -172,7 +174,18 @@ def _detail_load(page: FakePage):
     async def wait_for_load_state(state, timeout=None):
         for spec in list(getattr(page, "payloads", []) or []):
             request = page.request("GET", spec["url"], resource_type="xhr")
-            page.respond(request, status=spec.get("status", 200), body=json.dumps(spec["json"]).encode())
+            if spec.get("failure"):
+                page.fail(request, str(spec["failure"]))
+                continue
+            kwargs: dict = {"status": spec.get("status", 200)}
+            if spec.get("body_error") is not None:
+                kwargs["body_error"] = spec["body_error"]
+                kwargs["body"] = spec.get("body", b"")
+            elif "body" in spec and "json" not in spec:
+                kwargs["body"] = spec["body"]
+            else:
+                kwargs["body"] = json.dumps(spec["json"]).encode()
+            page.respond(request, **kwargs)
         page.payloads = []
 
     async def wait_for_timeout(timeout):
@@ -720,3 +733,341 @@ async def test_time_window_round_passes_visit_gate(monkeypatch, tmp_path):
         stop_event=stopped[-1],
     )
     assert result["content_visit_ok"] is True, result
+
+
+_EVIDENCE_KEYS = {
+    "navigation_status",
+    "final_page_kind",
+    "show_responses_unmatched",
+    "show_request_failures",
+    "waited_seconds",
+}
+_UNMATCHED_KEYS = {"status", "ok", "id_matched", "body_error"}
+
+
+@pytest.mark.parametrize(
+    ("url", "closed", "kind"),
+    [
+        ("https://weibo.com/88/525", False, "detail"),
+        ("https://www.weibo.com/88/525/", False, "detail"),
+        ("https://weibo.com/88/Abc12?from=page", False, "detail"),
+        ("https://passport.weibo.com/sso/signin", False, "login"),
+        ("https://weibo.com/visitor", False, "login"),
+        ("https://visitor.weibo.com/visitor/visitor?a=1", False, "login"),
+        ("https://weibo.com/404", False, "error_page"),
+        ("https://weibo.com/sorry?code=1", False, "error_page"),
+        ("https://weibo.com/error/unavailable", False, "error_page"),
+        ("https://weibo.com/pagenotfound", False, "error_page"),
+        ("https://s.weibo.com/weibo?q=qingdao&nodup=1", False, "search"),
+        ("https://weibo.com/u/88", False, "other"),
+        ("https://weibo.com/88", False, "other"),
+        ("https://weibo.com/captcha", False, "other"),
+        ("http://weibo.com/88/525", False, "other"),
+        ("about:blank", False, "other"),
+        ("https://weibo.com/88/525", True, "closed"),
+        (None, True, "closed"),
+        (None, False, None),
+        ("", False, None),
+    ],
+)
+def test_classify_final_page_kind(url, closed, kind):
+    from trippostcollect.platforms.weibo.detail_page import classify_final_page_kind
+
+    assert classify_final_page_kind(url, closed=closed) == kind
+
+
+def _assert_evidence_shape(evidence: dict) -> None:
+    assert set(evidence) == _EVIDENCE_KEYS
+    assert isinstance(evidence["show_request_failures"], int)
+    assert not isinstance(evidence["show_request_failures"], bool)
+    waited = evidence["waited_seconds"]
+    if waited is not None:
+        assert isinstance(waited, float)
+        assert waited == round(waited, 1)
+    for item in evidence["show_responses_unmatched"]:
+        assert set(item) == _UNMATCHED_KEYS
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("spec", "expected"),
+    [
+        (
+            {"url": SHOW, "status": 400, "json": {"ok": 0, "text_raw": "BODYMARKER"}},
+            {"status": 400, "ok": 0, "id_matched": False, "body_error": ""},
+        ),
+        (
+            {"url": SHOW, "status": 404, "json": {"ok": 0}},
+            {"status": 404, "ok": 0, "id_matched": False, "body_error": ""},
+        ),
+        (
+            {"url": SHOW, "status": 200, "json": {"ok": 0, "text_raw": "BODYMARKER"}},
+            {"status": 200, "ok": 0, "id_matched": False, "body_error": ""},
+        ),
+        (
+            {"url": SHOW, "status": 200, "json": {"ok": 1, "idstr": "999", "text_raw": "BODYMARKER"}},
+            {"status": 200, "ok": 1, "id_matched": False, "body_error": ""},
+        ),
+        (
+            {
+                "url": SHOW,
+                "status": 200,
+                "body_error": json.JSONDecodeError("BODYMARKER", "doc", 0),
+            },
+            {"status": 200, "ok": None, "id_matched": False, "body_error": "JSONDecodeError"},
+        ),
+    ],
+)
+async def test_unmatched_show_keeps_detail_show_missing(monkeypatch, tmp_path, spec, expected):
+    page, capture, _context = _bind(monkeypatch, tmp_path)
+    page.detail_url = "https://weibo.com/UIDMARKER9F3C/525?token=QUERYMARKER"
+    page.plan([spec])
+    timeouts: list[float] = []
+    original = capture.channel.wait_for
+
+    async def wrapped(rule_name, *, after_seq, predicate, timeout):
+        timeouts.append(timeout)
+        return await original(rule_name, after_seq=after_seq, predicate=predicate, timeout=timeout)
+
+    capture.channel.wait_for = wrapped
+    try:
+        with pytest.raises(WeiboDetailFetchError) as raised:
+            await WeiboDetailPages(capture, page).open_from_search(_candidate())
+    finally:
+        await capture.aclose()
+    exc = raised.value
+    assert exc.code == DETAIL_SHOW_MISSING
+    assert exc.attempts == 3
+    assert exc.retryable is False
+    assert exc.runtime_blocking is False
+    assert timeouts == [detail_mod.DETAIL_RESPONSE_TIMEOUT_SECONDS] * 3
+    evidence = exc.evidence
+    _assert_evidence_shape(evidence)
+    assert evidence["navigation_status"] is None
+    assert evidence["final_page_kind"] == "detail"
+    assert evidence["show_request_failures"] == 0
+    assert evidence["waited_seconds"] is not None
+    assert evidence["waited_seconds"] < 2
+    assert evidence["show_responses_unmatched"] == [expected]
+    blob = json.dumps(evidence, ensure_ascii=False)
+    assert "http" not in blob
+    assert "UIDMARKER" not in blob
+    assert "BODYMARKER" not in blob
+    assert "QUERYMARKER" not in blob
+    assert "COOKIE" not in blob
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status,code", [(401, LOGIN_REQUIRED), (403, LOGIN_REQUIRED), (429, RATE_LIMITED)])
+async def test_show_blocking_status_stays_runtime_without_missing_evidence(monkeypatch, tmp_path, status, code):
+    page, capture, _context = _bind(monkeypatch, tmp_path)
+    page.plan([{"url": SHOW, "status": status, "json": {"ok": 0, "text_raw": "BODYMARKER"}}])
+    try:
+        with pytest.raises(WeiboDetailFetchError) as raised:
+            await WeiboDetailPages(capture, page).open_from_search(_candidate())
+    finally:
+        await capture.aclose()
+    assert raised.value.runtime_blocking is True
+    assert raised.value.code == code
+    assert raised.value.code != DETAIL_SHOW_MISSING
+    assert raised.value.attempts == 1
+    assert raised.value.evidence == {}
+
+
+@pytest.mark.asyncio
+async def test_retry_keeps_only_the_last_attempt_evidence(monkeypatch, tmp_path):
+    page, capture, _context = _bind(monkeypatch, tmp_path)
+    page.plan(
+        [{"url": SHOW, "status": 404, "json": {"ok": 0}}],
+        [{"url": SHOW, "status": 404, "json": {"ok": 0}}],
+        [{"url": SHOW, "status": 400, "json": {"ok": 0, "text_raw": "BODYMARKER"}}],
+    )
+    try:
+        with pytest.raises(WeiboDetailFetchError) as raised:
+            await WeiboDetailPages(capture, page).open_from_search(_candidate())
+    finally:
+        await capture.aclose()
+    evidence = raised.value.evidence
+    assert raised.value.code == DETAIL_SHOW_MISSING
+    assert raised.value.attempts == 3
+    assert evidence["show_responses_unmatched"] == [
+        {"status": 400, "ok": 0, "id_matched": False, "body_error": ""},
+    ]
+    assert "BODYMARKER" not in json.dumps(evidence, ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+async def test_unmatched_show_keeps_at_most_five_and_counts_request_failures(monkeypatch, tmp_path):
+    page, capture, _context = _bind(monkeypatch, tmp_path)
+    statuses = [400, 404, 410, 422, 451, 500]
+    specs = [
+        {"url": SHOW, "failure": "net::ERR_FAILED"},
+        *({"url": SHOW, "status": status, "json": {"ok": 0}} for status in statuses),
+    ]
+    page.plan(specs)
+    try:
+        with pytest.raises(WeiboDetailFetchError) as raised:
+            await WeiboDetailPages(capture, page).open_from_search(_candidate())
+    finally:
+        await capture.aclose()
+    evidence = raised.value.evidence
+    assert raised.value.code == DETAIL_SHOW_MISSING
+    assert evidence["show_request_failures"] == 1
+    assert [item["status"] for item in evidence["show_responses_unmatched"]] == statuses[:5]
+    assert len(evidence["show_responses_unmatched"]) == 5
+
+
+@pytest.mark.asyncio
+async def test_navigate_show_missing_records_navigation_status(monkeypatch, tmp_path):
+    page, capture, context = _bind(monkeypatch, tmp_path)
+
+    def new_page(url="about:blank", *, page=None):
+        opened = _detail_load(FakeContext.new_page(context, url, page=page))
+        opened.nav_status = 200
+        opened.payloads = []
+        return opened
+
+    context.new_page = new_page
+    pages = WeiboDetailPages(capture, page)
+    with pytest.raises(WeiboDetailFetchError) as raised:
+        await pages.open_by_navigate("https://weibo.com/88/525")
+    evidence = raised.value.evidence
+    assert raised.value.code == DETAIL_SHOW_MISSING
+    assert raised.value.attempts == 1
+    assert raised.value.retryable is True
+    _assert_evidence_shape(evidence)
+    assert evidence["navigation_status"] == 200
+    assert evidence["final_page_kind"] == "detail"
+    assert evidence["show_responses_unmatched"] == []
+    assert evidence["show_request_failures"] == 0
+    assert evidence["waited_seconds"] is not None
+
+
+@pytest.mark.asyncio
+async def test_navigate_unavailable_records_status_without_extra_wait(monkeypatch, tmp_path):
+    page, capture, context = _bind(monkeypatch, tmp_path)
+    waits: list[float] = []
+
+    def new_page(url="about:blank", *, page=None):
+        opened = _detail_load(FakeContext.new_page(context, url, page=page))
+        opened.nav_status = 404
+        original = capture.channel.wait_for
+
+        async def wrapped(rule_name, *, after_seq, predicate, timeout):
+            waits.append(timeout)
+            return await original(rule_name, after_seq=after_seq, predicate=predicate, timeout=timeout)
+
+        capture.channel.wait_for = wrapped
+        return opened
+
+    context.new_page = new_page
+    pages = WeiboDetailPages(capture, page)
+    with pytest.raises(WeiboDetailFetchError) as raised:
+        await pages.open_by_navigate("https://weibo.com/88/525")
+    assert raised.value.code == DETAIL_UNAVAILABLE
+    assert raised.value.retryable is False
+    assert waits == []
+    evidence = raised.value.evidence
+    assert evidence["navigation_status"] == 404
+    assert evidence["final_page_kind"] == "detail"
+    assert evidence["waited_seconds"] is None
+    assert evidence["show_responses_unmatched"] == []
+
+
+@pytest.mark.asyncio
+async def test_tab_not_opened_records_login_page_kind(monkeypatch, tmp_path):
+    page, capture, context = _bind(monkeypatch, tmp_path)
+
+    def new_page(url="about:blank", *, page=None):
+        opened = _detail_load(FakeContext.new_page(context, url, page=page))
+
+        async def goto(target, wait_until=None, timeout=None):
+            opened.url = "https://passport.weibo.com/sso/signin?ticket=QUERYMARKER"
+            raise PlaywrightTimeoutError("timeout")
+
+        opened.goto = goto
+        return opened
+
+    context.new_page = new_page
+    pages = WeiboDetailPages(capture, page)
+    with pytest.raises(WeiboDetailFetchError) as raised:
+        await pages.open_by_navigate("https://weibo.com/88/525")
+    assert raised.value.code == DETAIL_TAB_NOT_OPENED
+    assert raised.value.retryable is True
+    evidence = raised.value.evidence
+    assert evidence["navigation_status"] is None
+    assert evidence["final_page_kind"] == "login"
+    assert evidence["waited_seconds"] is None
+    assert "QUERYMARKER" not in json.dumps(evidence, ensure_ascii=False)
+    assert "http" not in json.dumps(evidence, ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("detail_url", "kind"),
+    [
+        ("https://s.weibo.com/weibo?q=QUERYMARKER", "search"),
+        ("https://weibo.com/404", "error_page"),
+        ("https://weibo.com/u/UIDMARKER9F3C", "other"),
+    ],
+)
+async def test_show_missing_page_kind_follows_final_address(monkeypatch, tmp_path, detail_url, kind):
+    page, capture, _context = _bind(monkeypatch, tmp_path)
+    page.detail_url = detail_url
+    page.plan([])
+    pages = WeiboDetailPages(capture, page)
+
+    async def dwell(detail_page, mid):
+        if kind == "closed":
+            detail_page.closed = True
+
+    pages._dwell = dwell
+    try:
+        with pytest.raises(WeiboDetailFetchError) as raised:
+            await pages.open_from_search(_candidate())
+    finally:
+        await capture.aclose()
+    evidence = raised.value.evidence
+    assert raised.value.code == DETAIL_SHOW_MISSING
+    assert evidence["final_page_kind"] == kind
+    assert evidence["navigation_status"] is None
+    blob = json.dumps(evidence, ensure_ascii=False)
+    assert "QUERYMARKER" not in blob
+    assert "UIDMARKER" not in blob
+    assert "http" not in blob
+
+
+@pytest.mark.asyncio
+async def test_show_missing_closed_page_kind(monkeypatch, tmp_path):
+    page, capture, _context = _bind(monkeypatch, tmp_path)
+    page.plan([])
+    pages = WeiboDetailPages(capture, page)
+
+    async def dwell(detail_page, mid):
+        detail_page.closed = True
+
+    pages._dwell = dwell
+    try:
+        with pytest.raises(WeiboDetailFetchError) as raised:
+            await pages.open_from_search(_candidate())
+    finally:
+        await capture.aclose()
+    assert raised.value.code == DETAIL_SHOW_MISSING
+    assert raised.value.evidence["final_page_kind"] == "closed"
+
+
+@pytest.mark.asyncio
+async def test_bad_identity_unavailable_evidence_is_empty_observation(monkeypatch, tmp_path):
+    page, capture, _context = _bind(monkeypatch, tmp_path)
+    pages = WeiboDetailPages(capture, page)
+    with pytest.raises(WeiboDetailFetchError) as raised:
+        await pages.open_by_navigate("https://example.test/not-weibo")
+    assert raised.value.code == DETAIL_UNAVAILABLE
+    assert raised.value.retryable is False
+    assert raised.value.evidence == {
+        "navigation_status": None,
+        "final_page_kind": None,
+        "show_responses_unmatched": [],
+        "show_request_failures": 0,
+        "waited_seconds": None,
+    }

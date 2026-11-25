@@ -9,6 +9,7 @@ import asyncio
 import inspect
 import logging
 import random
+import time
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
@@ -28,11 +29,13 @@ from trippostcollect.platforms.weibo.parser import (
     side_user_of,
 )
 from trippostcollect.platforms.weibo.search_page import (
+    WEIBO_PASSPORT_URL_RE,
     WEIBO_SHOW_RULE,
     WEIBO_SIDE_USER_RULE,
+    WEIBO_VISITOR_URL_RE,
     blocking_code_for_page,
 )
-from trippostcollect.runtime.page_capture import CapturedResponse
+from trippostcollect.runtime.page_capture import CaptureFailure, CapturedResponse
 
 
 logger = logging.getLogger("TripPostCollect")
@@ -54,6 +57,22 @@ LOGIN_REQUIRED = "login_required"
 RATE_LIMITED = "rate_limited"
 BLOCKED_OR_FORBIDDEN = "blocked_or_forbidden"
 CAPTCHA_DETECTED = "captcha_detected"
+
+# 这三种失败多带一份证据；判定、重试和阻断仍走原来的码。
+_EVIDENCE_CODES = frozenset({
+    DETAIL_TAB_NOT_OPENED,
+    DETAIL_SHOW_MISSING,
+    DETAIL_UNAVAILABLE,
+})
+_DETAIL_HOSTS = frozenset({"weibo.com", "www.weibo.com"})
+_ERROR_FIRST_SEGMENTS = frozenset({"sorry", "404", "error", "pagenotfound"})
+# 两段路径里这些首段不是作者 uid：资料页 /u/{uid}、专题、接口和错误页。
+_NON_UID_FIRST = frozenset({
+    "u", "n", "p", "ajax", "tv", "status", "login", "visitor",
+    "sorry", "404", "error", "pagenotfound", "captcha", "verify",
+    "challenge", "security", "frequency", "abuse",
+})
+_UNMATCHED_LIMIT = 5
 
 SHOW_STATUS_CODES = {
     401: LOGIN_REQUIRED,
@@ -97,6 +116,81 @@ def _navigation_status(response: Any) -> int | None:
     return status
 
 
+def classify_final_page_kind(url: str | None, *, closed: bool = False) -> str | None:
+    """最终地址的类型。只返回类型名，不返回地址。
+
+    - ``closed``：页面已关闭。
+    - ``login``：与搜索页同一组 passport / visitor 正则。
+    - ``search``：主机是 ``s.weibo.com``。
+    - ``error_page``：路径首段是 ``sorry``、``404``、``error`` 或 ``pagenotfound``。
+    - ``detail``：``https://weibo.com`` 或 ``www.weibo.com`` 上恰好 ``/{uid}/{mid 或 mblogid}``。
+      uid 与帖子段都是字母数字；``/u/``、``/n/`` 等保留首段不是详情。
+    - ``other``：其余能读到的地址。
+    - ``None``：没有地址。
+    """
+
+    if closed:
+        return "closed"
+    if not isinstance(url, str) or not url.strip():
+        return None
+    text = url.strip()
+    if WEIBO_PASSPORT_URL_RE.search(text) or WEIBO_VISITOR_URL_RE.search(text):
+        return "login"
+    parts = urlsplit(text)
+    host = (parts.hostname or "").lower()
+    if host == "s.weibo.com":
+        return "search"
+    segments = [segment for segment in parts.path.split("/") if segment]
+    if segments and segments[0].lower() in _ERROR_FIRST_SEGMENTS:
+        return "error_page"
+    if (
+        parts.scheme == "https"
+        and host in _DETAIL_HOSTS
+        and len(segments) == 2
+        and _detail_uid(segments[0])
+        and _detail_post_id(segments[1])
+    ):
+        return "detail"
+    return "other"
+
+
+def _detail_uid(segment: str) -> bool:
+    return bool(segment) and segment.isalnum() and segment.lower() not in _NON_UID_FIRST
+
+
+def _detail_post_id(segment: str) -> bool:
+    """mid（纯数字）或 mblogid（字母数字）。"""
+
+    return bool(segment) and segment.isascii() and segment.isalnum()
+
+
+def _top_ok(payload: Any) -> int | bool | None:
+    """JSON 顶层 ``ok``。只保留 int、bool；其他类型记为空。"""
+
+    if not isinstance(payload, dict) or "ok" not in payload:
+        return None
+    value = payload["ok"]
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value
+    return None
+
+
+def _final_page_kind(page: Any) -> str | None:
+    if page is None:
+        return None
+    if _page_closed(page):
+        return "closed"
+    try:
+        url = getattr(page, "url", None)
+    except Exception:
+        return None
+    if not isinstance(url, str):
+        return None
+    return classify_final_page_kind(url)
+
+
 def _repair_identity(url: str) -> tuple[str, str]:
     """``https://weibo.com/{作者平台 ID}/{mid}``。不符合时两个字段都为空。"""
 
@@ -135,10 +229,14 @@ class WeiboDetailPages:
         self.search_page = search_page
         self.channel = capture.channel
         self._opened: Any = None
+        self._nav_status: int | None = None
+        self._after_seq: int | None = None
+        self._waited_show: float | None = None
 
     async def open_from_search(self, candidate: Any) -> WeiboOpened:
         mid = str(getattr(candidate, "mid", "") or "")
         last_code = DETAIL_SHOW_MISSING
+        last_evidence: dict[str, Any] = {}
         for attempt in range(1, DETAIL_ATTEMPTS + 1):
             try:
                 return await self._open_once(candidate)
@@ -147,6 +245,7 @@ class WeiboDetailPages:
                     exc.attempts = attempt
                     raise
                 last_code = exc.code
+                last_evidence = dict(exc.evidence)
                 logger.warning(
                     "[WeiboDetailPages] detail attempt failed mid=%s attempt=%s code=%s",
                     mid,
@@ -155,11 +254,18 @@ class WeiboDetailPages:
                 )
                 if attempt < DETAIL_ATTEMPTS and DETAIL_RETRY_PAUSE_SECONDS > 0:
                     await asyncio.sleep(DETAIL_RETRY_PAUSE_SECONDS)
-        raise WeiboDetailFetchError(mid, last_code, attempts=DETAIL_ATTEMPTS, retryable=False)
+        raise WeiboDetailFetchError(
+            mid,
+            last_code,
+            attempts=DETAIL_ATTEMPTS,
+            retryable=False,
+            evidence=last_evidence,
+        )
 
     async def open_by_navigate(self, url: str) -> WeiboOpened:
         """修复链：navigate 打开 ``https://weibo.com/{uid}/{mid}``，截获规则与点击相同。"""
 
+        self._reset_attempt_evidence()
         author_id, mid = _repair_identity(url)
         if not author_id or not mid:
             raise self._candidate(mid, DETAIL_UNAVAILABLE, retryable=False)
@@ -170,6 +276,7 @@ class WeiboDetailPages:
             self._opened = detail_page
             self.channel.attach(detail_page, "detail")
             after_seq = self.channel.ledger.last_seq
+            self._after_seq = after_seq
             trigger_id = self.channel.action(
                 "navigate",
                 page_role="detail",
@@ -184,6 +291,7 @@ class WeiboDetailPages:
                     raise self._runtime(mid, BROWSER_TARGET_CLOSED) from exc
                 raise self._candidate(mid, DETAIL_TAB_NOT_OPENED) from exc
             status = _navigation_status(response)
+            self._nav_status = status
             if status in (401, 403):
                 raise self._runtime(mid, LOGIN_REQUIRED)
             if status == 429:
@@ -212,6 +320,7 @@ class WeiboDetailPages:
 
     async def _open_once(self, candidate: Any) -> WeiboOpened:
         mid = str(getattr(candidate, "mid", "") or "")
+        self._reset_attempt_evidence()
         self._raise_if_closed(self.search_page)
         self._opened = None
         detail_page: Any = None
@@ -309,6 +418,7 @@ class WeiboDetailPages:
         if link is None:
             raise self._candidate(mid, DETAIL_CARD_MISSING)
         after_seq = self.channel.ledger.last_seq
+        self._after_seq = after_seq
         trigger_id = self.channel.action(
             "click_card",
             page_role="primary",
@@ -352,12 +462,16 @@ class WeiboDetailPages:
         return None
 
     async def _wait_show(self, mid: str, after_seq: int) -> CapturedResponse | None:
-        captured = await self.channel.wait_for(
-            WEIBO_SHOW_RULE.name,
-            after_seq=after_seq,
-            predicate=lambda item: self._show_wanted(item, mid),
-            timeout=DETAIL_RESPONSE_TIMEOUT_SECONDS,
-        )
+        started = time.monotonic()
+        try:
+            captured = await self.channel.wait_for(
+                WEIBO_SHOW_RULE.name,
+                after_seq=after_seq,
+                predicate=lambda item: self._show_wanted(item, mid),
+                timeout=DETAIL_RESPONSE_TIMEOUT_SECONDS,
+            )
+        finally:
+            self._waited_show = time.monotonic() - started
         return captured if isinstance(captured, CapturedResponse) else None
 
     async def _wait_side_user(self, user_id: str, after_seq: int) -> CapturedResponse | None:
@@ -476,8 +590,46 @@ class WeiboDetailPages:
         if _page_closed(page):
             raise self._runtime("", BROWSER_TARGET_CLOSED)
 
+    def _reset_attempt_evidence(self) -> None:
+        self._nav_status = None
+        self._after_seq = None
+        self._waited_show = None
+        self._opened = None
+
+    def _attempt_evidence(self, mid: str) -> dict[str, Any]:
+        """只读本轮已经截获的 show。不发请求，也不再等待。"""
+
+        unmatched: list[dict[str, Any]] = []
+        failures = 0
+        after_seq = self._after_seq
+        if after_seq is not None:
+            for item in self.channel.drain(WEIBO_SHOW_RULE.name, after_seq=after_seq):
+                if isinstance(item, CaptureFailure):
+                    failures += 1
+                    continue
+                if not isinstance(item, CapturedResponse) or self._show_wanted(item, mid):
+                    continue
+                if len(unmatched) >= _UNMATCHED_LIMIT:
+                    continue
+                status = item.status
+                unmatched.append({
+                    "status": status if isinstance(status, int) and not isinstance(status, bool) else None,
+                    "ok": _top_ok(item.json),
+                    "id_matched": bool(show_matches(item.json, mid)),
+                    "body_error": item.body_error if isinstance(item.body_error, str) else "",
+                })
+        waited = self._waited_show
+        return {
+            "navigation_status": self._nav_status,
+            "final_page_kind": _final_page_kind(self._opened),
+            "show_responses_unmatched": unmatched,
+            "show_request_failures": failures,
+            "waited_seconds": None if waited is None else float(round(float(waited), 1)),
+        }
+
     def _candidate(self, mid: str, code: str, *, retryable: bool = True) -> WeiboDetailFetchError:
-        return WeiboDetailFetchError(mid, code, attempts=1, retryable=retryable)
+        evidence = self._attempt_evidence(mid) if code in _EVIDENCE_CODES else None
+        return WeiboDetailFetchError(mid, code, attempts=1, retryable=retryable, evidence=evidence)
 
     def _runtime(self, mid: str, code: str) -> WeiboDetailFetchError:
         return WeiboDetailFetchError(mid, code, attempts=1, runtime_blocking=True)
