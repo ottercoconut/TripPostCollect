@@ -215,6 +215,7 @@ def weibo_input_readers(*, environ: Mapping[str, str] = os.environ):
 
     return SimpleNamespace(
         post_repair=lambda: environ.get("TRIPPOSTCOLLECT_POST_REPAIR") == "1",
+        stored_images_path=lambda: environ.get("TRIPPOSTCOLLECT_WEIBO_STORED_IMAGES", "").strip(),
         detail_timeout=lambda: max(
             5_000, int(environ.get("TRIPPOSTCOLLECT_WEIBO_BROWSER_DETAIL_TIMEOUT_MS", "30000")),
         ),

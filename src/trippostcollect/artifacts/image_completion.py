@@ -114,7 +114,10 @@ def verify_image_artifacts(
             raise ValueError("image promotion mode does not match runner mode")
         if candidate_posts != complete_posts:
             raise ValueError("complete post count does not match candidates")
-        if expected_images != downloaded_images or expected_images != validated_images:
+        images_reused = int(image.get("images_reused") or 0)
+        if "images_downloaded" in image and int(image.get("images_downloaded") or 0) != downloaded_images:
+            raise ValueError("images_downloaded does not match downloaded_images")
+        if expected_images != downloaded_images + images_reused or expected_images != validated_images:
             raise ValueError("downloaded/validated image count does not match candidates")
         if unique_images + sha256_duplicate_images != expected_images:
             raise ValueError("SHA-256 unique/duplicate image count does not match candidates")

@@ -22,6 +22,8 @@
 > #217 显式时间窗模式。
 >
 > **授权记录（2026-11-20）：** 操作人授权临时解冻，同步 #222 抖音页面取数与访问门禁口径。
+>
+> **授权记录（2026-11-25）：** 操作人授权临时解冻，同步 #213 微博历史刷新复用已入库正文图。
 
 本文定义正式抓取的机器语义。平台参数和必需字段 profile：通用平台在
 `config/crawl_targets.json` 中配置；小红书在 `config/xhs_targets.json` 和
@@ -154,7 +156,9 @@ discovery 链为 `search_results → note_detail → creator_profile → images`
 `/ajax/statuses/show`（L1，`page_response`）；作者是同一详情标签页面自身请求的 `/ajax/side/cards/sideUser`
 （L1，`page_response`），不另开作者页，与详情同一次触发；正文图是登记过的 CDN 直连例外，UA 取自浏览器，
 Referer 固定为 `https://weibo.com/`，不带 Cookie，不经第三方代理，访问账本以 `cdn_direct` 登记并参与 R5。
-repair 链没有搜索访问：指定 `weibo.com/{uid}/{mid}` 以 `navigate` 打开详情。每条微博入库记录须经
+repair 链没有搜索访问：指定 `weibo.com/{uid}/{mid}` 以 `navigate` 打开详情。微博 repair 链可按操作人显式开关复用
+已入库的正文图（#213）：图片清单仍以本次详情为准，同帖同 pid 且本地文件校验通过的图用本地字节、不请求 CDN，
+账本以 `local_media` 如实登记（不带 HTTP 状态），不得登记为 `cdn_direct`。每条微博入库记录须经
 `content_visit_ok`。抖音（#222）已纳入访问门禁。discovery 链为
 `search_results → note_detail → creator_profile → images`：搜索是本轮搜索页自身 `/general/search/stream/` 与
 `/single/` 的被动截获（L1，`page_response`），截获不到即 `runtime_failed:browser_search_response_missing`；详情由
@@ -176,7 +180,10 @@ Referer 固定为 `https://www.douyin.com/`，不带 Cookie，不经第三方代
 `content_visit_ok` 对本次入库的全部记录（含跨轮累计）逐条核验：引用均可解析；详情访问由列表
 点击触发，且晚于含该 ID 的搜索访问；作者访问由详情内点击触发，作者 ID 与页面 URL 一致；图片的
 资产键与哈希与 manifest 一致。知乎允许零图的回答/文章（#191）在 `content_visit_refs.images` 为空列表时
-通过图片核验；记录有正文图时仍逐张核验，缺一张登记即不通过。小红书零图不通过。规定的停顿位于对应动作之前。程序滚动触发下一页之前须有翻页停顿，
+通过图片核验；记录有正文图时仍逐张核验，缺一张登记即不通过。小红书零图不通过。
+微博 repair 链复用的正文图以 `local_media` 登记、无 HTTP 状态，且 manifest 行必须是 `reused`；`cdn_direct` 登记
+仍须状态 200 且 manifest 行是 `downloaded`。两者不得交叉，其余逐张核验相同。发现抓取出现 `local_media` 或
+`reused` 即不通过。规定的停顿位于对应动作之前。程序滚动触发下一页之前须有翻页停顿，
 前端自行加载的页只记诊断。必需节奏阶段按本轮实际发生的访问推导。任一项不满足即
 `behavior_evidence_ok=false`，不能用内容 JSONL 或退出码补签。逐条规则见对应平台文档。
 知乎 discovery 按列表点击、再点作者的顺序核验；repair 链的详情由指定 URL `navigate` 打开，不要求先有搜索访问。
@@ -268,7 +275,8 @@ checkpoint，但必须通过新的 dry-run 冻结并核对计划。
 `image_materialization.complete` 仍须为真。入库 `post_images_count=0`，且不写 `web_post_images`。
 
 每条进入正式有效集合的记录还必须满足整帖图片原子条件：所有权威正文图都已按平台文档规定的图片通道
-下载到 staging（B站、微博、抖音与知乎为直连图片 CDN，不带平台 Cookie；小红书为页面截获的响应体）；`image_manifest.jsonl` 的平台、帖子、角色、顺序、来源字段、稳定资产键和 URL 与
+下载到 staging（B站、微博、抖音与知乎为直连图片 CDN，不带平台 Cookie；小红书为页面截获的响应体；微博 repair 链
+可复用已入库的同帖同资产键文件，见访问门禁一节）；`image_manifest.jsonl` 的平台、帖子、角色、顺序、来源字段、稳定资产键和 URL 与
 根项目投影完全一致；根项目重新验证文件边界、SHA-256、真实 MIME、后缀、尺寸和解码；正式模式
 在同一帖子内按验证后的文件 SHA-256 保留源顺序首次出现项，重复来源仍保留在 manifest 和首项的
 `local_file.sha256_duplicate_sources` 证据中；保留项从 0 连续重编号后晋升到
@@ -502,7 +510,8 @@ offset 在新链上没有意义，因此不跨进程续跑、不重绑定旧前�
 执行器 `summary.json.image_materialization` 是五平台统一的公开图片结果，必须包含：
 
 - `required`、`promotion_required`、`candidate_posts`、`complete_posts`；
-- `expected_images`、`downloaded_images`、`validated_images`、`unique_images`、
+- `expected_images`、`downloaded_images`、`images_downloaded`（与前者相等）、`images_reused`（复用已入库文件的张数，
+  只有微博 repair 可大于 0）、`validated_images`、`unique_images`、
   `sha256_duplicate_images`、`sha256_duplicates`、`reused_images`、`promoted_images`、
   `rolled_back_images`；
 - `retryable_failures`、`terminal_failures`、`complete`；
@@ -526,7 +535,7 @@ SAVEPOINT 只允许隔离单帖写入，不能因 `RELEASE SAVEPOINT` 提前提�
 结果不能安全判定时，长期文件可能已形成正式引用；后续
 中断、checkpoint 或报告验证失败不得删除这些文件，而应保留并核对 SQLite 后恢复控制面状态。产物完整的等式为
 `candidate_posts == complete_posts` 且
-`expected_images == downloaded_images == validated_images`，并且失败数与 `failures` 均为 0。正式
+`expected_images == downloaded_images + images_reused == validated_images`，并且失败数与 `failures` 均为 0。正式
 入库还要求 `unique_images + sha256_duplicate_images == expected_images`、
 `len(sha256_duplicates) == sha256_duplicate_images`，以及
 `promoted_images + reused_images == unique_images`；诊断模式要求

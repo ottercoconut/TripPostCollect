@@ -35,7 +35,7 @@ REPAIR_CHILD_POLL_SECONDS = 0.2
 REPAIR_CHILD_INTERRUPT_GRACE_SECONDS = (
     PROCESS_CLEANUP_GRACE_SECONDS + PROCESS_FINAL_REAP_SECONDS + 15.0
 )
-COMPLETED_REPAIR_OUTCOMES = {"completed", "completed_with_remaining"}
+COMPLETED_REPAIR_OUTCOMES = {"completed", "completed_with_remaining", "paused"}
 
 
 def utc_stamp() -> str:

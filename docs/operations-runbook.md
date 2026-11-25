@@ -266,6 +266,22 @@ state 旁的 worker 进程组兜底强杀。stdout / stderr 先做头像审计�
 - `data/runtime/post_detail_repair/<run_id>/execution_state.json`
 - `data/backups/post_detail_repair/<run_id>/trippostcollect.sqlite`
 
+通用历史修复可以随时暂停、之后重跑：
+
+- 跑完当前批再停：另开一个终端执行下面的命令。它只写 `data/runtime/post_detail_repair/pause/<platform>.json`，不打开
+  数据库。总控在派下一批之前读到请求就删除它并停止派批，已完成的批次照常核验，摘要 `status=paused`、退出码 0，
+  `pause` 给出请求时间、停在哪一批之前和剩余行数；未派的行记为 `not_attempted`。
+- 立刻停：Ctrl+C（SIGINT）或 SIGTERM，见上文。当前批不入库，旧行不变。
+- 继续：再执行一次原命令，不需要恢复参数，已完成的行不会被重选。启动时会清除残留的暂停请求。
+- 信号与 `throttle_wait` 优先于暂停；已派批次一条都没成功时仍按 `post_detail_repair_no_progress` 失败，不记为暂停。
+
+```bash
+source .venv/bin/activate
+python scripts/repair_post_details.py \
+  --platform weibo \
+  --request-pause
+```
+
 三个独立平台进程可以并行访问平台。长期媒体晋升和 SQLite 导入仍使用项目全局跨进程锁，因此写入
 阶段会自动串行；不得绕过该锁或手工改 execution state。小红书继续使用独立的
 `scripts/repair_xhs_posts.py`，不能放入此入口。小红书修复入口使用 `--batch-size` 在同一个浏览器会话
@@ -310,7 +326,7 @@ python scripts/repair_post_details.py \
 
 ### 全量刷新
 
-知乎 `--refresh-all` 选择 `json_type(raw_sample_json, '$.author_page_badges') IS NULL` 的记录，不论 `content_detail_status`；微博选择 `topic_relevant=1` 且 `raw_sample_json.author_json.weibo_verify` 缺键的记录，恢复条件见 `docs/platforms/weibo.md`。`post_detail_repair_waivers` 里的行仍以 `post_detail_repair_waived` 拒绝。`--post-id`、`--max-items`、批次、计划、执行状态、备份和中断处理与默认修复相同。
+知乎 `--refresh-all` 选择 `json_type(raw_sample_json, '$.author_page_badges') IS NULL` 的记录，不论 `content_detail_status`；微博选择 `topic_relevant=1` 且 `raw_sample_json.author_json.weibo_verify` 缺键的记录，恢复条件见 `docs/platforms/weibo.md`；微博可加 `--keep-stored-images` 保留旧图文件、不重新下载（#213）。`post_detail_repair_waivers` 里的行仍以 `post_detail_repair_waived` 拒绝。`--post-id`、`--max-items`、批次、计划、执行状态、备份和中断处理与默认修复相同。
 
 作者页读到之后，记录总会把 `author_page_badges` 写入 `raw_sample_json`；没有标识时是 `{}`。因此重跑会跳过已经刷新的行。作者页没读到的记录不合格，不会入库，原行保持不变。
 

@@ -25,6 +25,9 @@ from trippostcollect.application.policy import record_site_cooldown
 from trippostcollect.application.policy import site_request_guard
 from trippostcollect.application.repair import load_post_repair_fallbacks as load_post_repair_fallbacks
 from trippostcollect.application.repair import load_post_repair_targets as load_post_repair_targets
+from trippostcollect.application.repair import reject_keep_stored_images_scope as reject_keep_stored_images_scope
+from trippostcollect.application.repair import load_stored_content_images as load_stored_content_images
+from trippostcollect.application.repair import write_stored_content_images as write_stored_content_images
 from trippostcollect.application.repair import load_xhs_repair_report as load_xhs_repair_report
 from trippostcollect.application.repair import post_repair_pagination_evidence as post_repair_pagination_evidence
 from trippostcollect.application.repair import repair_candidate_execution_completed as repair_candidate_execution_completed
@@ -785,6 +788,17 @@ def _run_platform_without_policy(
             or "child",
         ),
     }
+    if platform_key == "weibo" and getattr(args, "keep_stored_images", False):
+        inventory_path = batch_dir / "stored_content_images.json"
+        write_stored_content_images(
+            inventory_path,
+            load_stored_content_images(
+                args.db,
+                "weibo",
+                set(getattr(args, "post_repair_target_ids", set()) or set()),
+            ),
+        )
+        extra_env["TRIPPOSTCOLLECT_WEIBO_STORED_IMAGES"] = str(inventory_path.resolve())
     if args.discovery_job_id is not None:
         extra_env.update(
             {
@@ -1306,6 +1320,11 @@ def _run_main(
         }
     elif args.repair_targets_file:
         raise SystemExit("--repair-targets-file requires --post-repair")
+    reject_keep_stored_images_scope(
+        enabled=bool(getattr(args, "keep_stored_images", False)),
+        post_repair=bool(args.post_repair),
+        platforms=platforms,
+    )
     for platform_key in ("douyin", "zhihu", "weibo"):
         if platform_key in platforms and (
             args.start_page != 1
@@ -1596,6 +1615,8 @@ def _run_main(
                 for item in content_valid_records
             ),
             "downloaded_images": 0,
+            "images_downloaded": 0,
+            "images_reused": 0,
             "validated_images": 0,
             "unique_images": 0,
             "sha256_duplicate_images": 0,

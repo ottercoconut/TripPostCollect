@@ -56,8 +56,14 @@ class PostImageStager:
                 source_asset_key=self._source_asset_key(item),
                 source_url=item["url"],
                 content=item["content"],
-                attempts=int(item.get("attempts") or 1),
-                http_status=int(item.get("http_status") or 200),
+                attempts=1 if item.get("attempts") is None else int(item.get("attempts")),
+                http_status=(
+                    None if "http_status" in item and item.get("http_status") is None
+                    else int(item.get("http_status") if item.get("http_status") is not None else 200)
+                ),
+                stored_source_path=(
+                    str(item["stored_source_path"]) if item.get("stored_source_path") else None
+                ),
             )
             for item in image_content_items
         ]
@@ -99,7 +105,8 @@ class ImageAsset:
     source_url: str
     content: bytes
     attempts: int = 1
-    http_status: int = 200
+    http_status: int | None = 200
+    stored_source_path: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,6 +284,25 @@ def failed_manifest_row(
     }
 
 
+def _place_staged_bytes(target: Path, asset: ImageAsset) -> None:
+    """复用图优先硬链接进暂存 part 目录；链接不成就退回写字节。"""
+
+    source = asset.stored_source_path
+    if source and not Path(source).is_symlink():
+        try:
+            os.link(source, target, follow_symlinks=False)
+            return
+        except FileExistsError:
+            raise
+        except OSError:
+            # 跨设备、文件系统不支持、无链接权限或链接数已满：都退回写入已校验过的字节。
+            pass
+    with target.open("xb") as handle:
+        handle.write(asset.content)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
 def stage_post_images(
     *,
     save_data_root: Path,
@@ -308,6 +334,7 @@ def stage_post_images(
                     content=asset.content,
                     attempts=asset.attempts,
                     http_status=asset.http_status,
+                    stored_source_path=asset.stored_source_path,
                 ),
                 image,
             )
@@ -323,10 +350,7 @@ def stage_post_images(
     try:
         for asset, image in inspected:
             target = part_dir / f"{asset.source_index:03d}.{image.extension}"
-            with target.open("xb") as handle:
-                handle.write(asset.content)
-                handle.flush()
-                os.fsync(handle.fileno())
+            _place_staged_bytes(target, asset)
         _fsync_directory(part_dir)
         if final_dir.exists():
             expected = {item.name: sha256(item.read_bytes()).hexdigest() for item in part_dir.iterdir()}
@@ -355,6 +379,7 @@ def stage_post_images(
             / safe_post_id
             / f"{asset.source_index:03d}.{image.extension}"
         ).as_posix()
+        reused = bool(asset.stored_source_path)
         rows.append(
             {
                 "schema_version": 1,
@@ -365,9 +390,9 @@ def stage_post_images(
                 "source_key": source_key,
                 "source_asset_key": asset.source_asset_key,
                 "source_url": asset.source_url,
-                "fetch_status": "downloaded",
-                "attempts": asset.attempts,
-                "http_status": asset.http_status,
+                "fetch_status": "reused" if reused else "downloaded",
+                "attempts": 0 if reused else asset.attempts,
+                "http_status": None if reused else asset.http_status,
                 "staging_path": relative_path,
                 "size_bytes": image.size_bytes,
                 "mime_type": image.mime_type,

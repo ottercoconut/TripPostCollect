@@ -42,7 +42,7 @@ from trippostcollect.runtime.image_concurrency import ImageDownloadBatchError, d
 from trippostcollect.core.paths import platform_profile_dir
 from trippostcollect.records.topic_relevance import topic_relevant_for_web_post
 from . import parser as weibo_store
-from .client import WEIBO_CONTENT_IMAGE_RULE, WeiboClient
+from .client import WEIBO_CONTENT_IMAGE_RULE, WEIBO_STORED_IMAGE_RULE, WeiboClient
 from .detail_page import WeiboDetailPages, WeiboOpened
 from .models import (
     PlatformRuntimeError, WeiboDetailFetchError, WeiboImageDownloadError,
@@ -74,6 +74,15 @@ class WeiboCrawler:
         self._opened_keyword = ""
         self._time_window = None
         self._time_window_loaded = False
+        self._stored_image_index: dict[tuple[str, str], dict] | None = None
+
+    def _stored_images(self) -> dict[tuple[str, str], dict]:
+        if self._stored_image_index is not None:
+            return self._stored_image_index
+        loader = getattr(self.ports, "stored_images", None)
+        index = loader() if self.config.CRAWLER_TYPE == "detail" and loader is not None else {}
+        self._stored_image_index = index if isinstance(index, dict) else {}
+        return self._stored_image_index
 
     async def start(self):
         playwright_proxy_format, httpx_proxy_format = None, None
@@ -448,8 +457,38 @@ class WeiboCrawler:
         recorded: list[tuple[int, str]] = []
         initial_images = list((record.get("content_visit_refs") or {}).get("images") or [])
 
+        reused_paths: dict[int, str] = {}
+        stored_index = self._stored_images()
+
+        def reuse_asset(asset: Dict) -> tuple[bytes, str] | None:
+            asset_key = weibo_store.weibo_source_asset_key(
+                asset.get("pid"), str(asset.get("url") or "")
+            )
+            if not asset_key.startswith("weibo:pid:"):
+                return None
+            entry = stored_index.get((note_id, asset_key))
+            if entry is None:
+                return None
+            opener = getattr(self.ports, "open_stored_image", None)
+            opened = opener(entry) if opener is not None else "missing_file"
+            if isinstance(opened, str):
+                logger.warning(
+                    "stored_image_unused note_id=%s source_index=%s reason=%s",
+                    note_id,
+                    asset.get("source_index"),
+                    opened,
+                )
+                return None
+            content, path = opened
+            return content, str(path)
+
         async def fetch(asset: Dict) -> tuple[bytes | None, int]:
             source_index = int(asset["source_index"])
+            reused = reuse_asset(asset)
+            if reused is not None:
+                content, stored_path = reused
+                reused_paths[source_index] = stored_path
+                return content, 0
             urls = list(asset.get("urls") or [asset.get("url")])
             return await self.ports.fetch_image_bytes_with_retry(
                 lambda urls=urls: self.wb_client.get_note_image(urls),
@@ -466,16 +505,26 @@ class WeiboCrawler:
                 return
             digest = sha256(content).hexdigest()
             asset_key = weibo_store.weibo_source_asset_key(asset.get("pid"), str(asset.get("url") or ""))
-            visit_id = capture.channel.record_direct_visit(
-                source="cdn_direct",
-                stage="note_image",
-                rule=WEIBO_CONTENT_IMAGE_RULE,
-                subject_id=note_id,
-                trigger=None,
-                status=200,
-                asset_key=asset_key,
-                sha256=digest,
-            )
+            source_index = int(asset["source_index"])
+            if source_index in reused_paths:
+                visit_id = capture.channel.record_stored_image(
+                    stage="note_image",
+                    rule=WEIBO_STORED_IMAGE_RULE,
+                    subject_id=note_id,
+                    asset_key=asset_key,
+                    sha256=digest,
+                )
+            else:
+                visit_id = capture.channel.record_direct_visit(
+                    source="cdn_direct",
+                    stage="note_image",
+                    rule=WEIBO_CONTENT_IMAGE_RULE,
+                    subject_id=note_id,
+                    trigger=None,
+                    status=200,
+                    asset_key=asset_key,
+                    sha256=digest,
+                )
             recorded.append((int(asset["source_index"]), visit_id))
             refs = dict(record.get("content_visit_refs") or {})
             refs["images"] = [
@@ -504,10 +553,19 @@ class WeiboCrawler:
             raise WeiboImageDownloadError(
                 note_id, exc.source_index, exc.code, exc.attempts
             ) from exc
-        fetched_assets = [
-            {**asset, "content": content, "attempts": attempts, "http_status": 200}
-            for asset, content, attempts in downloaded
-        ]
+        fetched_assets = []
+        for asset, content, attempts in downloaded:
+            source_index = int(asset["source_index"])
+            stored_path = reused_paths.get(source_index)
+            item = {
+                **asset,
+                "content": content,
+                "attempts": 0 if stored_path else attempts,
+                "http_status": None if stored_path else 200,
+            }
+            if stored_path:
+                item["stored_source_path"] = stored_path
+            fetched_assets.append(item)
         try:
             await self.update_weibo_note_images(note_id, fetched_assets)
         except ImageStagingError as exc:

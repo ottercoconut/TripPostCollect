@@ -551,6 +551,8 @@ def inject_materialized_images(
                 "local_file": local_file,
             }
         )
+        if local.fetch_status == "reused":
+            item["fetch_status"] = "reused"
         result.append(item)
     retained_content = [item for item in result if item.get("role") == "content"]
     if len(retained_content) != len(materialized_images):

@@ -140,6 +140,9 @@ class WeiboPorts:
     run_required_human_behavior: Callable[..., Any]
     # #136：标准模式持久 context 与 warmup 共用的启动函数（runtime.browser_runtime.launch_profile_context）。
     launch_profile_context: Callable[..., Any]
+    # #213：detail 修复复用旧正文图。缺省不启用。
+    stored_images: Callable[[], dict] | None = None
+    open_stored_image: Callable[..., Any] | None = None
 
 
 @dataclass(frozen=True)

@@ -251,7 +251,8 @@
   作者访问不需要单独的点击。它必须满足三点：与详情位于同一标签、晚于该次触发，且 `subject_id` 等于
   `statuses/show` 的作者 ID。
 - repair 链为 `note_detail → creator_profile → images`：详情由 `navigate` 打开
-  `https://weibo.com/{uid}/{mid}`，作者与图片规则不变。
+  `https://weibo.com/{uid}/{mid}`，作者与图片规则不变。只有 repair 链另接受正文图备选规格 `weibo.stored_image` /
+  `local_media`（#213，见“历史详情修复”）。
 - 每条入库记录带 `content_visit_refs`：`ledger_id`、`search_results`、`note_detail`、`creator_profile`、`images`。
 
 ## 正文图片与资产键
@@ -290,4 +291,13 @@
   - 正文、互动数、图片和作者字段按本次重访整行更新；标题或正文变化后 `topic_relevant` 随之重算，可能变为 0。
   - 恢复要求 `desktop_detail`、正文非空、正文图全部落盘（0 张图不算恢复）且该键存在；没刷新的行保持原值。
   - 已删除、不可见或图片失败的行保持原值，留待下次；重跑跳过已刷新行。
+- `--keep-stored-images`（#213，操作人 2026-11-25 决定，只能与 `--platform weibo --refresh-all` 同用）保留旧图文件：
+  - 图片清单仍以本次 `pic_ids`/`pic_infos` 为准。中间层从数据库只读查出本批旧图清单，worker 不读数据库；
+    同帖、同 `weibo:pid:<pid>`（含 `sha256_duplicate_sources` 里的键）且路径、sha256、格式、宽高都校验通过时用本地字节，
+    否则照旧下载并记一条不含 URL 的诊断日志。`weibo:urlsha256:` 键不复用。
+  - 账本登记 `local_media` / `weibo.stored_image`，无 HTTP 状态；manifest 行为 `reused`。R5 仍逐张核对资产键与 sha256，
+    `local_media` 只能配 `reused`、`cdn_direct` 只能配 `downloaded`。发现抓取不接受这两种标记。
+  - staging 优先硬链接长期文件，链接不成才写一份字节。序号和 sha256 都没变的图不产生新的长期文件；序号变了会按新序号
+    另存一份，旧文件保留。`local_file` 沿用旧行的来源记录，`image_url` 更新为本次地址。
+  - 文字、互动数与作者字段照常整行刷新，恢复条件不变。摘要分开给出 `images_downloaded` 与 `images_reused`。
 - 用同一链路为 `topic_relevant=1` 的历史微博整行刷新已由操作人决定（#213）；`topic_relevant=0` 的行继续延后。

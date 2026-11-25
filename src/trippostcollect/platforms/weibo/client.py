@@ -19,6 +19,7 @@ logger = logging.getLogger("TripPostCollect")
 WEIBO_IMAGE_REFERER = "https://weibo.com/"
 WEIBO_IMAGE_ACCEPT = "image/avif,image/webp,image/png,image/jpeg,image/gif,*/*;q=0.8"
 WEIBO_CONTENT_IMAGE_RULE = "weibo.content_image"
+WEIBO_STORED_IMAGE_RULE = "weibo.stored_image"
 _BLOCKING_IMAGE_CODES = frozenset({"image_auth_required", "image_rate_limited"})
 
 

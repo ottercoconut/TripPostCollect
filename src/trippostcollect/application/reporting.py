@@ -559,6 +559,8 @@ def write_markdown(summary: dict[str, Any], path: Path) -> None:
                 f"- 候选帖子：`{image_materialization.get('candidate_posts', 0)}`",
                 f"- 预期正文图：`{image_materialization.get('expected_images', 0)}`",
                 f"- staging 下载：`{image_materialization.get('downloaded_images', 0)}`",
+                f"- 正文图下载：`{image_materialization.get('images_downloaded', image_materialization.get('downloaded_images', 0))}`",
+                f"- 正文图复用旧文件：`{image_materialization.get('images_reused', 0)}`",
                 f"- 根项目字节复验：`{image_materialization.get('validated_images', 0)}`",
                 f"- SHA-256 唯一正文图：`{image_materialization.get('unique_images', 0)}`",
                 f"- SHA-256 重复来源：`{image_materialization.get('sha256_duplicate_images', 0)}`",

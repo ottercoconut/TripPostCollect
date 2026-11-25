@@ -70,6 +70,8 @@ def verify_snapshot_artifacts(summary: Mapping[str, Any]) -> None:
         for value in output.get("image_manifest_paths") or []:
             manifest = Path(value).resolve(strict=True)
             for entry in parse_manifest(manifest.read_bytes()):
+                if entry.fetch_status == "reused":
+                    raise RuntimeError("xhs_batch_checkpoint_reused_image")
                 if entry.fetch_status != "downloaded":
                     continue  # Failed candidate images remain audit-only.
                 relative = Path(str(entry.staging_path))

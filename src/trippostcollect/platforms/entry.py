@@ -94,6 +94,7 @@ def weibo_dependencies(config, *, post_repair=False):
     from trippostcollect.application.candidates import AdaptiveAccumulator
     from trippostcollect.application.contracts import WeiboClientPorts, WeiboLoginPorts, WeiboPorts
     from trippostcollect.application.events import append_worker_execution_event
+    from trippostcollect.application.repair import load_stored_image_index, open_stored_image
     from trippostcollect.application.worker_inputs import weibo_input_readers
     from trippostcollect.artifacts.image_staging import PostImageStager
     from trippostcollect.artifacts.jsonl import AsyncFileWriter, JsonlContentStore
@@ -185,6 +186,12 @@ def weibo_dependencies(config, *, post_repair=False):
         project_browser_args=project_browser_args,
         run_required_human_behavior=run_required_human_behavior,
         launch_profile_context=launch_profile_context,
+        stored_images=lambda: (
+            load_stored_image_index(readers.stored_images_path())
+            if options.CRAWLER_TYPE == "detail" and readers.stored_images_path()
+            else {}
+        ),
+        open_stored_image=open_stored_image,
     )
 
 

@@ -17,7 +17,8 @@ from trippostcollect.artifacts.image_candidates import ImageCandidate, normalize
 
 IMAGE_MANIFEST_SCHEMA_VERSION = 1
 SUPPORTED_PLATFORMS = frozenset({"bilibili", "weibo", "xhs", "douyin", "zhihu"})
-SUPPORTED_FETCH_STATUSES = frozenset({"downloaded", "failed"})
+SUPPORTED_FETCH_STATUSES = frozenset({"downloaded", "failed", "reused"})
+ACQUIRED_FETCH_STATUSES = frozenset({"downloaded", "reused"})
 SUPPORTED_IMAGE_MIME_TYPES = frozenset(
     {"image/jpeg", "image/png", "image/webp", "image/gif", "image/avif"}
 )
@@ -105,6 +106,19 @@ def _validate_staging_path(value: str | None) -> None:
         raise ImageManifestError("image_path_escape", "staging_path escapes the platform data root")
 
 
+def _validate_acquired_metadata(entry: ImageManifestEntry) -> None:
+    """downloaded 与 reused 共用的成功字段：路径、字节、格式、宽高、哈希。"""
+
+    _validate_staging_path(entry.staging_path)
+    _require_int(entry.size_bytes, "size_bytes", minimum=1)
+    _require_int(entry.width, "width", minimum=1)
+    _require_int(entry.height, "height", minimum=1)
+    if entry.mime_type not in SUPPORTED_IMAGE_MIME_TYPES:
+        raise ImageManifestError("image_non_raster_response", "unsupported acquired image MIME")
+    if not isinstance(entry.sha256, str) or not SHA256_RE.fullmatch(entry.sha256):
+        raise ImageManifestError("image_hash_mismatch", "acquired image SHA-256 is invalid")
+
+
 def _validate_entry(entry: ImageManifestEntry) -> None:
     if entry.schema_version != IMAGE_MANIFEST_SCHEMA_VERSION:
         raise ImageManifestError("missing_image_manifest", "unsupported image manifest schema")
@@ -128,34 +142,41 @@ def _validate_entry(entry: ImageManifestEntry) -> None:
         raise ImageManifestError("image_manifest_identity_mismatch", "source_url is not normalized HTTP(S)")
     if entry.fetch_status not in SUPPORTED_FETCH_STATUSES:
         raise ImageManifestError("missing_image_manifest", "unsupported fetch_status")
+    if entry.fetch_status == "reused":
+        if entry.platform_key != "weibo":
+            raise ImageManifestError(
+                "missing_image_manifest",
+                "reused fetch_status is only valid for weibo",
+            )
+        if entry.attempts != 0:
+            raise ImageManifestError("missing_image_manifest", "reused row requires attempts 0")
+        if entry.http_status is not None:
+            raise ImageManifestError("missing_image_manifest", "reused row requires null http_status")
+        _validate_acquired_metadata(entry)
+        if entry.error_code is not None:
+            raise ImageManifestError("missing_image_manifest", "reused row cannot have error_code")
+        return
     _require_int(entry.attempts, "attempts", minimum=1)
     if entry.http_status is not None:
         _require_int(entry.http_status, "http_status", minimum=100)
         if entry.http_status > 599:
             raise ImageManifestError("missing_image_manifest", "http_status must be <= 599")
 
-    success_values = (
-        entry.staging_path,
-        entry.size_bytes,
-        entry.mime_type,
-        entry.width,
-        entry.height,
-        entry.sha256,
-    )
     if entry.fetch_status == "downloaded":
-        _validate_staging_path(entry.staging_path)
-        _require_int(entry.size_bytes, "size_bytes", minimum=1)
-        _require_int(entry.width, "width", minimum=1)
-        _require_int(entry.height, "height", minimum=1)
-        if entry.mime_type not in SUPPORTED_IMAGE_MIME_TYPES:
-            raise ImageManifestError("image_non_raster_response", "unsupported downloaded image MIME")
-        if not isinstance(entry.sha256, str) or not SHA256_RE.fullmatch(entry.sha256):
-            raise ImageManifestError("image_hash_mismatch", "downloaded image SHA-256 is invalid")
+        _validate_acquired_metadata(entry)
         if entry.http_status is None or not 200 <= entry.http_status < 300:
             raise ImageManifestError("missing_image_manifest", "downloaded row requires a 2xx status")
         if entry.error_code is not None:
             raise ImageManifestError("missing_image_manifest", "downloaded row cannot have error_code")
     else:
+        success_values = (
+            entry.staging_path,
+            entry.size_bytes,
+            entry.mime_type,
+            entry.width,
+            entry.height,
+            entry.sha256,
+        )
         if any(value is not None for value in success_values):
             raise ImageManifestError("missing_image_manifest", "failed row cannot contain success metadata")
         if not isinstance(entry.error_code, str) or not ERROR_CODE_RE.fullmatch(entry.error_code):
@@ -275,7 +296,7 @@ def validate_post_manifest(
                 "image_manifest_identity_mismatch",
                 f"manifest does not match candidate index {candidate.source_index}",
             )
-        if require_downloaded and entry.fetch_status != "downloaded":
+        if require_downloaded and entry.fetch_status not in ACQUIRED_FETCH_STATUSES:
             raise ImageManifestError(
                 entry.error_code or "image_download_retryable",
                 f"candidate index {candidate.source_index} was not downloaded",

@@ -19,6 +19,8 @@
 > **授权记录（2026-11-20）：** 操作人授权临时解冻，同步 #222 抖音页面取数与访问门禁口径。
 >
 > **授权记录（2026-11-24）：** 操作人授权临时解冻，同步 #70 移除 `author_json.creator_hash`（schema v25）。
+>
+> **授权记录（2026-11-25）：** 操作人授权临时解冻，同步 #213 微博历史刷新复用已入库正文图。
 
 ## 数据库文件
 
@@ -157,7 +159,7 @@ checkpoint、seen 与 campaign 更新。摘要或其 JSONL 缺失时冻结失败
 适配器 worker（`trippostcollect.platforms.entry`；B站 article 为进程内分支）后导入 `web_posts`；小红书由 `xhs_runner.py` 为人工指定逻辑账号申请互斥租约、创建本轮临时 profile，
 再调用同一底层执行器并在该轮唯一 BrowserContext 中完成人工登录。
 五个平台都把权威正文图下载到本轮 staging，原子生成 schema v1
-`image_manifest.jsonl`；根项目按同一显式投影复验 manifest、文件字节和身份。B站由浏览器外 HTTP 客户端直连图片 CDN 下载，只带 UA、Referer 与 Accept，不带平台 Cookie、不经第三方代理；小红书写入页面翻看时截获的图片响应体。知乎正文图不带平台 Cookie、不经第三方代理，UA 取自浏览器，Referer 固定为 `https://www.zhihu.com/`，访问账本以 `cdn_direct` 登记（#185）。微博正文图同样是登记的 CDN 直连例外，Referer 固定为 `https://weibo.com/`，访问账本以 `cdn_direct` 登记（#211）。抖音正文图同样是登记的 CDN 直连例外，UA 取自浏览器，Referer 固定为 `https://www.douyin.com/`，访问账本以 `cdn_direct` 登记（#222）。只有来源耗尽、
+`image_manifest.jsonl`；根项目按同一显式投影复验 manifest、文件字节和身份。B站由浏览器外 HTTP 客户端直连图片 CDN 下载，只带 UA、Referer 与 Accept，不带平台 Cookie、不经第三方代理；小红书写入页面翻看时截获的图片响应体。知乎正文图不带平台 Cookie、不经第三方代理，UA 取自浏览器，Referer 固定为 `https://www.zhihu.com/`，访问账本以 `cdn_direct` 登记（#185）。微博正文图同样是登记的 CDN 直连例外，Referer 固定为 `https://weibo.com/`，访问账本以 `cdn_direct` 登记（#211）；历史刷新带 `--keep-stored-images` 时，同帖同 `weibo:pid:` 资产键且字节校验通过的旧图不再下载（#213）：manifest 行为 `fetch_status=reused`、`attempts=0`、`http_status` 为空，账本为 `local_media`，staging 优先硬链接长期文件。抖音正文图同样是登记的 CDN 直连例外，UA 取自浏览器，Referer 固定为 `https://www.douyin.com/`，访问账本以 `cdn_direct` 登记（#222）。只有来源耗尽、
 字段、行为、策略和 staging 图片门禁全部通过，正式运行才晋升到 `data/media` 并注入统一入库映射；
 门禁未通过、晋升失败或已确认发生在提交前的 SQLite 导入回滚时，不得留下本轮新建的无引用长期媒体文件。平台显式投影后的全部 manifest 候选均须通过下载与字节复验；
 知乎同一 `v2-<32位十六进制>` 在生成 `image_list` 时只保留一张（#187），优先级 `_r` > 无后缀 > `_1440w` > `_720w` > `_b`，未知后缀排在 `_b` 之后，非 `v2-` 地址不参与合并。下载、manifest 和 `cdn_direct` 只含保留的那张。已观察且来源受信任的知乎回答/文章可以没有正文图（#191）：该帖不要求 manifest 行，`image_materialization` 的预期张数不增加，仍须 `complete=true`。下载后再仅在同帖内
@@ -209,7 +211,7 @@ B站正式调度用专栏/图文 article 搜索发现候选，但必须再取得
 | `web_post_images.image_role/image_index` | 固定 `content`；知乎 `v2-<32位十六进制>` 在 `image_list` 只保留一张（#187，`_r` 优先），投影后的候选全部下载复验，再在同帖内按 SHA-256 保留首次来源并从 0 连续编号。知乎纯文字回答/文章没有图片行（#191） |
 | `web_post_images.local_path` | 根项目复验并晋升后的 `data/media/...` 项目相对路径；正式新记录不能为空 |
 | `web_post_images.width/height/mime_type/sha256` | 根项目重新读取本地文件得到并与 manifest 相等的字节证据 |
-| `web_post_images.raw_image_json`（`content`） | 权威来源字段、`source_asset_key`、manifest 文件/行及 `local_file` 证据；同 SHA 重复来源写入 `local_file.sha256_duplicate_sources`，不混入头像等非正文对象 |
+| `web_post_images.raw_image_json`（`content`） | 权威来源字段、`source_asset_key`、manifest 文件/行及 `local_file` 证据；同 SHA 重复来源写入 `local_file.sha256_duplicate_sources`，不混入头像等非正文对象。复用旧图（#213）时 `local_file` 沿用旧行，记录的仍是这份字节当初的来源与 manifest；`sha256_duplicate_sources` 以本次合并为准，`url` 与 `image_url` 用本次详情的地址 |
 | `raw_sample_json` | 平台适配器结构化记录经头像清除后的样本；正式记录必须含 `content_detail_status` 和 `content_detail_source`。B站浏览数只保留在 `view_count`，不入列，也不进入 `metrics_json`。知乎 `content_visit_refs` 随该 JSON 入库，不新增列。知乎 `author_page_badges` 同样只进该 JSON，不进 `author_json`，不新增列（#193） |
 
 代码在下载前用五个平台显式投影识别正文图，在导入边界识别其他同类字段差异；内部持久化结构
@@ -288,6 +290,8 @@ B站还要按本轮 `artifact_dir` 检查 `raw_sample_json.content_detail_status
     "complete_posts": 71,
     "expected_images": 240,
     "downloaded_images": 240,
+    "images_downloaded": 240,
+    "images_reused": 0,
     "validated_images": 240,
     "unique_images": 235,
     "sha256_duplicate_images": 5,

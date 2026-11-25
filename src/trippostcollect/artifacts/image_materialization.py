@@ -96,6 +96,7 @@ class MaterializedImage:
     height: int
     sha256: str
     reused: bool
+    fetch_status: str = "downloaded"
     manifest_source_index: int | None = None
     manifest_path: str | None = None
     manifest_line: int | None = None
