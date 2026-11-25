@@ -17,6 +17,19 @@ def write_evidence(path: str | Path, evidence: dict[str, Any]) -> None:
 
 
 # T09：原旧桥 E 的修复报告写出；平台修复编排经注入端口调用。
+def write_weibo_repair_outcomes(path: str | Path, outcomes: list[dict[str, Any]]) -> None:
+    """原子写出微博修复逐目标结果。调用方只传入已去掉 URL 的字段。"""
+
+    destination = Path(path).expanduser()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(destination.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps({"outcomes": outcomes}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(destination)
+
+
 def _write_xhs_repair_report(report: dict[str, Any]) -> None:
     raw_path = os.environ.get("TRIPPOSTCOLLECT_XHS_REPAIR_REPORT_PATH", "").strip()
     if not raw_path:

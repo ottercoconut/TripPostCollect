@@ -64,6 +64,7 @@ class WeiboDetailFetchError(RuntimeError):
         *,
         runtime_blocking: bool = False,
         retryable: bool = True,
+        evidence: dict | None = None,
     ):
         super().__init__(
             f"weibo detail failed: note_id={note_id or '<missing>'}, code={code}"
@@ -73,3 +74,4 @@ class WeiboDetailFetchError(RuntimeError):
         self.attempts = max(1, int(attempts))
         self.runtime_blocking = runtime_blocking
         self.retryable = bool(retryable) and not runtime_blocking
+        self.evidence = dict(evidence or {})

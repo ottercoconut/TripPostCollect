@@ -244,7 +244,8 @@ state 旁的 worker 进程组兜底强杀。stdout / stderr 先做头像审计�
 `formal_validation.skipped_candidate_failures`；父摘要同步提供 `candidate_failure_count` 和最多 20 条
 `candidate_failures_sample`。`repair_target_no_valid_output` 表示平台子进程没有产生可正式入库的目标记录，
 `evidence_source=repair_target_output_difference` 表示不能从现有结构化产物可靠细分为详情或图片原因，
-监督程序不得猜测更具体错误。
+监督程序不得猜测更具体错误。微博子进程写出逐目标结果时（#235），失败项用其中的更细错误码和可选 `evidence`
+（见 `docs/platforms/weibo.md`）；没有该记录的仍按上述两个值处理，同样不得猜测。
 摘要状态 `completed_with_remaining` 表示本轮已有可验证进展但选中目标仍有残留，不表示库存清零；
 继续运行同一平台，直到摘要同时满足 `status=completed`、`all_selected_targets_recovered=true` 和
 `remaining_pending_count=0`。child 的 `repair_import_met=true` 只允许成功子集入库，不能代替

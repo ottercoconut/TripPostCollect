@@ -177,6 +177,8 @@
   `post_favorites_count` 为 NULL。
 - 有 `page_info.object_type=video`、且没有 `pic_infos` 的视频微博按视频跳过：计为已处理候选，进入候选
   记忆，不写项目 JSONL。
+- 停止事件的 `skipped_reason_counts`（没有跳过时不写）按原因计数（#235）：`video`、`no_record`、`structural:<码>`、
+  `image:<码>`。视频和无记录不是候选失败，计数不改变有效数、候选记忆、重试与来源耗尽；后两类仍按候选失败处理。
 - 去重键为数字 mid（`idstr`）。`note_url` 写成 `https://weibo.com/{uid}/{mblogid}`；`mblogid` 另存，不作为 ID。
 - 详情候选级失败按 3 次、间隔 1 秒有限重试，然后写 `candidate_skipped` 并进入已处理记忆。候选级失败包括：
   - 找不到卡片时间链接；
@@ -190,6 +192,16 @@
   - page/context 被关闭。
 - 搜索和详情都不走浏览器外 HTTP，因此不再产生 `network_unreachable`；正文图片下载仍按
   `image_download_retryable`。
+- `detail_show_missing`、`detail_unavailable`、`detail_tab_not_opened` 另带一份证据（#235），不改变判定、重试和 15 秒
+  等待，也不增加请求或访问。重试后取最后一次尝试的证据。只含六个键，取不到为空：
+  - `navigation_status`：修复链 `goto` 的状态码；点击链为空；
+  - `final_page_kind`：最终地址类型 `detail`、`login`、`error_page`、`search`、`other`、`closed`，不记地址；
+  - `show_responses_unmatched`：本次尝试里没有命中的 `statuses/show` 响应，最多 5 条，每条只有状态码、顶层 `ok`、
+    ID 是否匹配、正文读取失败的类名；
+  - `show_request_failures`：同一规则的请求失败次数；
+  - `show_response_pending`：记录时是否还有在读正文的 `statuses/show` 响应；
+  - `waited_seconds`：等待秒数。
+  截获通道已故障时前述列表为空，仍抛出原来的候选失败。证据不足以判定帖子已删，不得据此推断。
 - 日志只记录 mid、计数和状态码；不打印整条记录、`statuses/show` 或 `sideUser` 原始响应。头像只在内存中
   用于排除，不进入 `model_dump` 和项目 JSONL。
 
@@ -285,6 +297,18 @@
     `desktop_detail`；
   - 再下载正文图。
 - 导航响应 401/403 记 `login_required`，429 记 `rate_limited`；其他非 2xx 视为该条详情不可用。
+- 没有产出正式记录的目标逐条写入 `logs/weibo/weibo_repair_outcomes.json`（#235，不含 URL），父摘要的失败项据此填：
+
+  | 情形 | `error_code` | `evidence_source` |
+  |---|---|---|
+  | 详情失败 | 原码，如 `detail_show_missing` | `weibo_detail` |
+  | 视频 | `repair_target_video` | `weibo_video` |
+  | 没有记录 | `repair_target_no_record` | `weibo_no_record` |
+  | 结构性跳过 | 原结构码，如 `missing_content_image` | `weibo_structural` |
+  | 正文图失败 | 原图片码 | `weibo_image` |
+
+  正文图物化失败优先。文件缺失、损坏或某条不合格时，该条仍用 `repair_target_no_valid_output`。成功与失败集合的
+  算法不变。
 - 不调用 Playwright `page.request` 等请求接口。该入口不写搜索 checkpoint，完成含义只覆盖清单中的旧行。
 - `--refresh-all`（#213，操作人 2026-11-25 决定整行刷新）选择 `topic_relevant=1` 且
   `raw_sample_json.author_json.weibo_verify` 缺键的行，不论 `content_detail_status`。
