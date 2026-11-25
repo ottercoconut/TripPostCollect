@@ -33,6 +33,9 @@ from trippostcollect.core.paths import (
     ensure_dir,
 )
 from trippostcollect.db.bootstrap import bootstrap_database
+from trippostcollect.platforms.weibo.parser import (
+    CONTENT_DETAIL_SOURCE as WEIBO_CONTENT_DETAIL_SOURCE,
+)
 from trippostcollect.platforms.zhihu.parser import collapse_zhihu_v2_image_urls
 from trippostcollect.runtime.process import (
     PROCESS_CLEANUP_GRACE_SECONDS,
@@ -78,7 +81,7 @@ REPAIR_CHILD_INTERRUPT_GRACE_SECONDS = (
 )
 COMPLETED_REPAIR_OUTCOMES = {"completed", "completed_with_remaining"}
 TRUSTED_DETAIL_SOURCES = {
-    "weibo": {"desktop_detail", "search_mblog_complete", "mobile_detail"},
+    "weibo": {WEIBO_CONTENT_DETAIL_SOURCE, "search_mblog_complete", "mobile_detail"},
     # #194：详情路径只写 answer_detail / article_detail，当前代码不再产生 search_content。
     "zhihu": {"answer_detail", "article_detail"},
 }
@@ -120,7 +123,7 @@ def parse_args() -> argparse.Namespace:
         description=(
             "Repair existing Douyin, Weibo, or Zhihu rows in bounded detail-mode "
             "batches without touching discovery state. Zhihu also accepts "
-            "--dedupe-images and --refresh-all."
+            "--dedupe-images. Zhihu and Weibo accept --refresh-all."
         )
     )
     parser.add_argument("--platform", required=True, choices=PLATFORMS)
@@ -150,7 +153,8 @@ def parse_args() -> argparse.Namespace:
         "--refresh-all",
         action="store_true",
         help=(
-            "Zhihu-only refresh of rows whose raw_sample_json has no author_page_badges key, "
+            "Refresh Zhihu rows whose raw_sample_json has no author_page_badges key, "
+            "or Weibo rows with topic_relevant=1 and no author_json.weibo_verify key, "
             "regardless of content_detail_status."
         ),
     )
@@ -288,16 +292,29 @@ def waive_post_detail_repairs(
     return normalized_ids
 
 
-def _selection_predicate(refresh_all: bool, *, column: str = "raw_sample_json") -> str:
-    """默认只选未观察详情；知乎全量刷新改选没有 author_page_badges 键的行。"""
+def _selection_predicate(
+    refresh_all: bool,
+    *,
+    platform: str,
+    column: str = "raw_sample_json",
+) -> str:
+    """默认只选未观察详情。全量刷新按平台选择还没有刷新标记的行。"""
 
-    if refresh_all:
-        return f"json_type({column}, '$.author_page_badges') IS NULL"
-    return f"""COALESCE(
+    if not refresh_all:
+        return f"""COALESCE(
             CASE WHEN json_valid({column})
                  THEN json_extract({column}, '$.content_detail_status') END,
             ''
           ) <> 'detail_observed'"""
+    if platform == "zhihu":
+        return f"json_type({column}, '$.author_page_badges') IS NULL"
+    if platform == "weibo":
+        prefix = f"{column.split('.', 1)[0]}." if "." in column else ""
+        return (
+            f"{prefix}topic_relevant=1"
+            f" AND json_type({column}, '$.author_json.weibo_verify') IS NULL"
+        )
+    raise ValueError(f"refresh-all is not supported for {platform}")
 
 
 def _repair_fallback_for_row(
@@ -349,7 +366,7 @@ def select_targets(
                raw_sample_json
         FROM web_posts
         WHERE platform_key=?
-          AND {_selection_predicate(refresh_all)}
+          AND {_selection_predicate(refresh_all, platform=platform)}
         ORDER BY id
         """,
         (platform,),
@@ -492,6 +509,7 @@ def repaired_rows(
                    json_extract(p.raw_sample_json, '$.author_followers_source')
                         AS followers_source,
                    json_type(p.raw_sample_json, '$.author_page_badges') AS badges_type,
+                   json_type(p.raw_sample_json, '$.author_json.weibo_verify') AS weibo_verify_type,
                    SUM(CASE WHEN i.image_role='content' THEN 1 ELSE 0 END) AS content_images,
                    SUM(CASE WHEN i.image_role='content'
                                  AND COALESCE(i.local_path, '') <> ''
@@ -520,8 +538,14 @@ def repaired_rows(
             )
             badges_present = row["badges_type"] is not None
             followers_source = str(row["followers_source"] or "")
-            if refresh_all:
+            if refresh_all and platform == "zhihu":
                 recovered = recovered and followers_source == "author_page" and badges_present
+            elif refresh_all and platform == "weibo":
+                recovered = (
+                    recovered
+                    and source == WEIBO_CONTENT_DETAIL_SOURCE
+                    and row["weibo_verify_type"] is not None
+                )
             result[str(row["platform_post_id"])] = {
                 "detail_status": str(row["detail_status"] or ""),
                 "detail_source": source,
@@ -545,7 +569,7 @@ def pending_count(
         SELECT COUNT(*)
         FROM web_posts
         WHERE platform_key=?
-          AND {_selection_predicate(refresh_all)}
+          AND {_selection_predicate(refresh_all, platform=platform)}
         """,
         (platform,),
     ).fetchone()
@@ -568,7 +592,7 @@ def waived_pending_count(
         FROM post_detail_repair_waivers AS w
         JOIN web_posts AS p ON p.id=w.web_post_id
         WHERE p.platform_key=?
-          AND {_selection_predicate(refresh_all, column="p.raw_sample_json")}
+          AND {_selection_predicate(refresh_all, platform=platform, column="p.raw_sample_json")}
         """,
         (platform,),
     ).fetchone()
@@ -959,8 +983,8 @@ def _validate_repair_modes(args: argparse.Namespace) -> None:
         raise SystemExit("--dedupe-images and --refresh-all are mutually exclusive")
     if args.dedupe_images and args.platform != "zhihu":
         raise SystemExit("--dedupe-images requires --platform zhihu")
-    if args.refresh_all and args.platform != "zhihu":
-        raise SystemExit("--refresh-all requires --platform zhihu")
+    if args.refresh_all and args.platform not in {"zhihu", "weibo"}:
+        raise SystemExit("--refresh-all requires --platform zhihu or weibo")
     if args.dedupe_images and (args.post_ids or args.max_items):
         raise SystemExit("--dedupe-images does not accept --post-id or --max-items")
 

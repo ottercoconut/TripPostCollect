@@ -351,7 +351,6 @@ def test_history_modes_reject_other_platforms_and_each_other(
     db_path = tmp_path / "unused.sqlite"
     cases = [
         (["--platform", "weibo", "--dedupe-images"], "requires --platform zhihu"),
-        (["--platform", "weibo", "--refresh-all"], "requires --platform zhihu"),
         (["--platform", "zhihu", "--dedupe-images", "--refresh-all"], "mutually exclusive"),
         (["--platform", "zhihu", "--dedupe-images", "--post-id", "1"], "does not accept"),
         (["--platform", "zhihu", "--dedupe-images", "--max-items", "1"], "does not accept"),

@@ -2109,3 +2109,782 @@ def test_batch_runtime_failure_is_not_a_candidate_failure(
     assert by_id["row-b"]["outcome"] == "candidate_failed"
     assert by_id["row-b"]["reason"] == "detail_entity_missing"
     assert by_id["row-c"]["outcome"] == "refreshed"
+
+
+def _insert_refresh_post(
+    conn: sqlite3.Connection,
+    *,
+    post_id: str,
+    platform: str = "weibo",
+    topic_relevant: int = 1,
+    raw: dict | None = None,
+    author_id: str = "88",
+    keyword: str = "青岛旅游",
+    content: str = "旧青岛正文",
+    likes: int = 1,
+    comments: int = 2,
+    shares: int = 3,
+    author_name: str = "旧昵称",
+    followers: int = 3,
+    verified: int | None = 1,
+    verified_text: str | None = "旧认证",
+    image_url: str | None = "https://wx1.sinaimg.cn/large/old.jpg",
+) -> int:
+    if platform == "zhihu":
+        url = f"https://www.zhihu.com/question/1/answer/{post_id}"
+    else:
+        url = f"https://weibo.com/{author_id}/{post_id}"
+    cursor = conn.execute(
+        """
+        INSERT INTO web_posts(
+            platform_key, platform_post_id, author_platform_id, source_type, source_url,
+            canonical_url, keyword, captured_at, topic_relevant, content_text,
+            post_likes_count, post_comments_count, post_shares_count,
+            author_display_name, author_followers_count, author_following_count,
+            author_posts_count, author_description, author_profile_url,
+            author_verified, author_verified_text, raw_sample_json, post_images_count
+        ) VALUES (
+            ?, ?, ?, 'import', ?, ?, ?, '2026-11-01T00:00:00+08:00', ?, ?,
+            ?, ?, ?, ?, ?, 1, 2, '旧简介', ?, ?, ?, ?, ?
+        )
+        """,
+        (
+            platform,
+            post_id,
+            author_id if platform == "weibo" else "people-1",
+            url,
+            url,
+            keyword,
+            topic_relevant,
+            content,
+            likes,
+            comments,
+            shares,
+            author_name,
+            followers,
+            f"https://weibo.com/u/{author_id}" if platform == "weibo" else url,
+            verified,
+            verified_text,
+            json.dumps(raw or {}, ensure_ascii=False, sort_keys=True),
+            1 if image_url else 0,
+        ),
+    )
+    web_post_id = int(cursor.lastrowid)
+    if image_url:
+        conn.execute(
+            """
+            INSERT INTO web_post_images(
+                web_post_id, image_index, image_url, image_role, local_path, sha256
+            ) VALUES (?, 0, ?, 'content', ?, 'abc')
+            """,
+            (web_post_id, image_url, f"data/media/{platform}/{post_id}/0.jpg"),
+        )
+    return web_post_id
+
+
+def _waive(conn: sqlite3.Connection, web_post_id: int) -> None:
+    conn.execute(
+        """
+        INSERT INTO post_detail_repair_waivers(
+            web_post_id, reason, authorized_by, authorized_at, evidence_json
+        ) VALUES (?, 'operator_waived', 'user', '2026-11-14T00:00:00+00:00', '{}')
+        """,
+        (web_post_id,),
+    )
+
+
+def _seed_weibo_refresh_db(tmp_path: Path) -> Path:
+    from trippostcollect.db.bootstrap import bootstrap_database
+
+    db_path = tmp_path / "weibo-refresh.sqlite"
+    bootstrap_database(db_path, sync_jobs=False)
+    with sqlite3.connect(db_path) as conn:
+        _insert_refresh_post(
+            conn,
+            post_id="101",
+            raw={"content_detail_status": "detail_observed", "content_detail_source": "mobile_detail"},
+        )
+        _insert_refresh_post(
+            conn,
+            post_id="102",
+            topic_relevant=0,
+            raw={"content_detail_status": "detail_observed", "content_detail_source": "desktop_detail"},
+        )
+        _insert_refresh_post(
+            conn,
+            post_id="103",
+            raw={
+                "content_detail_status": "detail_observed",
+                "content_detail_source": "desktop_detail",
+                "author_json": {"weibo_verify": {}},
+            },
+        )
+        _insert_refresh_post(
+            conn,
+            post_id="104",
+            raw={
+                "content_detail_status": "detail_observed",
+                "content_detail_source": "desktop_detail",
+                "author_json": {"weibo_verify": {"verified": False}},
+            },
+        )
+        waived = _insert_refresh_post(
+            conn,
+            post_id="105",
+            raw={"content_detail_status": "detail_observed", "content_detail_source": "search_mblog_complete"},
+        )
+        _waive(conn, waived)
+        _insert_refresh_post(
+            conn,
+            post_id="106",
+            raw={"content_detail_status": "search_payload"},
+        )
+        _insert_refresh_post(
+            conn,
+            post_id="z-old",
+            platform="zhihu",
+            topic_relevant=0,
+            raw={"content_detail_status": "detail_observed", "content_detail_source": "answer_detail"},
+            image_url=None,
+        )
+        _insert_refresh_post(
+            conn,
+            post_id="z-marked",
+            platform="zhihu",
+            topic_relevant=1,
+            raw={
+                "content_detail_status": "detail_observed",
+                "content_detail_source": "answer_detail",
+                "author_followers_source": "author_page",
+                "author_page_badges": {},
+            },
+            image_url=None,
+        )
+        conn.commit()
+    return db_path
+
+
+def test_weibo_refresh_all_selects_only_relevant_unmarked_rows(tmp_path: Path) -> None:
+    db_path = _seed_weibo_refresh_db(tmp_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        targets, rejected, pending = repair.select_targets(
+            conn, platform="weibo", post_ids=[], max_items=0, refresh_all=True,
+        )
+        limited, _, _ = repair.select_targets(
+            conn, platform="weibo", post_ids=["106"], max_items=0, refresh_all=True,
+        )
+        capped, _, _ = repair.select_targets(
+            conn, platform="weibo", post_ids=[], max_items=1, refresh_all=True,
+        )
+        default_targets, _, default_pending = repair.select_targets(
+            conn, platform="weibo", post_ids=[], max_items=0,
+        )
+        zhihu_targets, zhihu_rejected, _ = repair.select_targets(
+            conn, platform="zhihu", post_ids=[], max_items=0, refresh_all=True,
+        )
+        assert repair.pending_count(conn, "weibo", refresh_all=True) == pending
+        assert repair.waived_pending_count(conn, "weibo", refresh_all=True) == 1
+
+    assert [item["platform_post_id"] for item in targets] == ["101", "106"]
+    assert [item["platform_post_id"] for item in rejected] == ["105"]
+    assert rejected[0]["reason"] == "post_detail_repair_waived"
+    assert pending == 3
+    assert [item["platform_post_id"] for item in limited] == ["106"]
+    assert [item["platform_post_id"] for item in capped] == ["101"]
+    assert default_pending == 1
+    assert [item["platform_post_id"] for item in default_targets] == ["106"]
+    assert [item["platform_post_id"] for item in zhihu_targets] == ["z-old"]
+    assert zhihu_rejected == []
+    assert repair._selection_predicate(True, platform="zhihu") == (
+        "json_type(raw_sample_json, '$.author_page_badges') IS NULL"
+    )
+    assert "topic_relevant" not in repair._selection_predicate(
+        True, platform="zhihu", column="p.raw_sample_json",
+    )
+
+
+def test_weibo_refresh_dry_run_reports_refreshable_total(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = _seed_weibo_refresh_db(tmp_path)
+    _redirect_repair_dirs(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "repair_post_details.py",
+            "--platform",
+            "weibo",
+            "--db",
+            str(db_path),
+            "--refresh-all",
+            "--dry-run",
+        ],
+    )
+
+    assert repair.main() == 0
+    summary, _state = _summary_and_state(tmp_path)
+    by_id = {item["platform_post_id"]: item for item in summary["target_results"]}
+    assert summary["plan"]["selection"] == "refresh_all"
+    assert summary["selection"] == "refresh_all"
+    assert summary["plan"]["initial_pending_count"] == 3
+    assert summary["plan"]["initial_waived_pending_count"] == 1
+    assert summary["plan"]["initial_unwaived_pending_count"] == 2
+    assert summary["plan"]["target_count"] == 2
+    assert by_id["101"]["outcome"] == "planned"
+    assert by_id["106"]["outcome"] == "planned"
+    assert by_id["105"]["outcome"] == "rejected"
+    assert "102" not in by_id
+    assert "103" not in by_id
+    assert "104" not in by_id
+
+
+def test_refresh_all_rejects_douyin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    db_path = tmp_path / "unused.sqlite"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["repair_post_details.py", "--platform", "douyin", "--db", str(db_path), "--refresh-all"],
+    )
+    with pytest.raises(SystemExit) as raised:
+        repair.main()
+    assert raised.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err
+
+    class _Args:
+        dedupe_images = False
+        refresh_all = True
+        platform = "douyin"
+        post_ids: list[str] = []
+        max_items = 0
+
+    with pytest.raises(SystemExit, match="requires --platform zhihu"):
+        repair._validate_repair_modes(_Args())
+
+
+def test_weibo_refresh_repaired_rows_requires_every_condition(tmp_path: Path) -> None:
+    conn = sqlite3.connect(tmp_path / "weibo-repaired.sqlite")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE web_posts(
+            id INTEGER PRIMARY KEY,
+            platform_key TEXT,
+            platform_post_id TEXT,
+            content_text TEXT,
+            raw_sample_json TEXT
+        );
+        CREATE TABLE web_post_images(
+            id INTEGER PRIMARY KEY,
+            web_post_id INTEGER,
+            image_role TEXT,
+            local_path TEXT,
+            sha256 TEXT
+        );
+        """
+    )
+
+    def add(post_id: str, text: str, raw: dict, images: list[tuple[str, str]]) -> None:
+        cursor = conn.execute(
+            """
+            INSERT INTO web_posts(platform_key, platform_post_id, content_text, raw_sample_json)
+            VALUES ('weibo', ?, ?, ?)
+            """,
+            (post_id, text, json.dumps(raw)),
+        )
+        for local_path, digest in images:
+            conn.execute(
+                """
+                INSERT INTO web_post_images(web_post_id, image_role, local_path, sha256)
+                VALUES (?, 'content', ?, ?)
+                """,
+                (int(cursor.lastrowid), local_path, digest),
+            )
+
+    marked = {
+        "content_detail_status": "detail_observed",
+        "content_detail_source": "desktop_detail",
+        "author_json": {"weibo_verify": {}},
+    }
+    unverified = {
+        "content_detail_status": "detail_observed",
+        "content_detail_source": "desktop_detail",
+        "author_json": {"weibo_verify": {"verified": False}},
+    }
+    add("empty-mark", "正文", marked, [("data/media/weibo/a.jpg", "abc")])
+    add("unverified", "正文", unverified, [("data/media/weibo/b.jpg", "abc")])
+    add(
+        "no-mark",
+        "正文",
+        {"content_detail_status": "detail_observed", "content_detail_source": "desktop_detail"},
+        [("data/media/weibo/c.jpg", "abc")],
+    )
+    add(
+        "mobile",
+        "正文",
+        {
+            "content_detail_status": "detail_observed",
+            "content_detail_source": "mobile_detail",
+            "author_json": {"weibo_verify": {}},
+        },
+        [("data/media/weibo/d.jpg", "abc")],
+    )
+    add("blank", "  ", marked, [("data/media/weibo/e.jpg", "abc")])
+    add("unsaved", "正文", marked, [("data/media/weibo/f.jpg", "")])
+    add("zero", "正文", marked, [])
+    add(
+        "unobserved",
+        "正文",
+        {
+            "content_detail_status": "search_payload",
+            "content_detail_source": "desktop_detail",
+            "author_json": {"weibo_verify": {}},
+        },
+        [("data/media/weibo/g.jpg", "abc")],
+    )
+    add("partial", "正文", marked, [("data/media/weibo/h.jpg", "abc"), ("", "")])
+    conn.commit()
+    ids = [
+        "empty-mark", "unverified", "no-mark", "mobile", "blank", "unsaved", "zero", "unobserved", "partial",
+    ]
+    refresh = repair.repaired_rows(conn, "weibo", ids, refresh_all=True)
+    plain = repair.repaired_rows(conn, "weibo", ids)
+    assert refresh["empty-mark"]["recovered"] is True
+    assert refresh["unverified"]["recovered"] is True
+    assert refresh["no-mark"]["recovered"] is False
+    assert refresh["mobile"]["recovered"] is False
+    assert refresh["blank"]["recovered"] is False
+    assert refresh["unsaved"]["recovered"] is False
+    assert refresh["zero"]["recovered"] is False
+    assert refresh["unobserved"]["recovered"] is False
+    assert refresh["partial"]["recovered"] is False
+    assert plain["mobile"]["recovered"] is True
+    assert plain["no-mark"]["recovered"] is True
+    assert plain["zero"]["recovered"] is False
+    conn.close()
+
+
+def test_weibo_refresh_failure_keeps_original_row(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trippostcollect.db.bootstrap import bootstrap_database
+
+    db_path = tmp_path / "weibo-fail.sqlite"
+    bootstrap_database(db_path, sync_jobs=False)
+    with sqlite3.connect(db_path) as conn:
+        _insert_refresh_post(conn, post_id="201", content="待刷新青岛", likes=4)
+        _insert_refresh_post(conn, post_id="202", content="失败青岛", likes=5, image_url="https://wx1.sinaimg.cn/large/keep.jpg")
+        _waive(conn, _insert_refresh_post(conn, post_id="203", content="豁免青岛"))
+        conn.commit()
+    _redirect_repair_dirs(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "repair_post_details.py",
+            "--platform",
+            "weibo",
+            "--db",
+            str(db_path),
+            "--refresh-all",
+            "--batch-size",
+            "10",
+        ],
+    )
+
+    def fake_child(command: list[str], **_kwargs: object) -> dict:
+        targets = json.loads(Path(command[command.index("--repair-targets-file") + 1]).read_text(encoding="utf-8"))
+        ids = [item["platform_post_id"] for item in targets]
+        assert "203" not in ids
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                """
+                UPDATE web_posts
+                SET content_text=?, post_likes_count=?, raw_sample_json=?
+                WHERE platform_post_id='201'
+                """,
+                (
+                    "刷新后的青岛正文",
+                    9,
+                    json.dumps(
+                        {
+                            "author_json": {"weibo_verify": {}},
+                            "content_detail_source": "desktop_detail",
+                            "content_detail_status": "detail_observed",
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                ),
+            )
+            conn.commit()
+            before = conn.execute(
+                """
+                SELECT content_text, post_likes_count, author_display_name, raw_sample_json
+                FROM web_posts WHERE platform_post_id='202'
+                """
+            ).fetchone()
+        stdout = _write_child_summary(
+            tmp_path / "child.json",
+            {
+                "import_completion_met": True,
+                "formal_validation": {
+                    "valid_total_count": 1,
+                    "skipped_candidate_failures": [{
+                        "platform_post_id": "202",
+                        "error_code": "detail_unavailable",
+                        "detail": "status deleted",
+                    }],
+                },
+                "import_result": {"processed_rows": 1},
+            },
+        )
+        fake_child.before = before
+        return {"returncode": 0, "stdout": stdout, "stderr": ""}
+
+    monkeypatch.setattr(repair, "run_repair_child", fake_child)
+    monkeypatch.setattr(repair, "verify_image_artifacts", lambda *_a, **_k: {"ok": True})
+    monkeypatch.setattr(repair, "verify_image_persistence", lambda *_a, **_k: {"ok": True})
+
+    assert repair.main() == 0
+    summary, _state = _summary_and_state(tmp_path)
+    by_id = {item["platform_post_id"]: item for item in summary["target_results"]}
+    assert by_id["201"]["outcome"] == "refreshed"
+    assert by_id["202"]["outcome"] == "candidate_failed"
+    assert by_id["202"]["reason"] == "detail_unavailable"
+    assert by_id["203"]["outcome"] == "rejected"
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        assert conn.execute("SELECT COUNT(*) FROM web_posts").fetchone()[0] == 3
+        failed = conn.execute(
+            """
+            SELECT content_text, post_likes_count, author_display_name, raw_sample_json
+            FROM web_posts WHERE platform_post_id='202'
+            """
+        ).fetchone()
+        images = conn.execute(
+            """
+            SELECT image_url FROM web_post_images
+            WHERE web_post_id=(SELECT id FROM web_posts WHERE platform_post_id='202')
+            """
+        ).fetchall()
+        targets, rejected, _pending = repair.select_targets(
+            conn, platform="weibo", post_ids=[], max_items=0, refresh_all=True,
+        )
+    assert tuple(failed) == tuple(fake_child.before)
+    assert [row[0] for row in images] == ["https://wx1.sinaimg.cn/large/keep.jpg"]
+    assert [item["platform_post_id"] for item in targets] == ["202"]
+    assert [item["platform_post_id"] for item in rejected] == ["203"]
+
+
+def _parsed_weibo_record(*, post_id: str, author_id: int, screen_name: str, followers: int, text: str, likes: int, comments: int, shares: int, pid: str, verify: dict | None) -> dict:
+    from trippostcollect.platforms.weibo.parser import parse_weibo_detail
+
+    user = {
+        "id": author_id,
+        "screen_name": screen_name,
+        "followers_count": followers,
+        "friends_count": followers + 1,
+        "statuses_count": followers + 2,
+        "description": f"{screen_name}简介",
+    }
+    if verify is not None:
+        user.update(verify)
+    parsed = parse_weibo_detail(
+        {
+            "idstr": post_id,
+            "mid": post_id,
+            "mblogid": f"M{post_id}",
+            "created_at": "Sat Jun 14 12:00:00 +0800 2025",
+            "text_raw": text,
+            "attitudes_count": likes,
+            "comments_count": comments,
+            "reposts_count": shares,
+            "pic_ids": [pid],
+            "pic_infos": {
+                pid: {"type": "pic", "largest": {"url": f"https://wx1.sinaimg.cn/large/{pid}.jpg"}},
+            },
+            "user": {"id": author_id},
+        },
+        user,
+        mblogid=f"M{post_id}",
+        source_keyword="青岛旅游",
+        current_timestamp=lambda: 1,
+    )
+    assert parsed.record is not None
+    return parsed.record
+
+
+def _stage_weibo_record(project_root: Path, record: dict, payload: bytes) -> tuple[dict, Path, str]:
+    from trippostcollect.artifacts.image_candidates import content_image_candidates
+    from trippostcollect.artifacts.image_manifest import ImageManifestEntry, write_manifest_atomic
+    from trippostcollect.artifacts.image_materialization import write_staging_image
+    from trippostcollect.records.formal import formal_record_identity
+
+    data_root = project_root / "temp" / "batch" / record["note_id"] / "data"
+    manifest_path = data_root / "weibo" / "image_manifest.jsonl"
+    candidate = content_image_candidates("weibo", record)[0]
+    staged = write_staging_image(
+        [payload],
+        staging_root=data_root,
+        relative_stem=f"weibo/images/{candidate.platform_post_id}/{candidate.source_index:03d}",
+    )
+    write_manifest_atomic(
+        manifest_path,
+        [ImageManifestEntry(
+            schema_version=1,
+            platform_key=candidate.platform_key,
+            platform_post_id=candidate.platform_post_id,
+            image_role=candidate.image_role,
+            source_index=candidate.source_index,
+            source_key=candidate.source_key,
+            source_asset_key=candidate.source_asset_key,
+            source_url=candidate.source_url,
+            fetch_status="downloaded",
+            attempts=1,
+            http_status=200,
+            staging_path=staged.path.relative_to(data_root).as_posix(),
+            size_bytes=staged.size_bytes,
+            mime_type=staged.mime_type,
+            width=staged.width,
+            height=staged.height,
+            sha256=staged.sha256,
+            error_code=None,
+        )],
+    )
+    selected = {
+        "platform": "weibo",
+        "record": record,
+        "identity": formal_record_identity("weibo", record),
+        "manifest_paths": [str(manifest_path)],
+    }
+    return selected, manifest_path, staged.sha256
+
+
+def _repair_visit(ledger, *, post_id: str, author_id: str, asset_key: str, digest: str) -> dict:
+    at = "2026-11-24T00:00:00+00:00"
+
+    def seq() -> int:
+        return ledger.next_seq()
+
+    trigger = ledger.append(
+        "action", seq=seq(), page_role="detail", action="navigate", target={"note_id": post_id},
+    )
+    detail = ledger.append(
+        "visit", seq=seq(), at=at, recorded_at=at, page_role="detail", stage="note_detail",
+        source="page_response", rule="weibo.statuses_show", status=200, subject_id=post_id, trigger=trigger,
+    )
+    start = seq()
+    ledger.append(
+        "pause", seq=seq(), page_role="detail", stage="note_detail", start_seq=start, seconds=1.0, continuity="n/a",
+    )
+    author = ledger.append(
+        "visit", seq=seq(), at=at, recorded_at=at, page_role="detail", stage="creator_profile",
+        source="page_response", rule="weibo.side_user", status=200, subject_id=author_id, trigger=trigger,
+    )
+    image = ledger.append(
+        "visit", seq=seq(), at=at, recorded_at=at, page_role="detail", stage="note_image",
+        source="cdn_direct", rule="weibo.content_image", status=200, subject_id=post_id, trigger=trigger,
+        asset_key=asset_key, sha256=digest,
+    )
+    return {
+        "ledger_id": ledger.ledger_id,
+        "note_detail": detail,
+        "creator_profile": author,
+        "images": [image],
+    }
+
+
+def test_weibo_refresh_import_updates_row_and_skips_rerun(tmp_path: Path) -> None:
+    from io import BytesIO
+
+    from PIL import Image
+
+    from trippostcollect.application.visit_gate import validate_content_visits
+    from trippostcollect.artifacts.formal_images import materialize_formal_record_images
+    from trippostcollect.db.bootstrap import bootstrap_database
+    from trippostcollect.db.content import import_valid_records
+    from trippostcollect.runtime.visit_ledger import VisitLedger
+
+    def png(color: tuple[int, int, int]) -> bytes:
+        output = BytesIO()
+        Image.new("RGB", (7, 5), color=color).save(output, format="PNG")
+        return output.getvalue()
+
+    unverified = _parsed_weibo_record(
+        post_id="525", author_id=88, screen_name="新海边", followers=42, text="青岛新正文夜景",
+        likes=19, comments=18, shares=17, pid="pid-525",
+        verify={"verified": False, "verified_type": -1, "verified_reason": ""},
+    )
+    empty_verify = _parsed_weibo_record(
+        post_id="526", author_id=89, screen_name="空认证", followers=5, text="青岛空认证正文",
+        likes=4, comments=6, shares=8, pid="pid-526", verify=None,
+    )
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    staged = [
+        _stage_weibo_record(project_root, unverified, png((1, 2, 3))),
+        _stage_weibo_record(project_root, empty_verify, png((4, 5, 6))),
+    ]
+    ledger_path = project_root / "repair.content_visits.jsonl"
+    ledger = VisitLedger.create(
+        ledger_path, platform="weibo", mode="repair", clock=lambda: "2026-11-24T00:00:00+00:00",
+    )
+    for record, _manifest, digest in staged:
+        asset_key = record["record"]["image_assets"][0]["source_asset_key"]
+        record["record"]["content_visit_refs"] = _repair_visit(
+            ledger,
+            post_id=record["record"]["note_id"],
+            author_id=record["record"]["author_platform_id"],
+            asset_key=asset_key,
+            digest=digest,
+        )
+    visit = validate_content_visits(
+        [item[0]["record"] for item in staged],
+        [ledger_path],
+        platform="weibo",
+        mode="repair",
+        manifests=[item[1] for item in staged],
+    )
+    assert visit["content_visit_ok"] is True, visit
+
+    db_path = project_root / "refresh.sqlite"
+    bootstrap_database(db_path, sync_jobs=False)
+    with sqlite3.connect(db_path) as conn:
+        _insert_refresh_post(
+            conn, post_id="525", content="旧青岛正文", likes=1, comments=2, shares=3,
+            author_name="旧海边", followers=3, image_url="https://wx1.sinaimg.cn/large/old-525.jpg",
+        )
+        _insert_refresh_post(
+            conn, post_id="526", author_id="89", content="旧空认证", likes=1, comments=1, shares=1,
+            author_name="旧空", followers=1, image_url="https://wx1.sinaimg.cn/large/old-526.jpg",
+        )
+        _insert_refresh_post(conn, post_id="527", content="仍待刷新青岛")
+        conn.commit()
+        before_count = conn.execute("SELECT COUNT(*) FROM web_posts").fetchone()[0]
+
+    media_root = project_root / "media"
+    selected = [item[0] for item in staged]
+    _report, materialized, complete = materialize_formal_record_images(
+        selected, project_root=project_root, media_root=media_root, promote=True,
+    )
+    assert complete == {item["identity"] for item in selected}
+    for item in selected:
+        item["materialized_images"] = materialized[item["identity"]]
+    imported = import_valid_records(
+        {"captured_at": "2026-11-24T00:00:00+00:00", "keyword": "青岛旅游", "batch_dir": str(project_root)},
+        selected,
+        db_path,
+        project_root=project_root,
+        media_root=media_root,
+        require_local_images=True,
+    )
+    assert imported["updated_rows"] == 2
+    assert imported["inserted_rows"] == 0
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        assert conn.execute("SELECT COUNT(*) FROM web_posts").fetchone()[0] == before_count
+        rows = {
+            row["platform_post_id"]: row
+            for row in conn.execute(
+                """
+                SELECT platform_post_id, content_text, topic_relevant, post_likes_count,
+                       post_comments_count, post_shares_count, author_display_name,
+                       author_platform_id, author_followers_count, author_following_count,
+                       author_posts_count, author_description, author_profile_url,
+                       author_verified, author_verified_text, author_json, raw_sample_json
+                FROM web_posts ORDER BY id
+                """
+            )
+        }
+        images = {
+            row["platform_post_id"]: row["image_url"]
+            for row in conn.execute(
+                """
+                SELECT p.platform_post_id, i.image_url
+                FROM web_post_images i JOIN web_posts p ON p.id=i.web_post_id
+                WHERE i.image_role='content'
+                """
+            )
+        }
+        targets, _rejected, _pending = repair.select_targets(
+            conn, platform="weibo", post_ids=[], max_items=0, refresh_all=True,
+        )
+    fresh = rows["525"]
+    blank = rows["526"]
+    assert fresh["content_text"] == "青岛新正文夜景"
+    assert fresh["topic_relevant"] == 1
+    assert (fresh["post_likes_count"], fresh["post_comments_count"], fresh["post_shares_count"]) == (19, 18, 17)
+    assert fresh["author_display_name"] == "新海边"
+    assert fresh["author_platform_id"] == "88"
+    assert fresh["author_followers_count"] == 42
+    assert fresh["author_following_count"] == 43
+    assert fresh["author_posts_count"] == 44
+    assert fresh["author_description"] == "新海边简介"
+    assert fresh["author_profile_url"] == "https://weibo.com/u/88"
+    assert fresh["author_verified"] == 0
+    assert fresh["author_verified_text"] is None
+    assert json.loads(fresh["author_json"])["weibo_verify"]["verified"] is False
+    assert json.loads(fresh["raw_sample_json"])["author_json"]["weibo_verify"]["verified"] is False
+    assert images["525"] == "https://wx1.sinaimg.cn/large/pid-525.jpg"
+    assert blank["content_text"] == "青岛空认证正文"
+    assert blank["topic_relevant"] == 1
+    assert blank["author_display_name"] == "空认证"
+    assert blank["author_verified"] is None
+    assert json.loads(blank["author_json"])["weibo_verify"] == {}
+    assert json.loads(blank["raw_sample_json"])["author_json"]["weibo_verify"] == {}
+    assert images["526"] == "https://wx1.sinaimg.cn/large/pid-526.jpg"
+    assert rows["527"]["content_text"] == "仍待刷新青岛"
+    assert images["527"] == "https://wx1.sinaimg.cn/large/old.jpg"
+    assert [item["platform_post_id"] for item in targets] == ["527"]
+
+
+def test_weibo_refresh_image_failure_does_not_rewrite_row(tmp_path: Path) -> None:
+    from trippostcollect.db.bootstrap import bootstrap_database
+    from trippostcollect.db.content import FormalImportBeforeCommitError, import_valid_records
+    from trippostcollect.records.formal import formal_record_identity
+
+    record = _parsed_weibo_record(
+        post_id="601", author_id=88, screen_name="新海边", followers=42, text="青岛失败不应入库",
+        likes=9, comments=8, shares=7, pid="pid-601",
+        verify={"verified": False},
+    )
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    db_path = project_root / "fail.sqlite"
+    bootstrap_database(db_path, sync_jobs=False)
+    with sqlite3.connect(db_path) as conn:
+        _insert_refresh_post(
+            conn, post_id="601", content="原青岛正文", likes=1,
+            image_url="https://wx1.sinaimg.cn/large/old-601.jpg",
+        )
+        conn.commit()
+        before_posts = conn.execute("SELECT COUNT(*) FROM web_posts").fetchone()[0]
+        before = conn.execute(
+            "SELECT content_text, post_likes_count, author_display_name, raw_sample_json FROM web_posts"
+        ).fetchone()
+        before_images = conn.execute("SELECT image_url FROM web_post_images").fetchall()
+
+    with pytest.raises(FormalImportBeforeCommitError):
+        import_valid_records(
+            {"captured_at": "2026-11-24T00:00:00+08:00", "keyword": "青岛旅游", "batch_dir": str(project_root)},
+            [{
+                "platform": "weibo",
+                "record": record,
+                "identity": formal_record_identity("weibo", record),
+            }],
+            db_path,
+            project_root=project_root,
+            media_root=project_root / "media",
+            require_local_images=True,
+        )
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM web_posts").fetchone()[0] == before_posts
+        assert conn.execute(
+            "SELECT content_text, post_likes_count, author_display_name, raw_sample_json FROM web_posts"
+        ).fetchone() == before
+        assert conn.execute("SELECT image_url FROM web_post_images").fetchall() == before_images

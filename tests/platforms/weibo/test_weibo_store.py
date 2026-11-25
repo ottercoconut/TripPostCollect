@@ -382,3 +382,69 @@ async def test_note_store_keeps_pid_order_and_ignores_avatar(monkeypatch):
     assert captured["content_detail_source"] == "desktop_detail"
     assert captured["note_url"] == "https://weibo.com/88/Abc12"
     assert "avatar" not in json.dumps(captured)
+
+
+def _user_without_verify_keys() -> dict:
+    user = _user()
+    for key in ("verified", "verified_type", "verified_type_ext", "verified_reason"):
+        user.pop(key, None)
+    return user
+
+
+def test_unverified_false_still_stores_verify_blob():
+    """未认证且带 verified=false 时，原值非空，列和 raw_sample_json 都有 weibo_verify。"""
+
+    user = _user_without_verify_keys()
+    user.update({"verified": False, "verified_type": -1, "verified_reason": ""})
+    assert weibo_store.weibo_verify_of(user) == {
+        "verified": False,
+        "verified_type": -1,
+        "verified_reason": "",
+    }
+    record = _record(user=user)
+    assert record["author_verified"] == 0
+    assert record["author_verified_text"] is None
+    assert record["author_json"]["weibo_verify"]["verified"] is False
+    row = row_for_record(
+        "weibo",
+        record,
+        artifact_dir="artifacts",
+        captured_at="2026-11-19T00:00:00+08:00",
+        keyword="青岛",
+        image_items_for_record=image_items_for_record,
+        ImagePersistenceError=RuntimeError,
+    )
+    assert json.loads(row["author_json"])["weibo_verify"]["verified"] is False
+    raw = json.loads(row["raw_sample_json"])
+    assert raw["author_json"]["weibo_verify"]["verified"] is False
+
+
+def test_side_user_without_verify_keys_still_writes_empty_marker():
+    """认证键全缺时 weibo_verify_of 为 {}。投影成功仍要留下空对象，读失败则没有记录。"""
+
+    user = _user_without_verify_keys()
+    assert weibo_store.weibo_verify_of(user) == {}
+    assert weibo_store.weibo_verify_of({"verified": None, "verified_reason": None}) == {}
+    record = _record(user=user)
+    assert record["author_verified"] is None
+    assert record["author_json"]["weibo_verify"] == {}
+    row = row_for_record(
+        "weibo",
+        record,
+        artifact_dir="artifacts",
+        captured_at="2026-11-19T00:00:00+08:00",
+        keyword="青岛",
+        image_items_for_record=image_items_for_record,
+        ImagePersistenceError=RuntimeError,
+    )
+    assert json.loads(row["author_json"])["weibo_verify"] == {}
+    raw = json.loads(row["raw_sample_json"])
+    assert raw["author_json"]["weibo_verify"] == {}
+    skipped = weibo_store.parse_weibo_detail(
+        _status(text_raw="  ", longText={"content": ""}),
+        user,
+        mblogid="Abc12",
+        source_keyword="青岛",
+        current_timestamp=lambda: 0,
+    )
+    assert skipped.record is None
