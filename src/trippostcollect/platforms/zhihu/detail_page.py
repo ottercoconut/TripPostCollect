@@ -30,7 +30,7 @@ logger = logging.getLogger("TripPostCollect")
 
 DETAIL_ATTEMPTS = 3
 DETAIL_RETRY_PAUSE_SECONDS = 1.0
-DETAIL_DWELL_SECONDS = (5.0, 9.0)
+DETAIL_DWELL_SECONDS = (2.0, 3.0)
 DETAIL_TAB_TIMEOUT_MS = 8_000
 DETAIL_LOAD_TIMEOUT_MS = 15_000
 
@@ -71,6 +71,8 @@ AUTHOR_PROFILE_MISSING = "author_profile_missing"
 # 点作者之前的节奏停顿（门禁要求停在点击之前）。作者标签打开后的停留另计。
 AUTHOR_CLICK_PAUSE_SECONDS = (1.0, 2.0)
 AUTHOR_TAB_HOLD_SECONDS = (5.0, 9.0)
+# 同一轮、同一 (profile_kind, url_token) 第二次起。首次成功访问仍用上面的 5–9 秒。
+REPEAT_AUTHOR_TAB_HOLD_SECONDS = (2.0, 3.0)
 # 路径正好是 /people/{token} 或 /org/{token}。查询串和片段在 path 之外，不构成子路径。
 _AUTHOR_HOME_RE = re.compile(r"^/(people|org)/([^/?#]+)$")
 _AUTHOR_HOME_KINDS = ("people", "org")
@@ -152,12 +154,21 @@ def _page_closed(page: Any) -> bool:
 class ZhihuDetailPages:
     """在搜索页点击标题打开详情，或按已知 URL 直接打开，然后读取页面状态。"""
 
-    def __init__(self, capture: Any, extractor: ZhihuExtractor, search_page: Any) -> None:
+    def __init__(
+        self,
+        capture: Any,
+        extractor: ZhihuExtractor,
+        search_page: Any,
+        *,
+        visited_authors: set[tuple[str, str]] | None = None,
+    ) -> None:
         self.capture = capture
         self.extractor = extractor
         self.search_page = search_page
         self.channel = capture.channel
         self._opened: Any = None
+        # 正式轮次每次详情都新建本类，集合由 ZhihuCrawler 传入，一轮共用。
+        self._visited_authors = set() if visited_authors is None else visited_authors
 
     async def open_from_search(self, content: ZhihuContent) -> ZhihuContent:
         return await self._attempts(content, direct_url="")
@@ -364,7 +375,12 @@ class ZhihuDetailPages:
             if user is None or not visit_id:
                 raise self._candidate(content, AUTHOR_PROFILE_MISSING)
             apply_author_page(content, user, url_token, profile_kind=profile_kind)
-            await self._pause(author_page, "author_tab", *AUTHOR_TAB_HOLD_SECONDS, page_role="author")
+            await self._pause(
+                author_page,
+                "author_tab",
+                *self._author_tab_hold((profile_kind, url_token)),
+                page_role="author",
+            )
             return visit_id
         finally:
             await self._close_author_tab(author_page, content)
@@ -392,6 +408,16 @@ class ZhihuDetailPages:
                 if author_page_token(str(href or "")) == token:
                     return item
         return None
+
+    def _author_tab_hold(self, key: tuple[str, str]) -> tuple[float, float]:
+        """即将停留时调用。同一 (profile_kind, url_token) 已成功访问过则用短停留，并记下这次。"""
+
+        repeat = bool(key[0] and key[1]) and key in self._visited_authors
+        if key[0] and key[1]:
+            self._visited_authors.add(key)
+        if repeat:
+            return REPEAT_AUTHOR_TAB_HOLD_SECONDS
+        return AUTHOR_TAB_HOLD_SECONDS
 
     async def _pause(
         self, page: Any, stage: str, low: float, high: float, *, page_role: str,

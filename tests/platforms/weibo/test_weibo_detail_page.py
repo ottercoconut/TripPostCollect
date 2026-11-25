@@ -1353,3 +1353,31 @@ async def test_repair_outcomes_cover_each_silent_skip(monkeypatch, tmp_path):
     assert filled["100"]["evidence_source"] == "weibo_detail"
     assert filled["200"]["error_code"] == "repair_target_video"
     assert "http" not in json.dumps(filled, ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+async def test_detail_dwell_is_drawn_from_two_to_three_seconds(monkeypatch, tmp_path):
+    """详情停留抽样区间是 (2, 3)。点开前的搜索停顿仍是 (1.2, 2.8)，账本记下抽到的值。"""
+
+    page, capture, _context = _bind(monkeypatch, tmp_path)
+    draws: list[tuple[float, float]] = []
+
+    def uniform(low, high):
+        draws.append((float(low), float(high)))
+        return float(low)
+
+    monkeypatch.setattr(detail_mod.random, "uniform", uniform)
+    page.plan([{"url": SHOW, "json": show_body()}, {"url": SIDE, "json": side_body()}])
+    try:
+        await WeiboDetailPages(capture, page).open_from_search(_candidate())
+    finally:
+        await capture.aclose()
+
+    pauses = [line for line in _visits(tmp_path) if line.get("kind") == "pause"]
+    paired = [
+        (line["stage"], bounds, line["seconds"])
+        for line, bounds in zip(pauses, draws, strict=True)
+    ]
+    assert [bounds for stage, bounds, _seconds in paired if stage == "note_detail"] == [(2.0, 3.0)]
+    assert [bounds for stage, bounds, _seconds in paired if stage == "search_results"] == [(1.2, 2.8)]
+    assert [seconds for stage, _bounds, seconds in paired if stage == "note_detail"] == [2.0]

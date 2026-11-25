@@ -775,3 +775,130 @@ def test_client_has_no_detail_http_or_signer():
     assert not hasattr(ZhiHuClient, "_pre_headers")
     with pytest.raises(ModuleNotFoundError):
         __import__("trippostcollect.platforms.zhihu.signer")
+
+
+def _watch_uniform(monkeypatch, draws: list[tuple[float, float]] | None = None):
+    box = [] if draws is None else draws
+
+    def uniform(low, high):
+        box.append((float(low), float(high)))
+        return float(low)
+
+    import trippostcollect.platforms.zhihu.detail_page as detail_page
+
+    monkeypatch.setattr(detail_page.random, "uniform", uniform)
+    return box
+
+
+def _paired_pauses(root, draws):
+    pauses = [line for line in ledger_lines(root) if line.get("kind") == "pause"]
+    assert len(pauses) == len(draws)
+    return [
+        (line["stage"], bounds, line["seconds"])
+        for line, bounds in zip(pauses, draws, strict=True)
+    ]
+
+
+def _answer(content_id: str) -> ZhihuContent:
+    return ZhihuContent(
+        content_id=content_id,
+        question_id="10",
+        content_type="answer",
+        content_text="搜索",
+        author_platform_id="author-1",
+        user_nickname="作者",
+    )
+
+
+def _card(content_id: str) -> dict:
+    return {
+        "id": content_id,
+        "type": "answer",
+        "href": f"https://www.zhihu.com/question/10/answer/{content_id}",
+    }
+
+
+def _state_for_token(content_id: str, token: str) -> str:
+    payload = json.loads(_state(content_id))
+    author = payload["initialState"]["entities"]["answers"][content_id]["author"]
+    author["id"] = token
+    author["urlToken"] = token
+    author["url_token"] = token
+    return json.dumps(payload)
+
+
+def _author_state_for(token: str) -> str:
+    payload = json.loads(_author_state())
+    users = payload["initialState"]["entities"]["users"]
+    users[token] = users.pop("author")
+    users[token]["urlToken"] = token
+    return json.dumps(payload)
+
+
+@pytest.mark.asyncio
+async def test_repeat_author_hold_is_shorter_inside_one_round(monkeypatch, tmp_path):
+    """同一 crawler 内同一作者第二次起抽 (2, 3)；失败不计入；新 crawler 不继承。"""
+
+    from trippostcollect.platforms.zhihu.models import ZhihuDetailFetchError
+    import trippostcollect.platforms.zhihu.detail_page as detail_page
+
+    monkeypatch.setattr(detail_page, "DETAIL_ATTEMPTS", 1)
+    monkeypatch.setattr(detail_page, "DETAIL_RETRY_PAUSE_SECONDS", 0)
+    crawler, page, root = prepare(monkeypatch, tmp_path)
+    draws = _watch_uniform(monkeypatch)
+    page.cards = [_card(content_id) for content_id in ("101", "102", "103", "104")]
+    page.author_state = json.dumps({"initialState": {"entities": {"users": {}}}})
+
+    with pytest.raises(ZhihuDetailFetchError) as caught:
+        await crawler.enrich_search_content_detail(_answer("101"))
+    assert caught.value.code == "author_profile_missing"
+
+    page.author_state = _author_state()
+    first = await crawler.enrich_search_content_detail(_answer("102"))
+    before_clicks = sum(
+        1 for line in ledger_lines(root)
+        if line.get("kind") == "action" and line.get("action") == "click_author"
+    )
+    second = await crawler.enrich_search_content_detail(_answer("103"))
+    clicks = [
+        line for line in ledger_lines(root)
+        if line.get("kind") == "action" and line.get("action") == "click_author"
+    ]
+    assert len(clicks) == before_clicks + 1
+    assert first.content_visit_refs["creator_profile"] != second.content_visit_refs["creator_profile"]
+    visit_ids = [
+        line["id"] for line in ledger_lines(root)
+        if line.get("kind") == "visit" and line.get("stage") == "creator_profile"
+    ]
+    assert first.content_visit_refs["creator_profile"] in visit_ids
+    assert second.content_visit_refs["creator_profile"] in visit_ids
+    token = "other-qd"
+    page.state_for = lambda card, author_token=token: _state_for_token(card["id"], author_token)
+    page.detail_author_links = [{
+        "kind": "author",
+        "id": token,
+        "href": f"https://www.zhihu.com/people/{token}",
+    }]
+    page.author_state = _author_state_for(token)
+    await crawler.enrich_search_content_detail(_answer("104"))
+
+    paired = _paired_pauses(root, draws)
+    assert [bounds for stage, bounds, _seconds in paired if stage == "note_detail"] == [(2.0, 3.0)] * 4
+    assert [bounds for stage, bounds, _seconds in paired if stage == "author_tab"] == [
+        (5.0, 9.0), (2.0, 3.0), (5.0, 9.0),
+    ]
+    assert [bounds for stage, bounds, _seconds in paired if stage == "creator_profile"] == [(1.0, 2.0)] * 4
+    assert [seconds for stage, _bounds, seconds in paired if stage == "note_detail"] == [2.0] * 4
+    assert [seconds for stage, _bounds, seconds in paired if stage == "author_tab"] == [5.0, 2.0, 5.0]
+    assert before_clicks >= 1
+
+    round2 = tmp_path / "round2"
+    round2.mkdir()
+    crawler2, page2, root2 = prepare(monkeypatch, round2)
+    split = len(draws)
+    _watch_uniform(monkeypatch, draws)
+    page2.cards = [_card("101")]
+    await crawler2.enrich_search_content_detail(_answer("101"))
+    fresh = _paired_pauses(root2, draws[split:])
+    assert [bounds for stage, bounds, _seconds in fresh if stage == "author_tab"] == [(5.0, 9.0)]
+    assert [bounds for stage, bounds, _seconds in fresh if stage == "note_detail"] == [(2.0, 3.0)]

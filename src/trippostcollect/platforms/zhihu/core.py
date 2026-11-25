@@ -68,6 +68,8 @@ class ZhihuCrawler:
         self.ip_proxy_pool = None  # Proxy IP pool for automatic proxy refresh
         self._page_capture: ZhihuPageCapture | None = None
         self._opened_search_keyword: str | None = None
+        # 每次详情都新建 ZhihuDetailPages，作者停留记忆放在 crawler 上，一轮共用，不落盘。
+        self._visited_author_keys: set[tuple[str, str]] = set()
 
 
     async def _activate_latest_zhihu_page(self) -> None:
@@ -123,7 +125,12 @@ class ZhihuCrawler:
         capture = self._page_capture
         if capture is None:
             raise RuntimeError("zhihu_capture_channel_missing")
-        return ZhihuDetailPages(capture, self._extractor, self.context_page)
+        return ZhihuDetailPages(
+            capture,
+            self._extractor,
+            self.context_page,
+            visited_authors=self._visited_author_keys,
+        )
 
     async def enrich_search_content_detail(
         self,
@@ -145,6 +152,7 @@ class ZhihuCrawler:
         Returns:
 
         """
+        self._visited_author_keys = set()
         playwright_proxy_format = None
         try:
             async with self.ports.async_playwright() as playwright:

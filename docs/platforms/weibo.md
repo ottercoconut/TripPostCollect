@@ -161,7 +161,7 @@
 - 详情数据是新标签页面自身请求 `/ajax/statuses/show?id=…&isGetLongText=true` 的响应（被动截获，
   `page_response`）。只接受 `idstr`（或 `mid`）与卡片 `mid` 完全一致的那一条，同页评论、推荐等响应里的
   其他微博对象不参与。
-- 详情标签停留随机 5–9 秒（账本阶段 `note_detail`），然后关闭，回到搜索页。
+- 详情标签停留随机 2–3 秒（账本阶段 `note_detail`；#227，操作人 2026-11-25 认可），然后关闭，回到搜索页。
 - 正文取 `longText.content`，没有该键或为空时取 `text_raw`，结果必须非空；来源为
   `content_detail_source=desktop_detail`，并写 `content_detail_status=detail_observed`。
   - 侦察实例中，带 `longText` 的长文，其 `longText.content` 与 `text_raw` 等长，都是全文。
