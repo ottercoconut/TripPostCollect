@@ -31,7 +31,9 @@ from trippostcollect.application.repair import write_stored_content_images as wr
 from trippostcollect.application.repair import load_weibo_repair_outcomes as load_weibo_repair_outcomes
 from trippostcollect.application.repair import load_xhs_repair_report as load_xhs_repair_report
 from trippostcollect.application.repair import post_repair_pagination_evidence as post_repair_pagination_evidence
+from trippostcollect.application.repair import post_repair_successful_identities as post_repair_successful_identities
 from trippostcollect.application.repair import weibo_posted_repair_outcomes as weibo_posted_repair_outcomes
+from trippostcollect.application.repair import zhihu_posted_repair_outcomes as zhihu_posted_repair_outcomes
 from trippostcollect.application.repair import repair_candidate_execution_completed as repair_candidate_execution_completed
 from trippostcollect.application.repair import repair_partial_child_execution_allowed as repair_partial_child_execution_allowed
 from trippostcollect.application.repair import xhs_repair_pagination_evidence as xhs_repair_pagination_evidence
@@ -658,6 +660,17 @@ def collect_formal_records(
     return validation_summary, selected
 
 
+def posted_repair_outcomes_for_platform(
+    records: list[dict[str, Any]],
+    platform: str,
+) -> list[dict[str, Any]] | None:
+    """微博与知乎各自只读自己的细记录。没有记录时返回 None，差额口径不变。"""
+
+    if platform == "zhihu":
+        return zhihu_posted_repair_outcomes(records, platform)
+    return weibo_posted_repair_outcomes(records, platform)
+
+
 def import_valid_records_with_media_rollback(
     summary: dict[str, Any],
     selected: list[dict[str, Any]],
@@ -668,6 +681,7 @@ def import_valid_records_with_media_rollback(
     project_root: str | Path = PROJECT_ROOT,
     media_root: str | Path = LOCAL_MEDIA_ROOT,
     progress_callback: Callable[[], object] | None = None,
+    skip_existing: bool = False,
 ) -> dict[str, Any]:
     try:
         return import_valid_records(
@@ -678,6 +692,7 @@ def import_valid_records_with_media_rollback(
             media_root=media_root,
             require_local_images=True,
             progress_callback=progress_callback,
+            skip_existing=skip_existing,
         )
     except FormalImportBeforeCommitError as exc:
         rolled_back = rollback_newly_promoted_images(
@@ -793,6 +808,10 @@ def _run_platform_without_policy(
     if platform_key == "weibo" and getattr(args, "post_repair", False):
         extra_env["TRIPPOSTCOLLECT_WEIBO_REPAIR_OUTCOMES_PATH"] = str(
             (log_dir / "weibo_repair_outcomes.json").resolve()
+        )
+    if platform_key == "zhihu" and getattr(args, "admit_seen", False):
+        extra_env["TRIPPOSTCOLLECT_ZHIHU_REPAIR_OUTCOMES_PATH"] = str(
+            (log_dir / "zhihu_repair_outcomes.json").resolve()
         )
     if platform_key == "weibo" and getattr(args, "keep_stored_images", False):
         inventory_path = batch_dir / "stored_content_images.json"
@@ -975,11 +994,11 @@ def _run_platform_without_policy(
         if platform_key == "xhs" and getattr(args, "xhs_repair", False)
         else {}
     )
-    repair_outcomes = (
-        load_weibo_repair_outcomes(log_dir / "weibo_repair_outcomes.json")
-        if platform_key == "weibo" and getattr(args, "post_repair", False)
-        else []
-    )
+    repair_outcomes: list[dict[str, Any]] = []
+    if getattr(args, "post_repair", False) and platform_key == "weibo":
+        repair_outcomes = load_weibo_repair_outcomes(log_dir / "weibo_repair_outcomes.json")
+    elif getattr(args, "post_repair", False) and platform_key == "zhihu" and getattr(args, "admit_seen", False):
+        repair_outcomes = load_weibo_repair_outcomes(log_dir / "zhihu_repair_outcomes.json")
     output = summarize_output_with_progress(
         save_path,
         args.keyword,
@@ -1295,6 +1314,8 @@ def _run_main(
     args.post_repair_detail_targets = []
     args.post_repair_target_ids = set()
     args.post_repair_metadata_by_identity = {}
+    if getattr(args, "admit_seen", False) and (not args.post_repair or platforms != ["zhihu"]):
+        raise SystemExit("--admit-seen requires --post-repair and --platforms zhihu")
     if args.post_repair:
         if len(platforms) != 1 or platforms[0] not in {"weibo", "zhihu"}:
             raise SystemExit(
@@ -1317,6 +1338,7 @@ def _run_main(
             args.repair_targets_file,
             platform_key,
             db_path=args.db,
+            admit=bool(getattr(args, "admit_seen", False)),
         )
         args.post_repair_detail_targets = [
             item["detail_target"] for item in args.post_repair_targets
@@ -1512,7 +1534,7 @@ def _run_main(
                 args.post_repair_targets,
                 platform=platforms[0],
                 successful_identities=set(),
-                target_outcomes=weibo_posted_repair_outcomes(records, platforms[0]),
+                target_outcomes=posted_repair_outcomes_for_platform(records, platforms[0]),
             )
         )
     else:
@@ -1557,8 +1579,11 @@ def _run_main(
         pagination_evidence = post_repair_pagination_evidence(
             args.post_repair_targets,
             platform=platforms[0],
-            successful_identities=set(content_validation.get("existing_identities") or []),
-            target_outcomes=weibo_posted_repair_outcomes(records, platforms[0]),
+            successful_identities=post_repair_successful_identities(
+                content_validation,
+                admit=bool(getattr(args, "admit_seen", False)),
+            ),
+            target_outcomes=posted_repair_outcomes_for_platform(records, platforms[0]),
         )
         summary["pagination_evidence"] = pagination_evidence
         content_validation, content_valid_records = collect_formal_records(
@@ -1656,9 +1681,12 @@ def _run_main(
         pagination_evidence = post_repair_pagination_evidence(
             args.post_repair_targets,
             platform=platforms[0],
-            successful_identities=set(validation.get("existing_identities") or []),
+            successful_identities=post_repair_successful_identities(
+                validation,
+                admit=bool(getattr(args, "admit_seen", False)),
+            ),
             materialization_failures=list(image_materialization.get("failures") or []),
-            target_outcomes=weibo_posted_repair_outcomes(records, platforms[0]),
+            target_outcomes=posted_repair_outcomes_for_platform(records, platforms[0]),
         )
         summary["pagination_evidence"] = pagination_evidence
         image_materialization = attach_skipped_candidate_evidence(
@@ -1788,6 +1816,7 @@ def _run_main(
                 project_root=PROJECT_ROOT,
                 media_root=media_root,
                 progress_callback=progress_callback,
+                skip_existing=bool(getattr(args, "admit_seen", False)),
             )
     summary["completion_mode"] = "source-exhausted"
     import_result_value = summary.get("import_result") or {}

@@ -110,6 +110,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "detail_target, and keyword; requires --post-repair."
         ),
     )
+    parser.add_argument(
+        "--admit-seen",
+        action="store_true",
+        help=(
+            "With --post-repair and --platforms zhihu: insert new rows for explicit "
+            "answer IDs. Bare /answer/{id} targets require admit: true."
+        ),
+    )
     return parser.parse_args(argv)
 
 

@@ -16,6 +16,15 @@ from urllib.parse import urlparse
 from trippostcollect.artifacts.image_staging import MAX_IMAGE_BYTES, ImageStagingError, inspect_image_bytes
 from trippostcollect.core import paths as core_paths
 
+# 与 platforms/zhihu/models.py 的同名集合保持一致。应用层不导入知乎包，避免未选中知乎时加载它。
+ADMIT_UNAVAILABLE_CODES = frozenset({
+    "admit_redirect_home",
+    "admit_redirect_article",
+    "admit_not_found",
+    "admit_id_mismatch",
+    "admit_redirect_unexpected",
+})
+
 
 # #211：这些作者字段必须来自本次 sideUser，修复回退不得从旧行带回。
 WEIBO_SIDE_USER_FIELDS = frozenset({
@@ -337,9 +346,12 @@ def load_post_repair_targets(
     platform_key: str,
     *,
     db_path: str | Path | None = None,
+    admit: bool = False,
 ) -> list[dict[str, Any]]:
     if platform_key not in {"weibo", "zhihu"}:
         raise SystemExit(f"unsupported post repair platform: {platform_key}")
+    if admit and platform_key != "zhihu":
+        raise SystemExit("--admit-seen requires zhihu repair targets")
     path = Path(path_value).expanduser().resolve()
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -363,6 +375,9 @@ def load_post_repair_targets(
             )
         if post_id in seen_ids:
             raise SystemExit(f"duplicate post repair platform_post_id: {post_id}")
+        flagged = value.get("admit") is True
+        if admit and not flagged:
+            raise SystemExit(f"post repair target {index} requires admit: true")
 
         if platform_key == "weibo":
             valid = bool(
@@ -382,13 +397,20 @@ def load_post_repair_targets(
                 parsed.hostname == "zhuanlan.zhihu.com"
                 and re.fullmatch(rf"/p/{re.escape(post_id)}/?", parsed.path)
             )
-            valid = bool(parsed.scheme == "https" and (answer or article))
+            bare_answer = bool(
+                parsed.scheme == "https"
+                and parsed.hostname in {"zhihu.com", "www.zhihu.com"}
+                and re.fullmatch(rf"/answer/{re.escape(post_id)}/?", parsed.path)
+                and re.fullmatch(r"[0-9]+", post_id)
+            )
+            # /answer/{id} 只在 admit 模式且条目带标志时接受。其他模式仍只认原两种形式。
+            valid = bool(parsed.scheme == "https" and (answer or article or (admit and flagged and bare_answer)))
         if not valid:
             raise SystemExit(
                 f"post repair target does not match {platform_key} ID {post_id}: {detail_target!r}"
             )
         seen_ids.add(post_id)
-        payload_fallback = value.get("repair_fallback")
+        payload_fallback = {} if admit else value.get("repair_fallback")
         raw_targets.append(
             (
                 post_id,
@@ -397,10 +419,14 @@ def load_post_repair_targets(
                 payload_fallback if isinstance(payload_fallback, dict) else {},
             )
         )
-    fallbacks = load_post_repair_fallbacks(
-        db_path,
-        platform_key,
-        {post_id for post_id, _, _, _ in raw_targets},
+    fallbacks = (
+        {}
+        if admit
+        else load_post_repair_fallbacks(
+            db_path,
+            platform_key,
+            {post_id for post_id, _, _, _ in raw_targets},
+        )
     )
     for post_id, detail_target, keyword, payload_fallback in raw_targets:
         value = {
@@ -408,6 +434,8 @@ def load_post_repair_targets(
             "detail_target": detail_target,
             "keyword": keyword,
         }
+        if admit:
+            value["admit"] = True
         merged_fallback = {**payload_fallback, **fallbacks.get(post_id, {})}
         if merged_fallback:
             value["repair_fallback"] = merged_fallback
@@ -577,17 +605,13 @@ def load_weibo_repair_outcomes(path_value: str | Path | None) -> list[dict[str, 
     return cleaned
 
 
-def weibo_posted_repair_outcomes(
+def _posted_repair_outcomes(
     records: list[dict[str, Any]],
     platform: str,
 ) -> list[dict[str, Any]] | None:
-    """只读取微博子进程写回的记录。其他平台保持原有差额口径。"""
-
-    if platform != "weibo":
-        return None
     found: list[dict[str, Any]] = []
     for record in records:
-        if not isinstance(record, dict) or record.get("platform") != "weibo":
+        if not isinstance(record, dict) or record.get("platform") != platform:
             continue
         raw = record.get("repair_outcomes")
         if not isinstance(raw, list):
@@ -597,6 +621,41 @@ def weibo_posted_repair_outcomes(
             if outcome is not None:
                 found.append(outcome)
     return found or None
+
+
+def weibo_posted_repair_outcomes(
+    records: list[dict[str, Any]],
+    platform: str,
+) -> list[dict[str, Any]] | None:
+    """只读取微博子进程写回的记录。其他平台保持原有差额口径。"""
+
+    if platform != "weibo":
+        return None
+    return _posted_repair_outcomes(records, "weibo")
+
+
+def zhihu_posted_repair_outcomes(
+    records: list[dict[str, Any]],
+    platform: str,
+) -> list[dict[str, Any]] | None:
+    """只读取知乎 admit 子进程写回的不可得记录。没有记录时保持原差额口径。"""
+
+    if platform != "zhihu":
+        return None
+    return _posted_repair_outcomes(records, "zhihu")
+
+
+def post_repair_successful_identities(
+    validation: dict[str, Any],
+    *,
+    admit: bool = False,
+) -> set[str]:
+    """修复成功集。admit 才把本轮新行算进成功，其他模式仍只认已在库中的行。"""
+
+    found = {str(item) for item in (validation.get("existing_identities") or []) if str(item)}
+    if admit:
+        found.update(str(item) for item in (validation.get("new_identities") or []) if str(item))
+    return found
 
 
 def post_repair_pagination_evidence(
@@ -631,6 +690,7 @@ def post_repair_pagination_evidence(
         outcome_by_id.setdefault(outcome["platform_post_id"], outcome)
 
     failures: list[dict[str, Any]] = []
+    unavailable_ids: list[str] = []
     for target in targets:
         post_id = str(target.get("platform_post_id") or "")
         if not post_id or post_id in successful_ids:
@@ -680,8 +740,11 @@ def post_repair_pagination_evidence(
         }
         if outcome.get("evidence"):
             failure["evidence"] = outcome["evidence"]
+        if not materialization_failure and error_code in ADMIT_UNAVAILABLE_CODES:
+            unavailable_ids.append(post_id)
+            continue
         failures.append(failure)
-    return {
+    evidence = {
         "available": True,
         "stopped": True,
         "stop_reason": "repair_targets_processed",
@@ -692,6 +755,10 @@ def post_repair_pagination_evidence(
         "skipped_candidate_count": len(failures),
         "skipped_candidate_failures": failures,
     }
+    if unavailable_ids:
+        evidence["unavailable_candidate_ids"] = unavailable_ids
+        evidence["unavailable_candidate_count"] = len(unavailable_ids)
+    return evidence
 
 
 

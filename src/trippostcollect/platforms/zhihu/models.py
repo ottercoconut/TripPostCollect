@@ -28,6 +28,20 @@ ANSWER_NAME = "answer"
 ARTICLE_NAME = "article"
 VIDEO_NAME = "zvideo"
 
+# #209：按回答 ID 直开后的落点。这些码只表示目标不可得，不重试、不改开其他地址。
+ADMIT_REDIRECT_HOME = "admit_redirect_home"
+ADMIT_REDIRECT_ARTICLE = "admit_redirect_article"
+ADMIT_NOT_FOUND = "admit_not_found"
+ADMIT_ID_MISMATCH = "admit_id_mismatch"
+ADMIT_REDIRECT_UNEXPECTED = "admit_redirect_unexpected"
+ADMIT_UNAVAILABLE_CODES = frozenset({
+    ADMIT_REDIRECT_HOME,
+    ADMIT_REDIRECT_ARTICLE,
+    ADMIT_NOT_FOUND,
+    ADMIT_ID_MISMATCH,
+    ADMIT_REDIRECT_UNEXPECTED,
+})
+
 
 class ZhihuContent(BaseModel):
     """
