@@ -1364,6 +1364,8 @@ PAGINATION_EVENT_FIELDS = (
     "candidate_identities",
     "skipped_candidate_count",
     "skipped_candidate_failures",
+    # 正式链跳过原因计数（视频、无记录、结构性跳过、图片失败）。没有跳过时事件不带此键。
+    "skipped_reason_counts",
     # #217：时间窗 job 的原始起止、规范化起止与 timescope。默认模式的事件没有这个键。
     "time_window",
 )

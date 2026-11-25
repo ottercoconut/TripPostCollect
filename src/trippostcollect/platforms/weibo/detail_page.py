@@ -164,6 +164,51 @@ def _detail_post_id(segment: str) -> bool:
     return bool(segment) and segment.isascii() and segment.isalnum()
 
 
+def public_detail_evidence(evidence: Any) -> dict[str, Any] | None:
+    """证据的可落盘副本。只保留登记过的键，丢掉地址、正文和其他多余字段。"""
+
+    if not isinstance(evidence, dict):
+        return None
+    if not any(key in evidence for key in (
+        "navigation_status",
+        "final_page_kind",
+        "show_responses_unmatched",
+        "show_request_failures",
+        "waited_seconds",
+    )):
+        return None
+    unmatched: list[dict[str, Any]] = []
+    raw_items = evidence.get("show_responses_unmatched")
+    if isinstance(raw_items, list):
+        for item in raw_items[:_UNMATCHED_LIMIT]:
+            if not isinstance(item, dict):
+                continue
+            status = item.get("status")
+            ok = item.get("ok")
+            body_error = item.get("body_error")
+            unmatched.append({
+                "status": status if isinstance(status, int) and not isinstance(status, bool) else None,
+                "ok": ok if isinstance(ok, bool) or (isinstance(ok, int) and not isinstance(ok, bool)) else None,
+                "id_matched": bool(item.get("id_matched")),
+                "body_error": body_error if isinstance(body_error, str) and body_error.isidentifier() else "",
+            })
+    kind = evidence.get("final_page_kind")
+    nav = evidence.get("navigation_status")
+    waited = evidence.get("waited_seconds")
+    failures = evidence.get("show_request_failures")
+    waited_value = None
+    if isinstance(waited, (int, float)) and not isinstance(waited, bool):
+        waited_value = float(round(float(waited), 1))
+    failure_count = failures if isinstance(failures, int) and not isinstance(failures, bool) and failures >= 0 else 0
+    return {
+        "navigation_status": nav if isinstance(nav, int) and not isinstance(nav, bool) else None,
+        "final_page_kind": kind if kind in {"detail", "login", "error_page", "search", "other", "closed"} else None,
+        "show_responses_unmatched": unmatched,
+        "show_request_failures": failure_count,
+        "waited_seconds": waited_value,
+    }
+
+
 def _top_ok(payload: Any) -> int | bool | None:
     """JSON 顶层 ``ok``。只保留 int、bool；其他类型记为空。"""
 

@@ -29,8 +29,13 @@ from trippostcollect.platforms.weibo.detail_page import (
     RATE_LIMITED,
     BLOCKED_OR_FORBIDDEN,
     WeiboDetailPages,
+    WeiboOpened,
 )
-from trippostcollect.platforms.weibo.models import PlatformRuntimeError, WeiboDetailFetchError
+from trippostcollect.platforms.weibo.models import (
+    PlatformRuntimeError,
+    WeiboDetailFetchError,
+    WeiboImageDownloadError,
+)
 from trippostcollect.platforms.weibo.parser import CREATED_AT_UNPARSEABLE
 from trippostcollect.platforms.weibo.search_page import WeiboPageCapture, WeiboSearchCandidate
 from trippostcollect.records.formal import validate_formal_record
@@ -1071,3 +1076,244 @@ async def test_bad_identity_unavailable_evidence_is_empty_observation(monkeypatc
         "show_request_failures": 0,
         "waited_seconds": None,
     }
+
+
+def _video_show() -> dict:
+    payload = show_body(text="青岛栈桥")
+    payload.pop("pic_infos", None)
+    payload.pop("pic_ids", None)
+    payload["page_info"] = {"object_type": "video"}
+    return payload
+
+
+@pytest.mark.asyncio
+async def test_video_skip_is_not_a_candidate_failure(monkeypatch, tmp_path):
+    from trippostcollect.application.collection import load_pagination_evidence
+
+    page, capture, _context = _bind(monkeypatch, tmp_path)
+    page.plan([
+        {"url": SHOW, "json": _video_show()},
+        {"url": SIDE, "json": side_body()},
+    ])
+    crawler = make_crawler(settings(CRAWLER_MAX_SLEEP_SEC=0, ENABLE_GET_MEIDAS=False))
+    crawler.context_page = page
+    crawler._capture = capture
+    crawler._opened_keyword = "青岛旅游"
+    crawler.detail_pages = WeiboDetailPages(capture, page)
+    try:
+        await crawler.search()
+    finally:
+        await capture.aclose()
+    assert _events(tmp_path, "candidate_skipped") == []
+    stopped = _events(tmp_path, "adaptive_search_stopped")[-1]
+    assert stopped["stop_reason"] == "source_exhausted"
+    assert stopped["stop_detail"] == "single_page"
+    assert stopped["valid_new_count"] == 0
+    assert stopped["candidate_identities"] == ["525"]
+    assert stopped["skipped_reason_counts"] == {"video": 1}
+    evidence = load_pagination_evidence(tmp_path / "state.json")
+    assert evidence["stop_reason"] == "source_exhausted"
+    assert evidence["stop_event"]["skipped_reason_counts"] == {"video": 1}
+
+
+def _countable_record(mid: str, *, images: bool) -> dict:
+    record = {
+        "note_id": mid,
+        "content": "青岛栈桥",
+        "author_platform_id": "88",
+        "nickname": "海边",
+        "followers_observed": True,
+        "liked_count": 1,
+        "comments_count": 2,
+        "shared_count": 0,
+        "content_detail_source": "desktop_detail",
+    }
+    if images:
+        record["image_list"] = ["https://wx1.sinaimg.cn/large/a.jpg"]
+    return record
+
+
+@pytest.mark.asyncio
+async def test_silent_skips_are_counted_without_changing_seen(monkeypatch, tmp_path):
+    page, capture, _context = _bind(monkeypatch, tmp_path)
+    page.dom["cards"] = [
+        {"mid": "525", "uid": "88", "mblogid": "Abc12"},
+        {"mid": "526", "uid": "88", "mblogid": "Abc13"},
+        {"mid": "527", "uid": "88", "mblogid": "Abc14"},
+        {"mid": "528", "uid": "88", "mblogid": "Abc15"},
+        {"mid": "529", "uid": "88", "mblogid": "Abc16"},
+    ]
+    crawler = make_crawler(settings(CRAWLER_MAX_SLEEP_SEC=0, ENABLE_GET_MEIDAS=False))
+    crawler.context_page = page
+    crawler._capture = capture
+    crawler._opened_keyword = "青岛旅游"
+    crawler.detail_pages = WeiboDetailPages(capture, page)
+
+    async def open_from_search(candidate):
+        if candidate.mid == "525":
+            return WeiboOpened(video=True)
+        if candidate.mid == "526":
+            return WeiboOpened()
+        if candidate.mid == "527":
+            return object()
+        if candidate.mid == "528":
+            return WeiboOpened(record=_countable_record("528", images=False))
+        return WeiboOpened(record=_countable_record("529", images=True))
+
+    async def get_note_images(record):
+        raise WeiboImageDownloadError(record["note_id"], 0, "image_source_unavailable", 2)
+
+    crawler.detail_pages.open_from_search = open_from_search
+    crawler.get_note_images = get_note_images
+    try:
+        await crawler.search()
+    finally:
+        await capture.aclose()
+    stopped = _events(tmp_path, "adaptive_search_stopped")[-1]
+    assert stopped["stop_reason"] == "source_exhausted"
+    assert stopped["valid_new_count"] == 0
+    assert stopped["skipped_reason_counts"] == {
+        "video": 1,
+        "no_record": 2,
+        "structural:missing_content_image": 1,
+        "image:image_source_unavailable": 1,
+    }
+    assert stopped["candidate_identities"] == ["525", "528", "529"]
+    skipped = _events(tmp_path, "candidate_skipped")
+    assert [item["identity"] for item in skipped] == ["528", "529"]
+    assert [item["error_code"] for item in skipped] == [
+        "missing_content_image",
+        "image_source_unavailable",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_repair_outcomes_cover_each_silent_skip(monkeypatch, tmp_path):
+    from dataclasses import replace
+
+    from trippostcollect.application.repair import load_weibo_repair_outcomes, post_repair_pagination_evidence
+    from trippostcollect.artifacts.evidence import write_weibo_repair_outcomes
+
+    page, capture, _context = _bind(monkeypatch, tmp_path)
+    path = tmp_path / "weibo_repair_outcomes.json"
+    crawler = make_crawler(settings(
+        CRAWLER_TYPE="detail",
+        SAVE_DATA_PATH=str(tmp_path),
+        ENABLE_GET_MEIDAS=False,
+        WEIBO_SPECIFIED_ID_LIST=tuple(
+            f"https://weibo.com/88/{mid}"
+            for mid in ("100", "200", "300", "301", "400", "500", "501", "600", "700")
+        ),
+    ))
+    crawler.context_page = page
+    crawler._capture = capture
+    crawler.detail_pages = WeiboDetailPages(capture, page)
+    stored: list[str] = []
+
+    async def open_by_navigate(url: str):
+        mid = url.rstrip("/").rsplit("/", 1)[-1]
+        if mid == "100":
+            raise WeiboDetailFetchError(
+                mid, DETAIL_SHOW_MISSING, attempts=3, retryable=False,
+                evidence={
+                    "navigation_status": 404,
+                    "final_page_kind": "detail",
+                    "show_responses_unmatched": [
+                        {"status": 404, "ok": 0, "id_matched": False, "body_error": ""},
+                    ],
+                    "show_request_failures": 0,
+                    "waited_seconds": 15.0,
+                    "request_url": "https://weibo.com/secret",
+                },
+            )
+        if mid == "200":
+            return WeiboOpened(video=True)
+        if mid == "300":
+            return WeiboOpened()
+        if mid == "301":
+            return object()
+        if mid == "400":
+            return WeiboOpened(record=_countable_record(mid, images=False))
+        if mid == "700":
+            raise WeiboDetailFetchError(mid, LOGIN_REQUIRED, runtime_blocking=True)
+        return WeiboOpened(record=_countable_record(mid, images=True))
+
+    async def get_note_images(record):
+        if record["note_id"] == "500":
+            raise WeiboImageDownloadError(record["note_id"], 0, "image_source_unavailable", 1)
+        if record["note_id"] == "501":
+            raise WeiboImageDownloadError(record["note_id"], 1, "image_download_retryable", 3)
+        return None
+
+    async def update_weibo_note(record):
+        stored.append(record["note_id"])
+
+    crawler.detail_pages.open_by_navigate = open_by_navigate
+    crawler.get_note_images = get_note_images
+    crawler.update_weibo_note = update_weibo_note
+    crawler.ports = replace(
+        crawler.ports,
+        write_repair_outcomes=lambda outcomes: write_weibo_repair_outcomes(path, outcomes),
+    )
+    with pytest.raises(PlatformRuntimeError) as raised:
+        await crawler.repair_specified()
+    assert raised.value.code == LOGIN_REQUIRED
+    assert stored == ["600"]
+    text = path.read_text(encoding="utf-8")
+    assert "http" not in text
+    assert "weibo.com" not in text
+    assert "secret" not in text
+    loaded = load_weibo_repair_outcomes(path)
+    by_id = {item["platform_post_id"]: item for item in loaded}
+    assert set(by_id) == {"100", "200", "300", "301", "400", "500", "501"}
+    assert by_id["100"]["error_code"] == DETAIL_SHOW_MISSING
+    assert by_id["100"]["evidence_source"] == "weibo_detail"
+    assert by_id["100"]["retryable"] is False
+    assert by_id["100"]["attempts"] == 3
+    assert by_id["100"]["evidence"]["navigation_status"] == 404
+    assert by_id["100"]["evidence"]["final_page_kind"] == "detail"
+    assert "request_url" not in by_id["100"]["evidence"]
+    assert by_id["200"] == {
+        "platform_post_id": "200",
+        "error_code": "repair_target_video",
+        "evidence_source": "weibo_video",
+        "attempts": 1,
+        "retryable": False,
+    }
+    assert by_id["300"]["error_code"] == "repair_target_no_record"
+    assert by_id["300"]["evidence_source"] == "weibo_no_record"
+    assert by_id["300"]["retryable"] is False
+    assert by_id["301"]["error_code"] == "repair_target_no_record"
+    assert by_id["301"]["evidence_source"] == "weibo_no_record"
+    assert by_id["400"]["error_code"] == "missing_content_image"
+    assert by_id["400"]["evidence_source"] == "weibo_structural"
+    assert by_id["400"]["retryable"] is False
+    assert by_id["500"]["error_code"] == "image_source_unavailable"
+    assert by_id["500"]["evidence_source"] == "weibo_image"
+    assert by_id["500"]["retryable"] is False
+    assert by_id["500"]["attempts"] == 1
+    assert by_id["501"]["error_code"] == "image_download_retryable"
+    assert by_id["501"]["evidence_source"] == "weibo_image"
+    assert by_id["501"]["retryable"] is True
+    assert by_id["501"]["attempts"] == 3
+
+    targets = [{"platform_post_id": mid} for mid in ("100", "200", "600", "800")]
+    without = post_repair_pagination_evidence(
+        targets, platform="weibo", successful_identities={"weibo:id:600"},
+    )
+    with_outcomes = post_repair_pagination_evidence(
+        targets, platform="weibo", successful_identities={"weibo:id:600"},
+        target_outcomes=loaded,
+    )
+    assert without["successful_candidate_count"] == with_outcomes["successful_candidate_count"] == 1
+    assert without["skipped_candidate_count"] == with_outcomes["skipped_candidate_count"] == 3
+    plain = {item["platform_post_id"]: item for item in without["skipped_candidate_failures"]}
+    filled = {item["platform_post_id"]: item for item in with_outcomes["skipped_candidate_failures"]}
+    assert set(plain) == set(filled) == {"100", "200", "800"}
+    assert plain["100"]["error_code"] == "repair_target_no_valid_output"
+    assert filled["800"]["error_code"] == "repair_target_no_valid_output"
+    assert filled["800"]["evidence_source"] == "repair_target_output_difference"
+    assert filled["100"]["error_code"] == DETAIL_SHOW_MISSING
+    assert filled["100"]["evidence_source"] == "weibo_detail"
+    assert filled["200"]["error_code"] == "repair_target_video"
+    assert "http" not in json.dumps(filled, ensure_ascii=False)

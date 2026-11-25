@@ -143,6 +143,8 @@ class WeiboPorts:
     # #213：detail 修复复用旧正文图。缺省不启用。
     stored_images: Callable[[], dict] | None = None
     open_stored_image: Callable[..., Any] | None = None
+    # #235：repair 子进程逐目标结果。缺省不写。
+    write_repair_outcomes: Callable[[list[dict]], None] | None = None
 
 
 @dataclass(frozen=True)

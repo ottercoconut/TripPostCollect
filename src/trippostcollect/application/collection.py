@@ -28,8 +28,10 @@ from trippostcollect.application.repair import load_post_repair_targets as load_
 from trippostcollect.application.repair import reject_keep_stored_images_scope as reject_keep_stored_images_scope
 from trippostcollect.application.repair import load_stored_content_images as load_stored_content_images
 from trippostcollect.application.repair import write_stored_content_images as write_stored_content_images
+from trippostcollect.application.repair import load_weibo_repair_outcomes as load_weibo_repair_outcomes
 from trippostcollect.application.repair import load_xhs_repair_report as load_xhs_repair_report
 from trippostcollect.application.repair import post_repair_pagination_evidence as post_repair_pagination_evidence
+from trippostcollect.application.repair import weibo_posted_repair_outcomes as weibo_posted_repair_outcomes
 from trippostcollect.application.repair import repair_candidate_execution_completed as repair_candidate_execution_completed
 from trippostcollect.application.repair import repair_partial_child_execution_allowed as repair_partial_child_execution_allowed
 from trippostcollect.application.repair import xhs_repair_pagination_evidence as xhs_repair_pagination_evidence
@@ -788,6 +790,10 @@ def _run_platform_without_policy(
             or "child",
         ),
     }
+    if platform_key == "weibo" and getattr(args, "post_repair", False):
+        extra_env["TRIPPOSTCOLLECT_WEIBO_REPAIR_OUTCOMES_PATH"] = str(
+            (log_dir / "weibo_repair_outcomes.json").resolve()
+        )
     if platform_key == "weibo" and getattr(args, "keep_stored_images", False):
         inventory_path = batch_dir / "stored_content_images.json"
         write_stored_content_images(
@@ -969,6 +975,11 @@ def _run_platform_without_policy(
         if platform_key == "xhs" and getattr(args, "xhs_repair", False)
         else {}
     )
+    repair_outcomes = (
+        load_weibo_repair_outcomes(log_dir / "weibo_repair_outcomes.json")
+        if platform_key == "weibo" and getattr(args, "post_repair", False)
+        else []
+    )
     output = summarize_output_with_progress(
         save_path,
         args.keyword,
@@ -1019,6 +1030,8 @@ def _run_platform_without_policy(
     }
     if repair_report:
         result["repair_report"] = repair_report
+    if repair_outcomes:
+        result["repair_outcomes"] = repair_outcomes
     return result
 
 
@@ -1499,6 +1512,7 @@ def _run_main(
                 args.post_repair_targets,
                 platform=platforms[0],
                 successful_identities=set(),
+                target_outcomes=weibo_posted_repair_outcomes(records, platforms[0]),
             )
         )
     else:
@@ -1544,6 +1558,7 @@ def _run_main(
             args.post_repair_targets,
             platform=platforms[0],
             successful_identities=set(content_validation.get("existing_identities") or []),
+            target_outcomes=weibo_posted_repair_outcomes(records, platforms[0]),
         )
         summary["pagination_evidence"] = pagination_evidence
         content_validation, content_valid_records = collect_formal_records(
@@ -1643,6 +1658,7 @@ def _run_main(
             platform=platforms[0],
             successful_identities=set(validation.get("existing_identities") or []),
             materialization_failures=list(image_materialization.get("failures") or []),
+            target_outcomes=weibo_posted_repair_outcomes(records, platforms[0]),
         )
         summary["pagination_evidence"] = pagination_evidence
         image_materialization = attach_skipped_candidate_evidence(

@@ -145,6 +145,14 @@ def weibo_dependencies(config, *, post_repair=False):
             event_sink=append_worker_execution_event,
         )
 
+    def write_repair_outcomes(outcomes: list[dict]) -> None:
+        raw_path = os.environ.get("TRIPPOSTCOLLECT_WEIBO_REPAIR_OUTCOMES_PATH", "").strip()
+        if not raw_path:
+            return
+        from trippostcollect.artifacts.evidence import write_weibo_repair_outcomes
+
+        write_weibo_repair_outcomes(raw_path, outcomes)
+
     return options, WeiboPorts(
         client=WeiboClientPorts(
             make_async_client=lambda **kwargs: http.make_async_client(
@@ -192,6 +200,7 @@ def weibo_dependencies(config, *, post_repair=False):
             else {}
         ),
         open_stored_image=open_stored_image,
+        write_repair_outcomes=write_repair_outcomes,
     )
 
 

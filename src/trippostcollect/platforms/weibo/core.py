@@ -43,7 +43,7 @@ from trippostcollect.core.paths import platform_profile_dir
 from trippostcollect.records.topic_relevance import topic_relevant_for_web_post
 from . import parser as weibo_store
 from .client import WEIBO_CONTENT_IMAGE_RULE, WEIBO_STORED_IMAGE_RULE, WeiboClient
-from .detail_page import WeiboDetailPages, WeiboOpened
+from .detail_page import WeiboDetailPages, WeiboOpened, _repair_identity, public_detail_evidence
 from .models import (
     PlatformRuntimeError, WeiboDetailFetchError, WeiboImageDownloadError,
 )
@@ -75,6 +75,7 @@ class WeiboCrawler:
         self._time_window = None
         self._time_window_loaded = False
         self._stored_image_index: dict[tuple[str, str], dict] | None = None
+        self._repair_outcomes: list[dict[str, Any]] = []
 
     def _stored_images(self) -> dict[tuple[str, str], dict]:
         if self._stored_image_index is not None:
@@ -264,17 +265,21 @@ class WeiboCrawler:
                         continue
                     processed_count += 1
                     if not isinstance(opened, WeiboOpened):
+                        self._count_skip(accumulator, "no_record")
                         continue
                     if opened.video:
+                        self._count_skip(accumulator, "video")
                         accumulator.consider(candidate.mid, valid=False)
                         continue
                     record = opened.record
                     if record is None:
+                        self._count_skip(accumulator, "no_record")
                         continue
                     record["source_keyword"] = self.source_keyword
                     record["last_modify_ts"] = self.ports.current_timestamp()
                     skip_code = weibo_store.structural_skip_code(record)
                     if skip_code:
+                        self._count_skip(accumulator, f"structural:{skip_code}")
                         if accumulator.skip_candidate_failure(
                             candidate.mid,
                             failure_scope="post",
@@ -298,6 +303,7 @@ class WeiboCrawler:
                                 discovery_phase=discovery_phase,
                             )
                             break
+                        self._count_skip(accumulator, f"image:{exc.code}")
                         if accumulator.skip_candidate_failure(
                             candidate.mid,
                             failure_scope="image",
@@ -351,14 +357,49 @@ class WeiboCrawler:
                     return
                 page += 1
 
+    def _count_skip(self, accumulator: Any, reason: str) -> None:
+        note = getattr(accumulator, "note_skip_reason", None)
+        if callable(note):
+            note(reason)
+
+    def _record_repair_outcome(
+        self,
+        post_id: str,
+        *,
+        error_code: str,
+        evidence_source: str,
+        attempts: int,
+        retryable: bool,
+        evidence: dict[str, Any] | None = None,
+    ) -> None:
+        identity = str(post_id or "").strip()
+        if not identity or "://" in identity:
+            return
+        item: dict[str, Any] = {
+            "platform_post_id": identity,
+            "error_code": str(error_code),
+            "evidence_source": str(evidence_source),
+            "attempts": max(1, int(attempts)),
+            "retryable": bool(retryable),
+        }
+        public = public_detail_evidence(evidence)
+        if public:
+            item["evidence"] = public
+        self._repair_outcomes.append(item)
+        writer = getattr(self.ports, "write_repair_outcomes", None)
+        if callable(writer):
+            writer(list(self._repair_outcomes))
+
     async def repair_specified(self) -> None:
         """行为阶段已经在搜索页完成。逐条 navigate 打开清单里的桌面详情。"""
 
         pages = self.detail_pages
         if pages is None:
             raise RuntimeError("weibo_capture_channel_missing")
+        self._repair_outcomes = []
         for raw in tuple(getattr(self.config, "WEIBO_SPECIFIED_ID_LIST", ()) or ()):
             url = str(raw or "").strip()
+            post_id = _repair_post_id(url)
             try:
                 opened = await pages.open_by_navigate(url)
             except WeiboDetailFetchError as exc:
@@ -369,13 +410,37 @@ class WeiboCrawler:
                     url,
                     exc.code,
                 )
+                self._record_repair_outcome(
+                    post_id,
+                    error_code=exc.code,
+                    evidence_source="weibo_detail",
+                    attempts=exc.attempts,
+                    retryable=exc.retryable,
+                    evidence=exc.evidence,
+                )
                 continue
             if not isinstance(opened, WeiboOpened) or opened.video or opened.record is None:
+                video = isinstance(opened, WeiboOpened) and opened.video
+                self._record_repair_outcome(
+                    post_id,
+                    error_code="repair_target_video" if video else "repair_target_no_record",
+                    evidence_source="weibo_video" if video else "weibo_no_record",
+                    attempts=1,
+                    retryable=False,
+                )
                 continue
             record = dict(opened.record)
             record["source_keyword"] = self.source_keyword
             record["last_modify_ts"] = self.ports.current_timestamp()
-            if weibo_store.structural_skip_code(record):
+            skip_code = weibo_store.structural_skip_code(record)
+            if skip_code:
+                self._record_repair_outcome(
+                    post_id,
+                    error_code=skip_code,
+                    evidence_source="weibo_structural",
+                    attempts=1,
+                    retryable=False,
+                )
                 continue
             try:
                 await self.get_note_images(record)
@@ -386,6 +451,13 @@ class WeiboCrawler:
                     "[WeiboCrawler.repair_specified] skip image failure note_id=%s code=%s",
                     record.get("note_id"),
                     exc.code,
+                )
+                self._record_repair_outcome(
+                    post_id or str(record.get("note_id") or ""),
+                    error_code=exc.code,
+                    evidence_source="weibo_image",
+                    attempts=exc.attempts,
+                    retryable=exc.code == "image_download_retryable",
                 )
                 continue
             await self.update_weibo_note(record)
@@ -699,6 +771,11 @@ class WeiboCrawler:
 
     async def record_weibo_note_image_failure(self, note_id: str, image_content_item: Dict):
         return await self.ports.image_stager().record_failure(note_id, image_content_item)
+
+
+def _repair_post_id(url: str) -> str:
+    _author_id, mid = _repair_identity(url)
+    return mid
 
 
 def bind_weibo_crawler(config, ports_factory):

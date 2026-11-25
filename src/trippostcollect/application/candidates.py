@@ -36,6 +36,8 @@ class AdaptiveAccumulator:
     stop_detail: str = ""
     skipped_candidate_failures: list[dict[str, Any]] = field(default_factory=list)
     skipped_candidate_identities: set[str] = field(default_factory=set)
+    # 正式链里明确不算候选失败的跳过（视频、无记录）以及已有失败码的计数。空时不写入摘要。
+    skipped_reason_counts: dict[str, int] = field(default_factory=dict)
     # 为 False 时，可重试的候选失败只算本轮已决定，不进入跨轮记忆，下一轮全量扫描时就地重试。
     persist_retryable_skips: bool = True
     run_only_skipped_identities: set[str] = field(default_factory=set)
@@ -87,6 +89,14 @@ class AdaptiveAccumulator:
                 or identity in self.run_only_skipped_identities
             )
         )
+
+    def note_skip_reason(self, reason: str) -> None:
+        """记一次跳过原因。不改变 valid、seen 或候选失败。"""
+
+        key = str(reason or "").strip()
+        if not key:
+            return
+        self.skipped_reason_counts[key] = self.skipped_reason_counts.get(key, 0) + 1
 
     def consider(self, identity: str, *, valid: bool) -> bool:
         self.candidate_count += 1
@@ -350,6 +360,8 @@ class AdaptiveAccumulator:
         result["skipped_candidate_failures"] = list(
             self.skipped_candidate_failures
         )
+        if self.skipped_reason_counts:
+            result["skipped_reason_counts"] = dict(self.skipped_reason_counts)
         result["candidate_identities"] = sorted(self.seen_candidate_identities)
         if self.last_source_visit_id:
             result["source_visit_id"] = self.last_source_visit_id

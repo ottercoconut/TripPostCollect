@@ -471,12 +471,138 @@ def xhs_repair_pagination_evidence(
 
 
 
+_PAGE_KINDS = frozenset({"detail", "login", "error_page", "search", "other", "closed"})
+
+
+def _clean_evidence(raw: Any) -> dict[str, Any] | None:
+    """只保留详情证据的登记键。地址、正文和其他字段丢掉。"""
+
+    if not isinstance(raw, dict):
+        return None
+    unmatched: list[dict[str, Any]] = []
+    items = raw.get("show_responses_unmatched")
+    if isinstance(items, list):
+        for item in items[:5]:
+            if not isinstance(item, dict):
+                continue
+            status = item.get("status")
+            ok = item.get("ok")
+            body_error = item.get("body_error")
+            unmatched.append({
+                "status": status if isinstance(status, int) and not isinstance(status, bool) else None,
+                "ok": ok if isinstance(ok, bool) or (isinstance(ok, int) and not isinstance(ok, bool)) else None,
+                "id_matched": bool(item.get("id_matched")),
+                "body_error": body_error if isinstance(body_error, str) and body_error.isidentifier() else "",
+            })
+    kind = raw.get("final_page_kind")
+    nav = raw.get("navigation_status")
+    waited = raw.get("waited_seconds")
+    failures = raw.get("show_request_failures")
+    waited_value = None
+    if isinstance(waited, (int, float)) and not isinstance(waited, bool):
+        waited_value = float(round(float(waited), 1))
+    if not any(key in raw for key in (
+        "navigation_status",
+        "final_page_kind",
+        "show_responses_unmatched",
+        "show_request_failures",
+        "waited_seconds",
+    )):
+        return None
+    return {
+        "navigation_status": nav if isinstance(nav, int) and not isinstance(nav, bool) else None,
+        "final_page_kind": kind if isinstance(kind, str) and kind in _PAGE_KINDS else None,
+        "show_responses_unmatched": unmatched,
+        "show_request_failures": (
+            failures if isinstance(failures, int) and not isinstance(failures, bool) and failures >= 0 else 0
+        ),
+        "waited_seconds": waited_value,
+    }
+
+
+def clean_repair_outcome(item: Any) -> dict[str, Any] | None:
+    """子进程记录缺字段、不是布尔可重试标记或夹带 URL 时丢弃，调用方退回旧码。"""
+
+    if not isinstance(item, dict):
+        return None
+    post_id = item.get("platform_post_id")
+    error_code = item.get("error_code")
+    evidence_source = item.get("evidence_source")
+    attempts = item.get("attempts")
+    retryable = item.get("retryable")
+    if not all(isinstance(value, str) and value.strip() and "://" not in value for value in (
+        post_id, error_code, evidence_source,
+    )):
+        return None
+    if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 1:
+        return None
+    if not isinstance(retryable, bool):
+        return None
+    cleaned: dict[str, Any] = {
+        "platform_post_id": str(post_id).strip(),
+        "error_code": str(error_code).strip(),
+        "evidence_source": str(evidence_source).strip(),
+        "attempts": attempts,
+        "retryable": retryable,
+    }
+    if "evidence" in item:
+        evidence = _clean_evidence(item.get("evidence"))
+        if evidence is None:
+            return None
+        cleaned["evidence"] = evidence
+    return cleaned
+
+
+def load_weibo_repair_outcomes(path_value: str | Path | None) -> list[dict[str, Any]]:
+    """文件缺失、损坏或某条记录不合格时，该条不采用。不补造原因。"""
+
+    if not path_value:
+        return []
+    path = Path(path_value).expanduser()
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return []
+    raw_items = value.get("outcomes") if isinstance(value, dict) else None
+    if not isinstance(raw_items, list):
+        return []
+    cleaned = []
+    for item in raw_items:
+        outcome = clean_repair_outcome(item)
+        if outcome is not None:
+            cleaned.append(outcome)
+    return cleaned
+
+
+def weibo_posted_repair_outcomes(
+    records: list[dict[str, Any]],
+    platform: str,
+) -> list[dict[str, Any]] | None:
+    """只读取微博子进程写回的记录。其他平台保持原有差额口径。"""
+
+    if platform != "weibo":
+        return None
+    found: list[dict[str, Any]] = []
+    for record in records:
+        if not isinstance(record, dict) or record.get("platform") != "weibo":
+            continue
+        raw = record.get("repair_outcomes")
+        if not isinstance(raw, list):
+            continue
+        for item in raw:
+            outcome = clean_repair_outcome(item)
+            if outcome is not None:
+                found.append(outcome)
+    return found or None
+
+
 def post_repair_pagination_evidence(
     targets: list[dict[str, Any]],
     *,
     platform: str,
     successful_identities: set[str],
     materialization_failures: list[dict[str, Any]] | None = None,
+    target_outcomes: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     target_ids = {
         str(target.get("platform_post_id") or "")
@@ -494,6 +620,12 @@ def post_repair_pagination_evidence(
         post_id = identity.rsplit(":id:", 1)[-1] if ":id:" in identity else identity
         if post_id:
             failure_by_id[post_id] = failure
+    outcome_by_id: dict[str, dict[str, Any]] = {}
+    for item in target_outcomes or []:
+        outcome = clean_repair_outcome(item)
+        if outcome is None:
+            continue
+        outcome_by_id.setdefault(outcome["platform_post_id"], outcome)
 
     failures: list[dict[str, Any]] = []
     for target in targets:
@@ -501,9 +633,12 @@ def post_repair_pagination_evidence(
         if not post_id or post_id in successful_ids:
             continue
         materialization_failure = failure_by_id.get(post_id) or {}
+        # 物化失败仍优先。没有物化失败时，才用子进程写出的细记录填充；没有记录则保持旧码。
+        outcome = {} if materialization_failure else outcome_by_id.get(post_id) or {}
         error_code = str(
             materialization_failure.get("error_code")
             or materialization_failure.get("code")
+            or outcome.get("error_code")
             or "repair_target_no_valid_output"
         )
         detail = str(
@@ -513,27 +648,36 @@ def post_repair_pagination_evidence(
         )
         failure_scope = str(
             materialization_failure.get("failure_scope")
-            or ("image" if materialization_failure else "post")
+            or ("image" if materialization_failure or outcome.get("evidence_source") == "weibo_image" else "post")
         )
-        failures.append(
-            {
-                "platform": platform,
-                "identity": f"{platform}:id:{post_id}",
-                "platform_post_id": post_id,
-                "failure_scope": failure_scope,
-                "detail": detail,
-                "error_code": error_code,
-                "retryable": bool(materialization_failure.get("retryable", False)),
-                "attempts": max(1, int(materialization_failure.get("attempts") or 1)),
-                "source_index": materialization_failure.get("source_index"),
-                "terminal_for_run": True,
-                "evidence_source": (
-                    "image_materialization"
-                    if materialization_failure
-                    else "repair_target_output_difference"
-                ),
-            }
-        )
+        if materialization_failure:
+            evidence_source = "image_materialization"
+            retryable = bool(materialization_failure.get("retryable", False))
+            attempts = max(1, int(materialization_failure.get("attempts") or 1))
+        elif outcome:
+            evidence_source = str(outcome["evidence_source"])
+            retryable = bool(outcome["retryable"])
+            attempts = max(1, int(outcome["attempts"]))
+        else:
+            evidence_source = "repair_target_output_difference"
+            retryable = False
+            attempts = 1
+        failure = {
+            "platform": platform,
+            "identity": f"{platform}:id:{post_id}",
+            "platform_post_id": post_id,
+            "failure_scope": failure_scope,
+            "detail": detail,
+            "error_code": error_code,
+            "retryable": retryable,
+            "attempts": attempts,
+            "source_index": materialization_failure.get("source_index"),
+            "terminal_for_run": True,
+            "evidence_source": evidence_source,
+        }
+        if outcome.get("evidence"):
+            failure["evidence"] = outcome["evidence"]
+        failures.append(failure)
     return {
         "available": True,
         "stopped": True,
