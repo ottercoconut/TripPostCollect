@@ -295,8 +295,10 @@ checkpoint 仍写入本轮最后的 page、offset、search ID 与停止原因供
   2026-11-20 侦察：页面自身的正文图请求同样发往 `p3-pc-sign.douyinpic.com`、`p9-pc-sign.douyinpic.com`，
   Referer 为 `https://www.douyin.com/`，多数不带 Cookie。
 - 每张成功下载的正文图在访问账本以阶段 `note_image`、来源 `cdn_direct`、规则 `douyin.content_image`
-  登记状态码、资产键和 sha256，供门禁 R5 与 manifest 对账。同一帖的正文图连续下载，图与图之间不再固定睡眠
-  （#227）；单张的有限重试与退避不变，429 仍按 `image_rate_limited` 停轮。
+  登记状态码、资产键和 sha256，供门禁 R5 与 manifest 对账。同一帖的正文图最多 3 张并发下载
+  （#227），帖与帖之间仍逐条；登记时间是该张完成时刻，`content_visit_refs.images`、staging 与 manifest 按
+  `source_index` 排列。单张的有限重试与退避不变。出现 429/401/403 时取消在途下载并按运行级阻断停轮；其他失败
+  不再启动新下载，等在途结束后取序号最小的失败报出，被取消或未启动的图不登记、不写失败记录。
 - 平台层写 staging/manifest，根项目按 `note_download_url` 重建候选，再执行通用字节复验、同帖去重、晋升和
   SQLite 事务，见[数据持久化](../data-persistence.md)。
 

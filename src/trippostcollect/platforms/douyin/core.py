@@ -29,7 +29,8 @@ from playwright.async_api import BrowserContext, BrowserType, Page, Playwright
 from trippostcollect.application.contracts import DouyinSettings, DouyinCrawlerPorts, ImageStagingError
 from trippostcollect.core.paths import platform_profile_dir
 from trippostcollect.records.topic_relevance import topic_relevant_for_web_post
-from trippostcollect.runtime.image_retry import ImageDownloadFetchError, is_runtime_blocking_image_error
+from trippostcollect.runtime.image_concurrency import ImageDownloadBatchError, download_images_bounded
+from trippostcollect.runtime.image_retry import is_runtime_blocking_image_error
 from trippostcollect.platforms.douyin import parser
 from trippostcollect.platforms.douyin.client import (
     DOUYIN_CONTENT_IMAGE_RULE, DouYinClient, inspect_empty_first_page,
@@ -682,66 +683,68 @@ class DouYinCrawler:
         image_assets = parser._extract_note_image_assets(aweme_item)
         if not image_assets:
             return
-        fetched_assets: List[Dict] = []
-        for asset in image_assets:
+        recorded: list[tuple[int, str]] = []
+        initial_images = list((aweme_item.get("content_visit_refs") or {}).get("images") or [])
+
+        async def fetch(asset: Dict) -> tuple[bytes | None, int]:
             source_index = int(asset["source_index"])
             image_url = str(asset.get("url") or "")
-            try:
-                content, attempts = await self.ports.fetch_image_bytes_with_retry(
-                    lambda image_url=image_url: self.dy_client.get_note_image(image_url),
-                    logger=logger,
-                    label=(
-                        f"platform=douyin aweme_id={aweme_id} "
-                        f"source_index={source_index}"
-                    ),
-                )
-            except ImageDownloadFetchError as exc:
-                await self.record_dy_aweme_image_failure(
-                    aweme_id,
-                    {
-                        **asset,
-                        "attempts": exc.attempts,
-                        "http_status": exc.http_status,
-                        "error_code": exc.code,
-                    },
-                )
-                raise DouyinImageDownloadError(
-                    aweme_id, source_index, exc.code, exc.attempts
-                ) from exc
-            if content is None:
-                await self.record_dy_aweme_image_failure(
-                    aweme_id,
-                    {
-                        **asset,
-                        "attempts": attempts,
-                        "http_status": None,
-                        "error_code": "image_download_retryable",
-                    },
-                )
-                raise DouyinImageDownloadError(
-                    aweme_id,
-                    source_index,
-                    "image_download_retryable",
-                    attempts,
-                )
-            digest = sha256(content).hexdigest()
-            if self.capture is not None:
-                visit_id = self.capture.channel.record_direct_visit(
-                    source="cdn_direct",
-                    stage="note_image",
-                    rule=DOUYIN_CONTENT_IMAGE_RULE,
-                    subject_id=aweme_id,
-                    trigger=None,
-                    status=200,
-                    asset_key=str(asset.get("source_asset_key") or ""),
-                    sha256=digest,
-                )
-                refs = dict(aweme_item.get("content_visit_refs") or {})
-                refs["images"] = [*list(refs.get("images") or []), visit_id]
-                aweme_item["content_visit_refs"] = refs
-            fetched_assets.append(
-                {**asset, "content": content, "attempts": attempts, "http_status": 200}
+            return await self.ports.fetch_image_bytes_with_retry(
+                lambda image_url=image_url: self.dy_client.get_note_image(image_url),
+                logger=logger,
+                label=(
+                    f"platform=douyin aweme_id={aweme_id} "
+                    f"source_index={source_index}"
+                ),
             )
+
+        def on_success(asset: Dict, content: bytes, attempts: int) -> None:
+            del attempts
+            if self.capture is None:
+                return
+            digest = sha256(content).hexdigest()
+            visit_id = self.capture.channel.record_direct_visit(
+                source="cdn_direct",
+                stage="note_image",
+                rule=DOUYIN_CONTENT_IMAGE_RULE,
+                subject_id=aweme_id,
+                trigger=None,
+                status=200,
+                asset_key=str(asset.get("source_asset_key") or ""),
+                sha256=digest,
+            )
+            recorded.append((int(asset["source_index"]), visit_id))
+            refs = dict(aweme_item.get("content_visit_refs") or {})
+            refs["images"] = [
+                *initial_images,
+                *[item_id for _index, item_id in sorted(recorded)],
+            ]
+            aweme_item["content_visit_refs"] = refs
+
+        try:
+            downloaded = await download_images_bounded(
+                image_assets, fetch=fetch, on_success=on_success,
+            )
+        except ImageDownloadBatchError as exc:
+            failed_asset = next(
+                asset for asset in image_assets if int(asset["source_index"]) == exc.source_index
+            )
+            await self.record_dy_aweme_image_failure(
+                aweme_id,
+                {
+                    **failed_asset,
+                    "attempts": exc.attempts,
+                    "http_status": exc.http_status,
+                    "error_code": exc.code,
+                },
+            )
+            raise DouyinImageDownloadError(
+                aweme_id, exc.source_index, exc.code, exc.attempts
+            ) from exc
+        fetched_assets = [
+            {**asset, "content": content, "attempts": attempts, "http_status": 200}
+            for asset, content, attempts in downloaded
+        ]
         try:
             await self.update_dy_aweme_images(aweme_id, fetched_assets)
         except ImageStagingError as exc:

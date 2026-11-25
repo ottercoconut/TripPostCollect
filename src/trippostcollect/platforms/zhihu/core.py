@@ -28,7 +28,8 @@ from playwright.async_api import BrowserContext, BrowserType, Page, Playwright
 from trippostcollect.application.contracts import ImageStagingError, ZhihuSettings, ZhihuPorts
 from trippostcollect.core.paths import PROFILE_VIEWPORT, platform_profile_dir
 from trippostcollect.records.topic_relevance import topic_relevant_for_web_post
-from trippostcollect.runtime.image_retry import ImageDownloadFetchError, is_runtime_blocking_image_error
+from trippostcollect.runtime.image_concurrency import ImageDownloadBatchError, download_images_bounded
+from trippostcollect.runtime.image_retry import is_runtime_blocking_image_error
 from . import models as constant
 from .models import (
     ZhihuContent, ZhihuSearchPage, DataFetchError, PlatformRuntimeError,
@@ -615,68 +616,71 @@ class ZhihuCrawler:
         image_assets = zhihu_store.zhihu_content_image_assets(content)
         if not image_assets:
             return
-        fetched_assets: List[Dict] = []
-        for asset in image_assets:
+        capture = self._page_capture
+        recorded: list[tuple[int, str]] = []
+        initial_images = list((content.content_visit_refs or {}).get("images") or [])
+
+        async def fetch(asset: Dict) -> tuple[bytes | None, int]:
             source_index = int(asset["source_index"])
-            try:
-                payload, attempts = await self.ports.fetch_image_bytes_with_retry(
-                    lambda: self.zhihu_client.get_content_image(
-                        asset["url"], referer=content.content_url
-                    ),
-                    logger=logger,
-                    label=(
-                        f"platform=zhihu content_id={content_id} "
-                        f"source_index={source_index}"
-                    ),
-                )
-            except ImageDownloadFetchError as exc:
-                await self.record_zhihu_content_image_failure(
-                    content_id,
-                    {
-                        **asset,
-                        "attempts": exc.attempts,
-                        "http_status": exc.http_status,
-                        "error_code": exc.code,
-                    },
-                )
-                raise ZhihuImageDownloadError(
-                    content_id, source_index, exc.code, exc.attempts
-                ) from exc
-            if payload is None:
-                await self.record_zhihu_content_image_failure(
-                    content_id,
-                    {
-                        **asset,
-                        "attempts": attempts,
-                        "http_status": None,
-                        "error_code": "image_download_retryable",
-                    },
-                )
-                raise ZhihuImageDownloadError(
-                    content_id,
-                    source_index,
-                    "image_download_retryable",
-                    attempts,
-                )
-            digest = sha256(payload).hexdigest()
-            capture = self._page_capture
-            if capture is not None:
-                visit_id = capture.channel.record_direct_visit(
-                    source="cdn_direct",
-                    stage="note_image",
-                    rule=ZHIHU_CONTENT_IMAGE_RULE,
-                    subject_id=content_id,
-                    trigger=None,
-                    status=200,
-                    asset_key=str(asset["source_asset_key"]),
-                    sha256=digest,
-                )
-                refs = dict(content.content_visit_refs)
-                refs["images"] = [*list(refs.get("images") or []), visit_id]
-                content.content_visit_refs = refs
-            fetched_assets.append(
-                {**asset, "content": payload, "attempts": attempts, "http_status": 200}
+            image_url = str(asset["url"])
+            return await self.ports.fetch_image_bytes_with_retry(
+                lambda image_url=image_url: self.zhihu_client.get_content_image(
+                    image_url, referer=content.content_url
+                ),
+                logger=logger,
+                label=(
+                    f"platform=zhihu content_id={content_id} "
+                    f"source_index={source_index}"
+                ),
             )
+
+        def on_success(asset: Dict, payload: bytes, attempts: int) -> None:
+            del attempts
+            if capture is None:
+                return
+            digest = sha256(payload).hexdigest()
+            visit_id = capture.channel.record_direct_visit(
+                source="cdn_direct",
+                stage="note_image",
+                rule=ZHIHU_CONTENT_IMAGE_RULE,
+                subject_id=content_id,
+                trigger=None,
+                status=200,
+                asset_key=str(asset["source_asset_key"]),
+                sha256=digest,
+            )
+            recorded.append((int(asset["source_index"]), visit_id))
+            refs = dict(content.content_visit_refs)
+            refs["images"] = [
+                *initial_images,
+                *[item_id for _index, item_id in sorted(recorded)],
+            ]
+            content.content_visit_refs = refs
+
+        try:
+            downloaded = await download_images_bounded(
+                image_assets, fetch=fetch, on_success=on_success,
+            )
+        except ImageDownloadBatchError as exc:
+            failed_asset = next(
+                asset for asset in image_assets if int(asset["source_index"]) == exc.source_index
+            )
+            await self.record_zhihu_content_image_failure(
+                content_id,
+                {
+                    **failed_asset,
+                    "attempts": exc.attempts,
+                    "http_status": exc.http_status,
+                    "error_code": exc.code,
+                },
+            )
+            raise ZhihuImageDownloadError(
+                content_id, exc.source_index, exc.code, exc.attempts
+            ) from exc
+        fetched_assets = [
+            {**asset, "content": payload, "attempts": attempts, "http_status": 200}
+            for asset, payload, attempts in downloaded
+        ]
         try:
             await self.update_zhihu_content_images(content_id, fetched_assets)
         except ImageStagingError as exc:

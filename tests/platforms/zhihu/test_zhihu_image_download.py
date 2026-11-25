@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from io import BytesIO
 import json
 from unittest.mock import AsyncMock
@@ -283,3 +284,103 @@ async def test_terminal_http_fetch_error_preserves_manifest_evidence(monkeypatch
     assert row["error_code"] == "image_source_unavailable"
     assert row["http_status"] == 404
     assert row["attempts"] == 1
+
+
+def _numbered_content(count: int = 4) -> ZhihuContent:
+    content = observed_content("answer-concurrent")
+    content.image_list = [
+        f"https://pic{(index % 4) + 1}.zhimg.com/v2-{index:032x}_r.jpg"
+        for index in range(count)
+    ]
+    return content
+
+
+async def _until(predicate, timeout: float = 1.0) -> bool:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not predicate():
+        if loop.time() >= deadline:
+            return False
+        await asyncio.sleep(0.01)
+    return True
+
+
+@pytest.mark.asyncio
+async def test_content_images_raise_smallest_ordinary_failure(monkeypatch, tmp_path):
+    """普通失败等在途结束后抛 source_index 最小者；未启动的图没有失败记录。"""
+
+    monkeypatch.setattr(config, "ENABLE_GET_MEIDAS", True)
+    monkeypatch.setattr(config, "CRAWLER_MAX_SLEEP_SEC", 0)
+    monkeypatch.setattr(config, "SAVE_DATA_PATH", str(tmp_path))
+    monkeypatch.setenv("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE", str(tmp_path / "behavior.jsonl"))
+    crawler = ZhihuCrawler()
+    gates = [asyncio.Event() for _ in range(4)]
+    errors = {
+        0: (404, "image_source_unavailable"),
+        1: (410, "image_source_unavailable"),
+        2: (500, "image_source_unavailable"),
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            self.calls: list[int] = []
+            self.current = 0
+            self.peak = 0
+            self.exceeded = False
+
+        async def get_content_image(self, url, referer=""):
+            del referer
+            index = int(url.split("/v2-")[1].split("_", 1)[0], 16)
+            self.calls.append(index)
+            self.current += 1
+            self.peak = max(self.peak, self.current)
+            self.exceeded = self.exceeded or self.current > 3
+            try:
+                await gates[index].wait()
+                status, code = errors[index]
+                raise ImageDownloadFetchError(
+                    f"HTTP {status}", code=code, retryable=False, http_status=status,
+                )
+            finally:
+                self.current -= 1
+
+    client = Client()
+    crawler.zhihu_client = client
+    crawler._page_capture = ZhihuPageCapture.open(object())
+    content = _numbered_content()
+    task = asyncio.create_task(crawler.get_content_images(content))
+    try:
+        assert await _until(lambda: client.current >= 3)
+        assert client.peak == 3 and client.exceeded is False
+        assert 3 not in client.calls
+        gates[1].set()
+        assert await _until(lambda: client.current == 2)
+        assert 3 not in client.calls
+        gates[2].set()
+        gates[0].set()
+        with pytest.raises(ZhihuImageDownloadError) as exc_info:
+            await asyncio.wait_for(task, 2)
+    finally:
+        if not task.done():
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    assert exc_info.value.source_index == 0
+    assert exc_info.value.code == "image_source_unavailable"
+    assert exc_info.value.attempts == 1
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "zhihu" / "image_manifest.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [(row["source_index"], row["error_code"], row["http_status"], row["attempts"]) for row in rows] == [
+        (0, "image_source_unavailable", 404, 1),
+    ]
+    ledger = tmp_path / "behavior.content_visits.jsonl"
+    visits = [
+        json.loads(line)
+        for line in ledger.read_text(encoding="utf-8").splitlines()
+        if json.loads(line).get("kind") == "visit"
+    ]
+    assert visits == []
+    assert content.content_visit_refs.get("images", []) == []

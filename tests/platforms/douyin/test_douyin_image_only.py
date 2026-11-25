@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from io import BytesIO
 import json
 from unittest.mock import AsyncMock
@@ -432,3 +433,117 @@ async def test_note_image_rejects_non_douyinpic_host():
     with pytest.raises(ImageDownloadFetchError) as raised:
         await client.get_note_image("https://p3.test/a.jpeg")
     assert raised.value.code == "image_source_unavailable"
+
+
+def _aweme_with_images(count: int, aweme_id: str = "dy-concurrent") -> dict:
+    item = image_aweme(aweme_id)
+    item["images"] = [
+        {
+            "uri": f"uri-{index}",
+            "url_list": [f"https://p3-pc-sign.douyinpic.com/{index}.jpeg"],
+        }
+        for index in range(count)
+    ]
+    return item
+
+
+async def _until(predicate, timeout: float = 1.0) -> bool:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not predicate():
+        if loop.time() >= deadline:
+            return False
+        await asyncio.sleep(0.01)
+    return True
+
+
+@pytest.mark.asyncio
+async def test_aweme_images_overlap_up_to_three_and_keep_source_order(monkeypatch, tmp_path):
+    """四张图同时下载不超过 3、且能达到 3；完成顺序打乱后 refs、staging、manifest 仍按 source_index。"""
+
+    monkeypatch.setattr(config, "ENABLE_GET_MEIDAS", True)
+    monkeypatch.setattr(config, "SAVE_DATA_PATH", str(tmp_path))
+    monkeypatch.setenv("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE", str(tmp_path / "behavior.jsonl"))
+    crawler = DouYinCrawler()
+    gates = [asyncio.Event() for _ in range(4)]
+    entered: list[int] = []
+    finished: list[int] = []
+
+    class Client:
+        def __init__(self) -> None:
+            self.current = 0
+            self.peak = 0
+            self.exceeded = False
+
+        async def get_note_image(self, url: str):
+            index = int(url.rsplit("/", 1)[-1].split(".", 1)[0])
+            self.current += 1
+            self.peak = max(self.peak, self.current)
+            self.exceeded = self.exceeded or self.current > 3
+            entered.append(index)
+            try:
+                await gates[index].wait()
+                finished.append(index)
+                return png_bytes()
+            finally:
+                self.current -= 1
+
+    client = Client()
+    crawler.dy_client = client
+    crawler.capture = DouyinPageCapture.open(object())
+    staged: list[list[int]] = []
+    original = crawler.update_dy_aweme_images
+
+    async def spy(aweme_id, items):
+        staged.append([int(item["source_index"]) for item in items])
+        return await original(aweme_id, items)
+
+    crawler.update_dy_aweme_images = spy
+    aweme = _aweme_with_images(4)
+    task = asyncio.create_task(crawler.get_aweme_images(aweme))
+    try:
+        assert await _until(lambda: client.current >= 3)
+        assert client.peak == 3
+        assert client.exceeded is False
+        assert 3 not in entered
+        gates[2].set()
+        assert await _until(lambda: 2 in finished)
+        assert await _until(lambda: 3 in entered)
+        assert client.peak == 3 and client.exceeded is False
+        for index in (0, 1, 3):
+            gates[index].set()
+            assert await _until(lambda index=index: index in finished)
+        await asyncio.wait_for(task, 2)
+    finally:
+        if not task.done():
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            raise AssertionError("download did not finish under the concurrency cap")
+
+    assert finished == [2, 0, 1, 3]
+    assert client.peak == 3
+    assert client.exceeded is False
+    assert staged == [[0, 1, 2, 3]]
+    ledger = tmp_path / "behavior.content_visits.jsonl"
+    visits = [
+        json.loads(line)
+        for line in ledger.read_text(encoding="utf-8").splitlines()
+        if json.loads(line).get("kind") == "visit"
+    ]
+    assert [visit["asset_key"] for visit in visits] == [
+        "douyin:uri:uri-2",
+        "douyin:uri:uri-0",
+        "douyin:uri:uri-1",
+        "douyin:uri:uri-3",
+    ]
+    by_key = {visit["asset_key"]: visit["id"] for visit in visits}
+    assert aweme["content_visit_refs"]["images"] == [
+        by_key[f"douyin:uri:uri-{index}"] for index in range(4)
+    ]
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "douyin" / "image_manifest.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["source_index"] for row in rows] == [0, 1, 2, 3]
+    assert [row["source_asset_key"] for row in rows] == [f"douyin:uri:uri-{index}" for index in range(4)]

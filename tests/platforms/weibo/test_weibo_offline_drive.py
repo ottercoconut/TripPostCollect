@@ -30,6 +30,7 @@ def test_dependency_direction():
                         "trippostcollect.runtime.page_capture",
                         "trippostcollect.runtime.visit_ledger",
                         "trippostcollect.runtime.human_flow",
+                        "trippostcollect.runtime.image_concurrency",
                     }, (path, module)
                 if module.startswith("trippostcollect.platforms."):
                     assert module.startswith("trippostcollect.platforms.weibo")

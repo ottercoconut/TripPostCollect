@@ -353,3 +353,86 @@ async def test_terminal_http_fetch_error_preserves_manifest_evidence(monkeypatch
     assert row["error_code"] == "image_source_unavailable"
     assert row["http_status"] == 404
     assert row["attempts"] == 1
+
+
+def _indexed_record(count: int = 4) -> dict:
+    return {
+        "note_id": "note-concurrent",
+        "image_assets": [
+            {
+                "pid": f"pid-{index}",
+                "url": f"https://wx1.sinaimg.cn/large/{index}.jpg",
+                "urls": [
+                    f"https://wx1.sinaimg.cn/large/{index}.jpg",
+                    f"https://wx1.sinaimg.cn/mw2000/{index}.jpg",
+                ],
+                "source_index": index,
+            }
+            for index in range(count)
+        ],
+        "content_visit_refs": {"ledger_id": "L", "images": []},
+    }
+
+
+@pytest.mark.asyncio
+async def test_note_images_raise_rate_limit_and_skip_unfinished(monkeypatch, tmp_path):
+    """第 1 张 404、第 2 张 429 时抛 429；未启动或被取消的图不登记访问、不写失败记录。"""
+
+    monkeypatch.setenv("TRIPPOSTCOLLECT_HUMAN_BEHAVIOR_EVIDENCE", str(tmp_path / "behavior.jsonl"))
+    crawler = make_crawler(settings(
+        ENABLE_GET_MEIDAS=True,
+        SAVE_DATA_PATH=str(tmp_path),
+        CRAWLER_MAX_SLEEP_SEC=0,
+    ))
+    cancelled: list[int] = []
+    calls: list[tuple[int, list[str]]] = []
+    hang = asyncio.Event()
+
+    class Client:
+        async def get_note_image(self, urls):
+            index = int(str(urls[0]).rsplit("/", 1)[-1].split(".", 1)[0])
+            calls.append((index, list(urls)))
+            await asyncio.sleep(0)
+            if index == 0:
+                raise ImageDownloadFetchError(
+                    "HTTP 404", code="image_source_unavailable", retryable=False, http_status=404,
+                )
+            if index == 1:
+                raise ImageDownloadFetchError(
+                    "HTTP 429", code="image_rate_limited", retryable=False, http_status=429,
+                )
+            try:
+                await hang.wait()
+            except asyncio.CancelledError:
+                cancelled.append(index)
+                raise
+            return png_bytes()
+
+    crawler.wb_client = Client()
+    crawler._capture = WeiboPageCapture.open(object())
+    record = _indexed_record()
+
+    with pytest.raises(WeiboImageDownloadError) as exc_info:
+        await asyncio.wait_for(crawler.get_note_images(record), 2)
+
+    assert exc_info.value.code == "image_rate_limited"
+    assert exc_info.value.source_index == 1
+    assert exc_info.value.attempts == 1
+    assert all(len(urls) == 2 for _index, urls in calls)
+    assert 3 not in [index for index, _urls in calls]
+    assert 2 in cancelled
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "weibo" / "image_manifest.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [(row["source_index"], row["error_code"], row["http_status"], row["attempts"]) for row in rows] == [
+        (1, "image_rate_limited", 429, 1),
+    ]
+    ledger = tmp_path / "behavior.content_visits.jsonl"
+    visits = [
+        json.loads(line)
+        for line in ledger.read_text(encoding="utf-8").splitlines()
+        if json.loads(line).get("kind") == "visit"
+    ]
+    assert visits == []
+    assert record["content_visit_refs"]["images"] == []

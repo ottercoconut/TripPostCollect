@@ -38,6 +38,7 @@ from playwright.async_api import (
 )
 
 from trippostcollect.application.contracts import ImageStagingError, WeiboPorts
+from trippostcollect.runtime.image_concurrency import ImageDownloadBatchError, download_images_bounded
 from trippostcollect.core.paths import platform_profile_dir
 from trippostcollect.records.topic_relevance import topic_relevant_for_web_post
 from . import parser as weibo_store
@@ -443,71 +444,70 @@ class WeiboCrawler:
         image_assets = list(record.get("image_assets") or [])
         if not image_assets:
             return
-        fetched_assets: List[Dict] = []
         capture = self._capture
-        for asset in image_assets:
+        recorded: list[tuple[int, str]] = []
+        initial_images = list((record.get("content_visit_refs") or {}).get("images") or [])
+
+        async def fetch(asset: Dict) -> tuple[bytes | None, int]:
             source_index = int(asset["source_index"])
             urls = list(asset.get("urls") or [asset.get("url")])
-            try:
-                content, attempts = await self.ports.fetch_image_bytes_with_retry(
-                    lambda urls=urls: self.wb_client.get_note_image(urls),
-                    logger=logger,
-                    label=(
-                        f"platform=weibo note_id={note_id} "
-                        f"source_index={source_index}"
-                    ),
-                )
-            except self.ports.image_error as exc:
-                await self.record_weibo_note_image_failure(
-                    note_id,
-                    {
-                        **asset,
-                        "attempts": exc.attempts,
-                        "http_status": exc.http_status,
-                        "error_code": exc.code,
-                    },
-                )
-                raise WeiboImageDownloadError(
-                    note_id, source_index, exc.code, exc.attempts
-                ) from exc
-            if content is None:
-                failure = {
-                    **asset,
-                    "attempts": attempts,
-                    "http_status": None,
-                    "error_code": "image_download_retryable",
-                }
-                await self.record_weibo_note_image_failure(note_id, failure)
-                raise WeiboImageDownloadError(
-                    note_id,
-                    source_index,
-                    "image_download_retryable",
-                    attempts,
-                )
+            return await self.ports.fetch_image_bytes_with_retry(
+                lambda urls=urls: self.wb_client.get_note_image(urls),
+                logger=logger,
+                label=(
+                    f"platform=weibo note_id={note_id} "
+                    f"source_index={source_index}"
+                ),
+            )
+
+        def on_success(asset: Dict, content: bytes, attempts: int) -> None:
+            del attempts
+            if capture is None:
+                return
             digest = sha256(content).hexdigest()
             asset_key = weibo_store.weibo_source_asset_key(asset.get("pid"), str(asset.get("url") or ""))
-            if capture is not None:
-                visit_id = capture.channel.record_direct_visit(
-                    source="cdn_direct",
-                    stage="note_image",
-                    rule=WEIBO_CONTENT_IMAGE_RULE,
-                    subject_id=note_id,
-                    trigger=None,
-                    status=200,
-                    asset_key=asset_key,
-                    sha256=digest,
-                )
-                refs = dict(record.get("content_visit_refs") or {})
-                refs["images"] = [*list(refs.get("images") or []), visit_id]
-                record["content_visit_refs"] = refs
-            fetched_assets.append(
-                {
-                    **asset,
-                    "content": content,
-                    "attempts": attempts,
-                    "http_status": 200,
-                }
+            visit_id = capture.channel.record_direct_visit(
+                source="cdn_direct",
+                stage="note_image",
+                rule=WEIBO_CONTENT_IMAGE_RULE,
+                subject_id=note_id,
+                trigger=None,
+                status=200,
+                asset_key=asset_key,
+                sha256=digest,
             )
+            recorded.append((int(asset["source_index"]), visit_id))
+            refs = dict(record.get("content_visit_refs") or {})
+            refs["images"] = [
+                *initial_images,
+                *[item_id for _index, item_id in sorted(recorded)],
+            ]
+            record["content_visit_refs"] = refs
+
+        try:
+            downloaded = await download_images_bounded(
+                image_assets, fetch=fetch, on_success=on_success,
+            )
+        except ImageDownloadBatchError as exc:
+            failed_asset = next(
+                asset for asset in image_assets if int(asset["source_index"]) == exc.source_index
+            )
+            await self.record_weibo_note_image_failure(
+                note_id,
+                {
+                    **failed_asset,
+                    "attempts": exc.attempts,
+                    "http_status": exc.http_status,
+                    "error_code": exc.code,
+                },
+            )
+            raise WeiboImageDownloadError(
+                note_id, exc.source_index, exc.code, exc.attempts
+            ) from exc
+        fetched_assets = [
+            {**asset, "content": content, "attempts": attempts, "http_status": 200}
+            for asset, content, attempts in downloaded
+        ]
         try:
             await self.update_weibo_note_images(note_id, fetched_assets)
         except ImageStagingError as exc:

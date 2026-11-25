@@ -735,11 +735,13 @@ def check_drive_result(new, scenario):
 def test_dependency_direction():
     allowed_runtime = {
         "trippostcollect.runtime.cookies", "trippostcollect.runtime.helpers", "trippostcollect.runtime.image_retry",
+        "trippostcollect.runtime.image_concurrency",
         "trippostcollect.runtime.page_capture", "trippostcollect.runtime.visit_ledger",         "trippostcollect.runtime.human_flow", "trippostcollect.runtime.human_pointer",
     }
     allowed_names = {
         "convert_cookies", "convert_str_cookie_to_dict", "extract_text_from_html", "normalize_image_url",
         "ImageDownloadFetchError", "IMAGE_DOWNLOAD_MAX_BYTES", "classified_http_image_error", "is_runtime_blocking_image_error",
+        "ImageDownloadBatchError", "download_images_bounded",
         "CaptureFailure", "CaptureRule", "CapturedResponse", "PageCaptureChannel",
         "VisitLedger", "content_visits_path", "human_scroll", "load_behavior_profile",
         "ElementNotInView", "pointer_for",

@@ -108,8 +108,9 @@
 
 zhimg CDN 图片请求只发浏览器 UA（经状态脚本读取的 `navigator.userAgent`）、图片类 Accept 和 `Referer: https://www.zhihu.com/`，不带 zhihu.com Cookie 和 API
 签名头，也不经第三方代理。每张成功下载的正文图在访问账本以来源 `cdn_direct`、规则
-`zhihu.content_image` 登记状态码、资产键和 sha256，供门禁 R5 与 manifest 对账。同一帖的正文图连续下载，图与图
-之间不再固定睡眠（#227）；单张的有限重试与退避不变，429 仍按 `image_rate_limited` 停轮。平台层写
+`zhihu.content_image` 登记状态码、资产键和 sha256，供门禁 R5 与 manifest 对账。同一帖的正文图最多
+3 张并发下载（#227），帖与帖之间仍逐条；登记时间是该张完成时刻，`content_visit_refs.images`、staging 与 manifest 按
+`source_index` 排列。单张的有限重试与退避不变；失败与阻断的取舍同[抖音](douyin.md)。平台层写
 staging/manifest，根项目再执行通用字节复验、同帖 SHA-256 去重、晋升和事务。
 
 历史 manifest 中旧 zhimg URL 变体的严格兼容条件见[数据持久化](../data-persistence.md)；它只用于
