@@ -1132,6 +1132,7 @@ def _prepare_round(monkeypatch: pytest.MonkeyPatch, tmp_path, page: Page):
     for name in (
         "DETAIL_DWELL_SECONDS",
         "AUTHOR_TAB_HOLD_SECONDS",
+        "REPEAT_AUTHOR_TAB_HOLD_SECONDS",
         "SEARCH_RESULT_PAUSE_SECONDS",
         "AUTHOR_CLICK_PAUSE_SECONDS",
     ):
@@ -1667,3 +1668,147 @@ async def test_comma_separated_keywords_are_rejected(monkeypatch, tmp_path):
     assert stopped[-1]["stop_reason"] == "runtime_failed"
     assert stopped[-1]["stop_detail"] == "invalid_search_keywords"
     assert page.gotos == []
+
+
+def _watch_uniform(monkeypatch: pytest.MonkeyPatch) -> list[tuple[float, float]]:
+    draws: list[tuple[float, float]] = []
+
+    def uniform(low: float, high: float) -> float:
+        draws.append((float(low), float(high)))
+        return float(low)
+
+    monkeypatch.setattr(detail_page.random, "uniform", uniform)
+    return draws
+
+
+def _paired_pauses(capture: DouyinPageCapture, draws: list[tuple[float, float]]):
+    pauses = [line for line in lines_of(capture) if line.get("kind") == "pause"]
+    assert len(pauses) == len(draws)
+    return [
+        (line["stage"], bounds, line["seconds"])
+        for line, bounds in zip(pauses, draws, strict=True)
+    ]
+
+
+def _author_link(sec_uid: str) -> dict[str, Any]:
+    return {
+        "kind": "author",
+        "href": f"https://www.douyin.com/user/{sec_uid}",
+        "visible": True,
+        "box": {"x": 1100, "y": 70, "width": 80, "height": 20},
+    }
+
+
+def _use_author(page: Page, sec_uid: str, uid: str) -> None:
+    page.author_sec = sec_uid
+    page.author_links = [_author_link(sec_uid)]
+    page.profiles = [(200, profile_user(uid=uid, sec_uid=sec_uid))]
+
+
+@pytest.mark.asyncio
+async def test_detail_dwell_and_repeat_author_hold_stay_on_one_round(monkeypatch, tmp_path):
+    """详情停留抽 (2, 3)；同一实例里同一作者第二次起抽 (2, 3)，换作者和新实例仍是 (5, 9)。"""
+
+    monkeypatch.setattr(detail_page, "DETAIL_RETRY_PAUSE_SECONDS", 0)
+    draws = _watch_uniform(monkeypatch)
+    capture, pages, page = harness(tmp_path)
+    _arm_author(page)
+    for aweme_id in ("102", "103", "104"):
+        page.cards.append({"kind": "card", "id": aweme_id, "visible": True})
+
+    first = await pages.open_from_search(image_aweme("101"))
+    second = await pages.open_from_search(image_aweme("102"))
+    other_sec = "MS4wLjABAAAAotherqd"
+    _use_author(page, other_sec, "author-2")
+    third = await pages.open_from_search(image_aweme("103", sec_uid=other_sec, uid="author-2"))
+
+    paired = _paired_pauses(capture, draws)
+    assert [bounds for stage, bounds, _seconds in paired if stage == "note_detail"] == [(2.0, 3.0)] * 3
+    assert [bounds for stage, bounds, _seconds in paired if stage == "author_tab"] == [
+        (5.0, 9.0), (2.0, 3.0), (5.0, 9.0),
+    ]
+    assert [bounds for stage, bounds, _seconds in paired if stage == "creator_profile"] == [(1.0, 2.0)] * 3
+    assert [bounds for stage, bounds, _seconds in paired if stage == "search_results"] == [(1.2, 2.8)] * 3
+    assert [seconds for stage, _bounds, seconds in paired if stage == "note_detail"] == [2.0, 2.0, 2.0]
+    assert [seconds for stage, _bounds, seconds in paired if stage == "author_tab"] == [5.0, 2.0, 5.0]
+
+    actions = [
+        line for line in lines_of(capture)
+        if line.get("kind") == "action" and line.get("action") == "click_author"
+    ]
+    visits = [
+        line for line in lines_of(capture)
+        if line.get("kind") == "visit" and line.get("stage") == "creator_profile"
+    ]
+    assert len(actions) == 3
+    assert len(visits) == 3
+    assert first["content_visit_refs"]["creator_profile"] != second["content_visit_refs"]["creator_profile"]
+    assert {item["id"] for item in visits} == {
+        first["content_visit_refs"]["creator_profile"],
+        second["content_visit_refs"]["creator_profile"],
+        third["content_visit_refs"]["creator_profile"],
+    }
+
+    _use_author(page, SEC, UID)
+    fresh = DouyinDetailPages(capture, page)
+    before = len(draws)
+    opened = await fresh.open_from_search(image_aweme("104"))
+    fresh_pauses = [line for line in lines_of(capture) if line.get("kind") == "pause"][len(paired):]
+    fresh_paired = [
+        (line["stage"], bounds)
+        for line, bounds in zip(fresh_pauses, draws[before:], strict=True)
+    ]
+    assert [bounds for stage, bounds in fresh_paired if stage == "note_detail"] == [(2.0, 3.0)]
+    assert [bounds for stage, bounds in fresh_paired if stage == "author_tab"] == [(5.0, 9.0)]
+    assert opened["content_visit_refs"]["creator_profile"] not in {
+        first["content_visit_refs"]["creator_profile"],
+        second["content_visit_refs"]["creator_profile"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_failed_author_page_does_not_shorten_the_next_visit(monkeypatch, tmp_path):
+    """作者资料没取到不算访问过；下一次同一作者仍按首次，再下一次才缩短。"""
+
+    monkeypatch.setattr(detail_page, "DETAIL_ATTEMPTS", 1)
+    monkeypatch.setattr(detail_page, "DETAIL_RETRY_PAUSE_SECONDS", 0)
+    profile_timeout = detail_page.AUTHOR_RESPONSE_TIMEOUT_SECONDS
+    monkeypatch.setattr(detail_page, "AUTHOR_RESPONSE_TIMEOUT_SECONDS", 0)
+    draws = _watch_uniform(monkeypatch)
+    capture, pages, page = harness(tmp_path)
+    _arm_author(page)
+    page.profiles = []
+    page.cards.append({"kind": "card", "id": "102", "visible": True})
+    page.cards.append({"kind": "card", "id": "103", "visible": True})
+
+    with pytest.raises(DouyinDetailFetchError) as raised:
+        await pages.open_from_search(image_aweme("101"))
+    assert raised.value.code == "author_profile_missing"
+
+    monkeypatch.setattr(detail_page, "AUTHOR_RESPONSE_TIMEOUT_SECONDS", profile_timeout)
+    page.profiles = [(200, profile_user())]
+    first = await pages.open_from_search(image_aweme("102"))
+    before_clicks = sum(
+        1 for line in lines_of(capture)
+        if line.get("kind") == "action" and line.get("action") == "click_author"
+    )
+    second = await pages.open_from_search(image_aweme("103"))
+
+    paired = _paired_pauses(capture, draws)
+    assert [bounds for stage, bounds, _seconds in paired if stage == "author_tab"] == [
+        (5.0, 9.0), (2.0, 3.0),
+    ]
+    assert [bounds for stage, bounds, _seconds in paired if stage == "note_detail"] == [(2.0, 3.0)] * 3
+    clicks = [
+        line for line in lines_of(capture)
+        if line.get("kind") == "action" and line.get("action") == "click_author"
+    ]
+    assert len(clicks) == before_clicks + 1
+    assert before_clicks >= 1
+    assert first["content_visit_refs"]["creator_profile"] != second["content_visit_refs"]["creator_profile"]
+    visits = [
+        line["id"] for line in lines_of(capture)
+        if line.get("kind") == "visit" and line.get("stage") == "creator_profile"
+    ]
+    assert first["content_visit_refs"]["creator_profile"] in visits
+    assert second["content_visit_refs"]["creator_profile"] in visits

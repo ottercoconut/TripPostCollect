@@ -30,8 +30,10 @@ logger = logging.getLogger("TripPostCollect")
 
 DETAIL_ATTEMPTS = 3
 DETAIL_RETRY_PAUSE_SECONDS = 1.0
-DETAIL_DWELL_SECONDS = (5.0, 9.0)
+DETAIL_DWELL_SECONDS = (2.0, 3.0)
 AUTHOR_TAB_HOLD_SECONDS = (5.0, 9.0)
+# 同一轮、同一 sec_uid 第二次起。首次成功访问仍用上面的 5–9 秒。
+REPEAT_AUTHOR_TAB_HOLD_SECONDS = (2.0, 3.0)
 SEARCH_RESULT_PAUSE_SECONDS = (1.2, 2.8)
 AUTHOR_CLICK_PAUSE_SECONDS = (1.0, 2.0)
 MODAL_WAIT_SECONDS = 8.0
@@ -195,6 +197,8 @@ class DouyinDetailPages:
         self.capture = capture
         self.search_page = search_page
         self.channel = capture.channel
+        # start() 里一轮只建一个实例。只在资料成功、即将停留时记入，不落盘，不跨轮。
+        self._visited_author_keys: set[str] = set()
 
     async def open_from_search(self, aweme: dict[str, Any], *, search_visit_id: str = "") -> dict[str, Any]:
         aweme_id = str(aweme.get("aweme_id") or "")
@@ -461,7 +465,12 @@ class DouyinDetailPages:
                 trigger=click_id,
                 url_user_id=str(user.get("uid") or ""),
             )
-            await self._pause(author_page, "author_tab", *AUTHOR_TAB_HOLD_SECONDS, page_role="author")
+            await self._pause(
+                author_page,
+                "author_tab",
+                *self._author_tab_hold(sec_uid),
+                page_role="author",
+            )
             return dict(captured.json), visit_id
         finally:
             await self._close_author_tab(author_page, aweme_id)
@@ -662,6 +671,16 @@ class DouyinDetailPages:
             await asyncio.sleep(milliseconds / 1000)
             return
         await waiter(milliseconds)
+
+    def _author_tab_hold(self, sec_uid: str) -> tuple[float, float]:
+        """即将停留时调用。同一 sec_uid 已成功访问过则用短停留，并记下这次。"""
+
+        repeat = bool(sec_uid) and sec_uid in self._visited_author_keys
+        if sec_uid:
+            self._visited_author_keys.add(sec_uid)
+        if repeat:
+            return REPEAT_AUTHOR_TAB_HOLD_SECONDS
+        return AUTHOR_TAB_HOLD_SECONDS
 
     async def _pause(
         self,

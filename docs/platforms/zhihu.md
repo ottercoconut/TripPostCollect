@@ -37,13 +37,15 @@
 - 分享数平台不提供（#188）：网页端 `reaction.statistics.shareCount` 对任何内容都是占位 0（同组 `pvCount`
   也是 0、`republishers` 为空），页面与手机端都不显示分享数，页面自身请求里也没有非 0 的分享字段。
   知乎不读取该键，`post_shares_count` 为 NULL，分享不是知乎必需项。
-- 详情标签停留随机 5–9 秒（账本阶段 `note_detail`），然后在关闭前点击作者名。个人作者页是
+- 详情标签停留随机 2–3 秒（账本阶段 `note_detail`；#227，操作人 2026-11-25 认可）。一次详情滚动算在停留内，
+  滚动更久时实际停留等于滚动耗时，账本仍记抽样值。然后在关闭前点击作者名。个人作者页是
   `https://www.zhihu.com/people/{url_token}`，机构号作者页是 `https://www.zhihu.com/org/{url_token}`
   （#202）。两者都在新标签打开，数据仍是 `script#js-initialData` 的
   `initialState.entities.users.{url_token}`，结构相同，含粉丝、关注、作品数和标识。只点击路径正好是
   `/people/{token}` 或 `/org/{token}` 的主页；可以带查询串或片段，`/org/{token}/answers`、
   `/people/{token}/followers` 这类子页不点。点作者前先写一段 `creator_profile` 停顿（1–2 秒）；作者标签
-  再停留随机 5–9 秒后关闭，回到详情标签，再关闭详情标签回到搜索页。点击、页面状态读取、停留和关闭都写入
+  再停留后关闭：同一轮内首次取到某作者（`people` 或 `org` 加 token）的资料后停留随机 5–9 秒，第二次起 2–3 秒
+  （#227），资料没取到的访问不算首次；每条详情仍各自点击作者、各自登记访问。随后回到详情标签，再关闭详情标签回到搜索页。点击、页面状态读取、停留和关闭都写入
   访问账本。`url_user_id` 取作者页 URL 的 token。
 - 每条入库记录带 `content_visit_refs`：`ledger_id`、`search_results`、`note_detail`、`creator_profile`、
   `images`。访问阶段统一用这些链名；正文来源字段仍是 `answer_detail` 或 `article_detail`。知乎已纳入
