@@ -7,6 +7,8 @@
 > **授权记录（2026-11-19）：** 操作人授权临时解冻，同步 #211 微博桌面站页面取数、访问门禁与全量扫描口径。
 >
 > **授权记录（2026-11-20）：** 操作人授权临时解冻，同步 #222 抖音页面取数与访问门禁口径。
+>
+> **授权记录（2026-11-25）：** 操作人授权临时解冻，同步 #213 微博历史刷新复用已入库正文图。
 
 本文只描述组件边界和数据流。完成谓词、错误分类和候选记忆语义见
 [正式抓取执行契约](formal-crawl-contract.md)，操作步骤见[运行手册](operations-runbook.md)，表结构、
@@ -102,6 +104,7 @@ worker、是否启动执行和并发上限，便于区分 dry-run 计划与正�
      不带平台 Cookie，不经第三方代理）
      知乎、微博、抖音：登记的 CDN 直连例外（UA 取自浏览器，Referer 固定为平台站点，不带 Cookie，访问账本记 cdn_direct）
      小红书：浏览器翻看时截获的图片响应体写入本轮 staging
+     微博 repair 复用旧图（#213，显式开关）：长期文件校验后硬链接进本轮 staging，账本记 local_media，manifest 记 reused
   -> 原子追加 image_manifest.jsonl
   -> 根项目按同一投影核对身份和数量
   -> 验证路径、SHA-256、MIME、后缀、尺寸与解码
@@ -149,7 +152,8 @@ worker、是否启动执行和并发上限，便于区分 dry-run 计划与正�
 
 微博（#211）搜索页由服务端渲染，卡片与分页经登记的 DOM 脚本读取（`weibo.search_cards` / `page_state`）；
 详情与作者都是详情标签页面自身请求的被动截获（`weibo.statuses_show`、`weibo.side_user` / `page_response`），
-作者不另开页面。正文图同样是登记的 CDN 直连例外，账本来源为 `cdn_direct`。
+作者不另开页面。正文图同样是登记的 CDN 直连例外，账本来源为 `cdn_direct`；只有 repair 链可按显式开关复用
+已入库的同帖同 pid 文件，账本来源为 `local_media`（#213）。
 
 抖音（#222）搜索是本轮搜索页自身请求的被动截获（`douyin.search_response` / `page_response`）；详情由点击搜索卡片
 在同一标签打开浮层，经登记的状态脚本读取 `modal_id` 与当前播放项（`douyin.modal_state` / `page_state`），浮层不另发
