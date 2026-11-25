@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import errno
 from hashlib import sha256
 from io import BytesIO
 import json
@@ -21,11 +20,6 @@ from trippostcollect.runtime.helpers import normalize_image_url
 
 
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
-_LINK_FALLBACK_ERRNOS = {
-    number
-    for name in ("EXDEV", "EOPNOTSUPP", "ENOTSUP", "ENOSYS")
-    if isinstance(number := getattr(errno, name, None), int)
-}
 MAX_IMAGE_PIXELS = 100_000_000
 FORMAT_METADATA = {
     "JPEG": ("jpg", "image/jpeg"),
@@ -291,16 +285,18 @@ def failed_manifest_row(
 
 
 def _place_staged_bytes(target: Path, asset: ImageAsset) -> None:
-    """复用图优先硬链接进暂存 part 目录；跨设备或不支持时退回写字节。"""
+    """复用图优先硬链接进暂存 part 目录；链接不成就退回写字节。"""
 
     source = asset.stored_source_path
     if source and not Path(source).is_symlink():
         try:
             os.link(source, target, follow_symlinks=False)
             return
-        except OSError as exc:
-            if exc.errno not in _LINK_FALLBACK_ERRNOS:
-                raise
+        except FileExistsError:
+            raise
+        except OSError:
+            # 跨设备、文件系统不支持、无链接权限或链接数已满：都退回写入已校验过的字节。
+            pass
     with target.open("xb") as handle:
         handle.write(asset.content)
         handle.flush()

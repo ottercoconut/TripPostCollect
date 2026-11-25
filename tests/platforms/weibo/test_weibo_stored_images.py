@@ -356,7 +356,8 @@ async def test_search_mode_and_missing_inventory_download_every_image(monkeypatc
     assert manifest_rows(tmp_path / "save")[0]["fetch_status"] == "downloaded"
 
 
-def test_stage_hardlink_falls_back_when_link_raises_exdev(monkeypatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize("code", [errno.EXDEV, errno.EPERM, errno.EMLINK, errno.EOPNOTSUPP])
+def test_stage_hardlink_failure_falls_back_to_bytes(monkeypatch, tmp_path: Path, code: int) -> None:
     content = png_bytes()
     source = tmp_path / "long.png"
     source.write_bytes(content)
@@ -371,7 +372,7 @@ def test_stage_hardlink_falls_back_when_link_raises_exdev(monkeypatch, tmp_path:
     )
 
     def boom(*_args, **_kwargs):
-        raise OSError(errno.EXDEV, "cross")
+        raise OSError(code, "link failed")
 
     monkeypatch.setattr(os, "link", boom)
     rows = stage_post_images(
@@ -590,6 +591,21 @@ def test_prepare_rows_keeps_prior_local_file_and_updates_url(tmp_path: Path) -> 
         project_root=project, media_root=media, require_local_images=True,
     )
     assert json.loads(kept_new[0]["raw_image_json"])["local_file"]["manifest_path"] == "outputs/batch/image_manifest.jsonl"
+
+    # 首项被删或顺序变化后，原来被合并的来源键会成为保留项；它与旧行是同一份字节。
+    promoted = {**item, "source_asset_key": "weibo:pid:stale", "local_file": dict(new_file)}
+    via_duplicate = prepare_image_rows(
+        "weibo", [promoted], existing, project_root=project, media_root=media, require_local_images=True,
+    )
+    raw = json.loads(via_duplicate[0]["raw_image_json"])
+    assert raw["source_asset_key"] == "weibo:pid:stale"
+    assert raw["local_file"]["manifest_path"] == "outputs/old/image_manifest.jsonl"
+
+    with pytest.raises(ImagePersistenceError, match="no unique stored row"):
+        prepare_image_rows(
+            "weibo", [{**item, "source_asset_key": "weibo:pid:unknown"}], existing,
+            project_root=project, media_root=media, require_local_images=True,
+        )
 
     mismatch = {**existing[0], "sha256": "ff" * 32}
     with pytest.raises(ImagePersistenceError, match="sha256"):

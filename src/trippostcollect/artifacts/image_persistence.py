@@ -191,7 +191,7 @@ def retain_prior_stored_local_files(
     image_items: list[dict[str, Any]],
     existing_images: list[dict[str, Any]],
 ) -> None:
-    """复用图沿用旧行 local_file。按 source_asset_key 匹配，sha256 不一致则报错。
+    """复用图沿用旧行 local_file。按 source_asset_key（含合并来源键）匹配，sha256 不一致则报错。
 
     sha256_duplicate_sources 以本次合并结果为准。旧行没有 local_file 字典时不改。
     """
@@ -200,8 +200,16 @@ def retain_prior_stored_local_files(
     for row in existing_images:
         if row.get("role") != "content":
             continue
-        key = str(row.get("source_asset_key") or "")
-        if key:
+        local_file = row.get("local_file")
+        duplicates = local_file.get("sha256_duplicate_sources") if isinstance(local_file, dict) else None
+        keys = {str(row.get("source_asset_key") or "")}
+        # 与旧图清单同口径：同帖内按字节合并掉的来源键也指向这一行。
+        keys.update(
+            str(duplicate.get("source_asset_key") or "")
+            for duplicate in (duplicates if isinstance(duplicates, list) else [])
+            if isinstance(duplicate, dict)
+        )
+        for key in keys - {""}:
             by_key.setdefault(key, []).append(row)
     for item in image_items:
         if item.get("fetch_status") != "reused" or item.get("role") != "content":

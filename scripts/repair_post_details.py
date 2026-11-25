@@ -82,7 +82,7 @@ REPAIR_CHILD_POLL_SECONDS = 0.2
 REPAIR_CHILD_INTERRUPT_GRACE_SECONDS = (
     PROCESS_CLEANUP_GRACE_SECONDS + PROCESS_FINAL_REAP_SECONDS + 15.0
 )
-COMPLETED_REPAIR_OUTCOMES = {"completed", "completed_with_remaining"}
+COMPLETED_REPAIR_OUTCOMES = {"completed", "completed_with_remaining", "paused"}
 TRUSTED_DETAIL_SOURCES = {
     "weibo": {WEIBO_CONTENT_DETAIL_SOURCE, "search_mblog_complete", "mobile_detail"},
     # #194：详情路径只写 answer_detail / article_detail，当前代码不再产生 search_content。
@@ -1172,20 +1172,15 @@ def _request_pause(args: argparse.Namespace) -> int:
     extras = [
         token
         for token in sys.argv[1:]
-        if token.startswith("--") and token not in {"--platform", "--request-pause"}
+        if token.startswith("--")
+        and token.split("=", 1)[0] not in {"--platform", "--request-pause"}
     ]
     if extras:
         raise SystemExit("--request-pause cannot be combined with other repair arguments")
     path = write_pause_request(args.platform)
     print(path)
-    print("下一次启动会清除它")
+    print("正在运行的修复会在当前批结束后停下；没有运行时，下一次启动会清除这个请求")
     return 0
-
-
-def _repair_exit_code(outcome: str) -> int:
-    if outcome in COMPLETED_REPAIR_OUTCOMES or outcome == "paused":
-        return 0
-    return 2
 
 
 def main() -> int:
@@ -1521,9 +1516,8 @@ def main() -> int:
             interrupt_signum = int(latch.signal_received)
         if interrupt_signum is not None:
             pass
-        elif pause_info is not None and not any(
-            summary.get("import_completion_met") for summary in child_summaries
-        ):
+        elif pause_info is not None and not started_batches:
+            # 一批都没派：没有可核验的产物，不冒充已核验。
             state.complete(
                 "command_executed",
                 evidence={"backup": backup, "batches": batch_results, "pause": pause_info},
@@ -1534,7 +1528,7 @@ def main() -> int:
                 evidence={
                     "skipped": True,
                     "verified": False,
-                    "reason": "paused_before_any_successful_batch",
+                    "reason": "paused_before_first_batch",
                 },
                 skipped=True,
             )
@@ -1544,7 +1538,7 @@ def main() -> int:
                 evidence={
                     "skipped": True,
                     "verified": False,
-                    "reason": "paused_before_any_successful_batch",
+                    "reason": "paused_before_first_batch",
                 },
                 skipped=True,
             )
@@ -1873,7 +1867,7 @@ def main() -> int:
         exit_signum = latch.signal_received
         if exit_signum is not None:
             return 128 + int(exit_signum)
-        return _repair_exit_code(outcome)
+        return 0 if outcome in COMPLETED_REPAIR_OUTCOMES else 2
     finally:
         latch.restore()
 

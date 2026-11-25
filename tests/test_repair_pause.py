@@ -50,7 +50,8 @@ def test_request_pause_writes_file_without_opening_db(
     captured = capsys.readouterr().out
     path = tmp_path / "pause" / "weibo.json"
     assert str(path) in captured
-    assert "下一次启动会清除它" in captured
+    assert "当前批结束后停下" in captured
+    assert "下一次启动会清除这个请求" in captured
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert set(payload) == {"platform", "requested_at"}
     assert payload["platform"] == "weibo"
@@ -60,6 +61,72 @@ def test_request_pause_writes_file_without_opening_db(
     )
     with pytest.raises(SystemExit, match="cannot be combined"):
         repair.main()
+
+
+def test_request_pause_accepts_equals_form(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(repair, "POST_DETAIL_REPAIR_PAUSE_ROOT", tmp_path / "pause")
+    monkeypatch.setattr(sys, "argv", ["repair_post_details.py", "--platform=weibo", "--request-pause"])
+    assert repair.main() == 0
+    assert repair.pause_request_path("weibo").is_file()
+
+
+def test_pause_after_only_failed_batches_is_not_reported_as_paused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """已派的批次一条都没成功时，暂停不得把“无进展”盖成正常暂停。"""
+
+    db_path = tmp_path / "repair.sqlite"
+    _seed_refresh_posts(db_path, ["row-a", "row-b"])
+    _redirect_repair_dirs(monkeypatch, tmp_path)
+    monkeypatch.setattr(sys, "argv", _refresh_argv(db_path))
+
+    def failed_child(command: list[str], **_kwargs: object) -> dict:
+        repair.write_pause_request("zhihu")
+        stdout = _write_child_summary(tmp_path / "child.json", {
+            "import_completion_met": False,
+            "formal_validation": {"valid_total_count": 0, "skipped_candidate_failures": []},
+        })
+        return {"returncode": 2, "stdout": stdout, "stderr": ""}
+
+    monkeypatch.setattr(repair, "run_repair_child", failed_child)
+    assert repair.main() == 2
+    summary, state = _summary_and_state(tmp_path)
+    assert summary["status"] == "failed"
+    assert summary["not_attempted_count"] == 1
+    assert state["status"] != "paused"
+
+
+def test_signal_after_paused_outcome_keeps_the_paused_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "repair.sqlite"
+    _seed_refresh_posts(db_path, ["row-a"])
+    _redirect_repair_dirs(monkeypatch, tmp_path)
+    monkeypatch.setattr(sys, "argv", _refresh_argv(db_path))
+    real_clear = repair.clear_pause_request
+    real_finalize = repair.FrozenExecutionState.finalize
+    calls = {"n": 0}
+
+    def clear_then_request(platform: str):
+        calls["n"] += 1
+        payload = real_clear(platform)
+        if calls["n"] == 1:
+            repair.write_pause_request(platform)
+        return payload
+
+    def finalize_then_signal(self, *args: object, **kwargs: object):
+        result = real_finalize(self, *args, **kwargs)
+        os.kill(os.getpid(), signal.SIGINT)
+        return result
+
+    monkeypatch.setattr(repair, "clear_pause_request", clear_then_request)
+    monkeypatch.setattr(repair.FrozenExecutionState, "finalize", finalize_then_signal)
+    assert repair.main() == 128 + signal.SIGINT
+    summary, state = _summary_and_state(tmp_path)
+    assert state["status"] == "paused"
+    assert summary["status"] == "paused"
 
 
 def test_startup_clears_stale_pause_and_still_runs(
