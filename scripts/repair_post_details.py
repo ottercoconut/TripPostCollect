@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import secrets
 import shutil
 import signal
 import sqlite3
@@ -28,6 +30,7 @@ from trippostcollect.core.paths import (
     LOCAL_MEDIA_ROOT,
     POST_DETAIL_REPAIR_BACKUP_ROOT,
     POST_DETAIL_REPAIR_OUTPUT,
+    POST_DETAIL_REPAIR_PAUSE_ROOT,
     POST_DETAIL_REPAIR_RUNTIME_ROOT,
     PROJECT_ROOT,
     ensure_dir,
@@ -162,6 +165,11 @@ def parse_args() -> argparse.Namespace:
         "--keep-stored-images",
         action="store_true",
         help="Weibo --refresh-all only: keep stored content-image bytes and skip CDN downloads.",
+    )
+    parser.add_argument(
+        "--request-pause",
+        action="store_true",
+        help="Write a per-platform pause request and exit. The running repair stops after the current batch.",
     )
     return parser.parse_args()
 
@@ -1117,8 +1125,73 @@ def run_zhihu_image_dedupe(args: argparse.Namespace) -> int:
     return 0
 
 
+def pause_request_path(platform: str) -> Path:
+    return POST_DETAIL_REPAIR_PAUSE_ROOT / f"{platform}.json"
+
+
+def write_pause_request(platform: str) -> Path:
+    """原子写入暂停请求。内容只有请求时间和平台。"""
+
+    target = pause_request_path(platform)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(
+        {"platform": platform, "requested_at": utc_iso()},
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    part = target.with_name(f".{target.name}.{secrets.token_hex(4)}.part")
+    part.write_text(payload + "\n", encoding="utf-8")
+    os.replace(part, target)
+    return target
+
+
+def read_pause_request(platform: str) -> dict[str, Any] | None:
+    path = pause_request_path(platform)
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def clear_pause_request(platform: str) -> dict[str, Any] | None:
+    """删除暂停请求并返回其内容。文件不存在时返回 None。"""
+
+    payload = read_pause_request(platform)
+    path = pause_request_path(platform)
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        return payload
+    return payload
+
+
+def _request_pause(args: argparse.Namespace) -> int:
+    extras = [
+        token
+        for token in sys.argv[1:]
+        if token.startswith("--") and token not in {"--platform", "--request-pause"}
+    ]
+    if extras:
+        raise SystemExit("--request-pause cannot be combined with other repair arguments")
+    path = write_pause_request(args.platform)
+    print(path)
+    print("下一次启动会清除它")
+    return 0
+
+
+def _repair_exit_code(outcome: str) -> int:
+    if outcome in COMPLETED_REPAIR_OUTCOMES or outcome == "paused":
+        return 0
+    return 2
+
+
 def main() -> int:
     args = parse_args()
+    if args.request_pause:
+        return _request_pause(args)
     _validate_repair_modes(args)
     if args.dedupe_images:
         return run_zhihu_image_dedupe(args)
@@ -1323,6 +1396,7 @@ def main() -> int:
     batch_runtime_reasons: dict[str, str] = {}
     started_batches: set[int] = set()
     throttle_stop: dict[str, Any] | None = None
+    pause_info: dict[str, Any] | None = None
     fatal_error = ""
     outcome = "failed"
     interrupt_signum: int | None = None
@@ -1335,9 +1409,26 @@ def main() -> int:
         backup = create_sqlite_backup(db_path, backup_path)
         if latch.signal_received is None:
             state.begin("command_executed")
+            stale_pause = clear_pause_request(args.platform)
+            if stale_pause is not None:
+                state.append_event(
+                    "post_detail_repair_pause_cleared",
+                    {
+                        "platform": args.platform,
+                        "requested_at": str(stale_pause.get("requested_at") or ""),
+                    },
+                )
         for batch_plan in batch_plans:
             if latch.signal_received is not None:
                 interrupt_signum = int(latch.signal_received)
+                break
+            requested_pause = clear_pause_request(args.platform)
+            if requested_pause is not None:
+                pause_info = {
+                    "requested_at": str(requested_pause.get("requested_at") or ""),
+                    "stopped_before_batch": int(batch_plan["batch"]),
+                }
+                state.append_event("post_detail_repair_pause_accepted", dict(pause_info))
                 break
             child_run = run_repair_child(
                 batch_plan["command"],
@@ -1408,6 +1499,8 @@ def main() -> int:
                 child_summaries.append(child_summary)
             state.append_event("post_detail_repair_batch_finished", batch_result)
             if refusal:
+                clear_pause_request(args.platform)
+                pause_info = None
                 throttle_stop = {
                     "batch": batch_plan["batch"],
                     "reason": str(refusal.get("reason") or ""),
@@ -1428,6 +1521,35 @@ def main() -> int:
             interrupt_signum = int(latch.signal_received)
         if interrupt_signum is not None:
             pass
+        elif pause_info is not None and not any(
+            summary.get("import_completion_met") for summary in child_summaries
+        ):
+            state.complete(
+                "command_executed",
+                evidence={"backup": backup, "batches": batch_results, "pause": pause_info},
+            )
+            state.begin("artifacts_verified")
+            state.complete(
+                "artifacts_verified",
+                evidence={
+                    "skipped": True,
+                    "verified": False,
+                    "reason": "paused_before_any_successful_batch",
+                },
+                skipped=True,
+            )
+            state.begin("persistence_verified")
+            state.complete(
+                "persistence_verified",
+                evidence={
+                    "skipped": True,
+                    "verified": False,
+                    "reason": "paused_before_any_successful_batch",
+                },
+                skipped=True,
+            )
+            outcome = "paused"
+            state.finalize(outcome=outcome, evidence={"pause": pause_info})
         elif fatal_error:
             state.fail(
                 "command_executed",
@@ -1533,11 +1655,14 @@ def main() -> int:
                     )
                 else:
                     state.complete("persistence_verified", evidence=persistence_evidence)
-                    outcome = (
-                        "completed"
-                        if not remaining_target_ids
-                        else "completed_with_remaining"
-                    )
+                    if pause_info is not None and remaining_target_ids:
+                        outcome = "paused"
+                    else:
+                        outcome = (
+                            "completed"
+                            if not remaining_target_ids
+                            else "completed_with_remaining"
+                        )
                     state.finalize(outcome=outcome, evidence=persistence_evidence)
     except Exception as exc:
         if latch.signal_received is not None:
@@ -1649,6 +1774,17 @@ def main() -> int:
             }
             if throttle_stop is not None:
                 summary["throttle"] = throttle_stop
+            if (
+                pause_info is not None
+                and interrupt_signum is None
+                and throttle_stop is None
+                and outcome == "paused"
+            ):
+                summary["pause"] = {
+                    "requested_at": pause_info["requested_at"],
+                    "stopped_before_batch": pause_info["stopped_before_batch"],
+                    "remaining": len(remaining_ids),
+                }
             if args.refresh_all:
                 summary["target_results"] = build_target_results(
                     targets=targets,
@@ -1737,7 +1873,7 @@ def main() -> int:
         exit_signum = latch.signal_received
         if exit_signum is not None:
             return 128 + int(exit_signum)
-        return 0 if outcome in COMPLETED_REPAIR_OUTCOMES else 2
+        return _repair_exit_code(outcome)
     finally:
         latch.restore()
 
