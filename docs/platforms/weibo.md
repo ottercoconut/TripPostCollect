@@ -211,7 +211,8 @@
 
   `author_profile_url` 写成 `https://weibo.com/u/{uid}`。以上各项缺键都为 NULL，不补 0；键上的 0 照记为 0。
   #211 之前的历史行粉丝来源是 `search_author`，导入与修复校验仍接受；新抓取只写 `detail_side_user`。
-- 认证原值 `verified`、`verified_type`、`verified_type_ext`、`verified_reason` 写入 `author_json.weibo_verify`。
+- 认证原值 `verified`、`verified_type`、`verified_type_ext`、`verified_reason` 写入 `author_json.weibo_verify`。详情投影成功后
+  该键总会写入，没有任何认证原值时为 `{}`（#213）。
 - 认证判定（#213，操作人 2026-11-20 决定）。机构与个人只按 `verified_type` 区分，不按类型码细分：
 
   | 条件 | `author_verified` | `author_verified_text` |
@@ -228,7 +229,8 @@
     指向机构蓝 V 认证页；0 与 -1 全部指向个人认证页或申请页。
   - `verified_type_ext` 不区分机构与个人，只影响 V 标颜色：个人 0 为黄 V，1、2 为橙 V；机构 53 为红 V（媒体），
     其余为蓝 V。它不参与判定。
-  - 带 `author_json.weibo_verify` 的行可按上表离线重算，不需重访。#211 之前的历史行没有原值，回填见 #213。
+  - 带 `author_json.weibo_verify` 的行可按上表离线重算，不需重访。#211 之前的历史行没有原值，用下文
+    `--refresh-all` 重访补齐（#213），不离线补标记。
 - 头像（`avatar_hd`、`avatar_large`、`profile_image_url`）、性别（`gender`）、所在地（`location`）、生日、公司
   和 `status_total_counter` 不采集。
 - 截获不到匹配的 `sideUser`，或其中没有用户对象，是候选级失败（`author_profile_missing`）：按 3 次、间隔
@@ -283,4 +285,9 @@
   - 再下载正文图。
 - 导航响应 401/403 记 `login_required`，429 记 `rate_limited`；其他非 2xx 视为该条详情不可用。
 - 不调用 Playwright `page.request` 等请求接口。该入口不写搜索 checkpoint，完成含义只覆盖清单中的旧行。
-- 是否用同一链路为约 3882 行历史微博回填作者简介、关注数、作品数和认证，待操作人在 #213 决定。
+- `--refresh-all`（#213，操作人 2026-11-25 决定整行刷新）选择 `topic_relevant=1` 且
+  `raw_sample_json.author_json.weibo_verify` 缺键的行，不论 `content_detail_status`。
+  - 正文、互动数、图片和作者字段按本次重访整行更新；标题或正文变化后 `topic_relevant` 随之重算，可能变为 0。
+  - 恢复要求 `desktop_detail`、正文非空、正文图全部落盘（0 张图不算恢复）且该键存在；没刷新的行保持原值。
+  - 已删除、不可见或图片失败的行保持原值，留待下次；重跑跳过已刷新行。
+- 用同一链路为 `topic_relevant=1` 的历史微博整行刷新已由操作人决定（#213）；`topic_relevant=0` 的行继续延后。
