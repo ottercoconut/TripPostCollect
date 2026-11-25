@@ -627,8 +627,8 @@ def row_for_record(
                 for key in ("verified", "verified_type", "verified_type_ext", "verified_reason")
                 if key in verify
             }
-            if kept:
-                author["weibo_verify"] = kept
+            # 空对象同样写入。缺键才表示这次投影没有 sideUser 认证原值。
+            author["weibo_verify"] = kept
     return {
         "platform_key": platform_key,
         "platform_post_id": post_id_for_record(platform_key, record),

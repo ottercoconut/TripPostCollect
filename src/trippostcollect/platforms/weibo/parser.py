@@ -343,7 +343,8 @@ def parse_weibo_detail(
         "author_profile_url": _profile_url(user_id),
         "author_verified": author_verified,
         "author_verified_text": author_verified_text,
-        "author_json": {"weibo_verify": verify} if verify else {},
+        # 空对象也留下键。没有认证原值时，历史刷新靠这个键判断 sideUser 已经读到。
+        "author_json": {"weibo_verify": verify},
         "content_detail_status": CONTENT_DETAIL_STATUS,
         "content_detail_source": CONTENT_DETAIL_SOURCE,
         "content_visit_refs": dict(visit_refs or {}),

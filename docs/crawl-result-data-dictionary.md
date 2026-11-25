@@ -77,7 +77,7 @@ SQLite 字段或图片关系中，也不保留 URL-only 参考关系。
 | `posts_count` | integer/null | 作者作品或发帖总数 |
 | `liked_count` | integer/null | 平台展示的作者累计获赞等作者级指标 |
 | `answerCount`、`articlesCount`、`pinsCount`、`questionCount` | integer | 仅知乎：作者页原值，缺键不写；`posts_count` 为前两者之和 |
-| `weibo_verify` | object | 仅微博（#211）：详情页 `sideUser` 的认证原值 `verified`、`verified_type`、`verified_type_ext`、`verified_reason`，缺键不写；`author_verified` / `author_verified_text` 由它按 #213 判定（机构文字以“机构认证”开头，规则见 `platforms/weibo.md`） |
+| `weibo_verify` | object | 仅微博（#211）：详情页 `sideUser` 的认证原值 `verified`、`verified_type`、`verified_type_ext`、`verified_reason`，缺的子键不写；详情投影成功后本对象总会写入，没有任何认证原值时为 `{}`（#213，整行刷新据此判断已读到 `sideUser`）；`author_verified` / `author_verified_text` 由它按 #213 判定（机构文字以“机构认证”开头，规则见 `platforms/weibo.md`） |
 
 顶层作者列用于 SQL 查询，`author_json` 保留观察状态、来源和平台补充信息。两者冲突时必须核对
 导入记录，不能任意选择其一。

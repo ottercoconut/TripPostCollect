@@ -282,7 +282,7 @@ state 旁的 worker 进程组兜底强杀。stdout / stderr 先做头像审计�
 
 ## 知乎历史回填
 
-`scripts/repair_post_details.py` 的两种知乎专用模式只接受 `--platform zhihu`，并且 `--dedupe-images` 与 `--refresh-all` 不能同时使用。默认选择（两个开关都不加）仍只处理非 `detail_observed` 的行。写默认库前都要 `--confirm-default-db-repair`。非 dry-run 会先用与详情修复相同的 SQLite 一致性备份，写到 `data/backups/post_detail_repair/<run_id>/`。
+`scripts/repair_post_details.py` 的 `--dedupe-images` 只接受 `--platform zhihu`；`--refresh-all` 接受知乎与微博（#213），两个开关不能同时使用。默认选择（两个开关都不加）仍只处理非 `detail_observed` 的行。写默认库前都要 `--confirm-default-db-repair`。非 dry-run 会先用与详情修复相同的 SQLite 一致性备份，写到 `data/backups/post_detail_repair/<run_id>/`。
 
 建议顺序：先对两种模式分别 dry-run，确认计划后再去重，去重完成后再刷新。
 
@@ -310,7 +310,7 @@ python scripts/repair_post_details.py \
 
 ### 全量刷新
 
-`--refresh-all` 选择知乎行里 `json_type(raw_sample_json, '$.author_page_badges') IS NULL` 的记录，不论 `content_detail_status`。`post_detail_repair_waivers` 里的行仍以 `post_detail_repair_waived` 拒绝。`--post-id`、`--max-items`、批次、计划、执行状态、备份和中断处理与默认修复相同。
+知乎 `--refresh-all` 选择 `json_type(raw_sample_json, '$.author_page_badges') IS NULL` 的记录，不论 `content_detail_status`；微博选择 `topic_relevant=1` 且 `raw_sample_json.author_json.weibo_verify` 缺键的记录，恢复条件见 `docs/platforms/weibo.md`。`post_detail_repair_waivers` 里的行仍以 `post_detail_repair_waived` 拒绝。`--post-id`、`--max-items`、批次、计划、执行状态、备份和中断处理与默认修复相同。
 
 作者页读到之后，记录总会把 `author_page_badges` 写入 `raw_sample_json`；没有标识时是 `{}`。因此重跑会跳过已经刷新的行。作者页没读到的记录不合格，不会入库，原行保持不变。
 
