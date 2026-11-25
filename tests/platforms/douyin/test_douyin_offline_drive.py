@@ -46,6 +46,9 @@ def test_dependency_direction():
         "trippostcollect.runtime.image_retry": {
             "ImageDownloadFetchError", "classified_http_image_error", "is_runtime_blocking_image_error",
         },
+        "trippostcollect.runtime.image_concurrency": {
+            "ImageDownloadBatchError", "download_images_bounded",
+        },
         "trippostcollect.runtime.page_capture": {
             "CaptureRule", "PageCaptureChannel", "CapturedResponse",
         },
