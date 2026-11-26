@@ -106,11 +106,14 @@ def bare_admit_answer_id(url: str) -> str:
 
 
 def admit_landing_shape(url: str) -> str:
-    """落点的形状，只用于日志：主机加路径，数字段换成 ``{id}``，不含查询和片段。"""
+    """落点的形状，只用于日志：主机加路径，四位及以上的数字段换成 ``{id}``，不含查询和片段。
+
+    内容 ID 都很长；三位以内的数字（如错误页路径）原样保留，否则与 ID 无法区分。
+    """
 
     parsed = urlsplit(str(url or "").split("#", 1)[0])
     host = (parsed.hostname or "").lower()[:80]
-    path = re.sub(r"[0-9]+", "{id}", parsed.path or "")[:120]
+    path = re.sub(r"[0-9]{4,}", "{id}", parsed.path or "")[:120]
     return f"{parsed.scheme}://{host}{path}"
 
 

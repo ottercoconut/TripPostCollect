@@ -47,10 +47,12 @@ def test_classify_admit_landing_names_the_four_outcomes() -> None:
 
 
 def test_admit_landing_shape_masks_ids_and_drops_query() -> None:
-    assert admit_landing_shape("https://www.zhihu.com/question/123/answer/456?utm=1#x") == (
+    assert admit_landing_shape("https://www.zhihu.com/question/12345678/answer/456789012?utm=1#x") == (
         "https://www.zhihu.com/question/{id}/answer/{id}"
     )
-    assert admit_landing_shape("https://www.zhihu.com/answer/456") == "https://www.zhihu.com/answer/{id}"
+    assert admit_landing_shape("https://www.zhihu.com/answer/4567") == "https://www.zhihu.com/answer/{id}"
+    # #209：三位以内的数字原样保留，错误页之类的落点不再与内容 ID 混在一起。
+    assert admit_landing_shape("https://www.zhihu.com/404") == "https://www.zhihu.com/404"
     assert admit_landing_shape("") == "://"
 
 
@@ -148,7 +150,7 @@ async def test_bad_landing_is_unavailable_and_does_not_open_another_url(
 async def test_unexpected_landing_is_a_plain_failure_not_unavailable(monkeypatch, tmp_path, caplog):
     caplog.set_level("WARNING", logger="TripPostCollect")
     crawler, _page, root = prepare(monkeypatch, tmp_path)
-    _arm(crawler, {"url": "https://www.zhihu.com/question/10", "status": 200})
+    _arm(crawler, {"url": "https://www.zhihu.com/question/10000001", "status": 200})
 
     result = await crawler.get_note_detail(ANSWER, asyncio.Semaphore(1))
 
@@ -160,7 +162,7 @@ async def test_unexpected_landing_is_a_plain_failure_not_unavailable(monkeypatch
     assert opened.requested_urls == [ANSWER]
     assert crawler._repair_outcomes == []
     assert "shape=https://www.zhihu.com/question/{id} status=200" in caplog.text
-    assert "/question/10" not in caplog.text
+    assert "/question/10000001" not in caplog.text
     actions = [line["action"] for line in ledger_lines(root) if line["kind"] == "action"]
     assert actions.count("navigate") == 1
     assert "click_author" not in actions
