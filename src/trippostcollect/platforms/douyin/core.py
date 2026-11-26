@@ -21,8 +21,11 @@
 # TripPostCollect：T06 按职责迁入；来源 fork 5a68eb5098fcd17308c7fe0b9d53916ae839b303，原许可保留。
 
 import asyncio
+import json
 import logging
+import os
 from hashlib import sha256
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 from playwright.async_api import BrowserContext, BrowserType, Page, Playwright
@@ -35,7 +38,12 @@ from trippostcollect.platforms.douyin import parser
 from trippostcollect.platforms.douyin.client import (
     DOUYIN_CONTENT_IMAGE_RULE, DouYinClient, inspect_empty_first_page,
 )
-from trippostcollect.platforms.douyin.detail_page import DouyinDetailFetchError, DouyinDetailPages
+from trippostcollect.platforms.douyin.detail_page import (
+    DouyinDetailFetchError,
+    DouyinDetailPages,
+    DouyinFillObservation,
+    note_page_url,
+)
 from trippostcollect.platforms.douyin.models import (
     DataFetchError, PlatformRuntimeError, SearchResponseError, DouyinImageDownloadError,
 )
@@ -89,7 +97,11 @@ class DouYinCrawler:
             await self.context_page.goto(self.index_url, wait_until="domcontentloaded")
 
             try:
-                self.capture = DouyinPageCapture.open(self.browser_context)
+                fill_missing = os.environ.get("TRIPPOSTCOLLECT_DOUYIN_FILL_MISSING") == "1"
+                self.capture = DouyinPageCapture.open(
+                    self.browser_context,
+                    mode="repair" if fill_missing else "discovery",
+                )
                 self.capture.install(self.context_page)
                 self.detail_pages = DouyinDetailPages(self.capture, self.context_page)
                 login_code = await self.capture.confirm_login(self.context_page)
@@ -98,7 +110,10 @@ class DouYinCrawler:
                     return
                 self.dy_client = await self.create_douyin_client(httpx_proxy_format)
                 self.crawler_type = self.settings.CRAWLER_TYPE
-                if self.settings.CRAWLER_TYPE != "search":
+                if fill_missing:
+                    if self.settings.CRAWLER_TYPE != "detail":
+                        raise RuntimeError("douyin fill-missing requires detail mode")
+                elif self.settings.CRAWLER_TYPE != "search":
                     raise RuntimeError(
                         f"unsupported douyin crawler type: {self.settings.CRAWLER_TYPE}"
                     )
@@ -111,10 +126,82 @@ class DouYinCrawler:
                 self._ensure_search_session()
                 await self.context_page.goto(search_url, wait_until="domcontentloaded")
                 await self.ports.run_required_human_behavior(self.context_page, "douyin")
-                await self.search()
+                if fill_missing:
+                    self.source_keyword = keyword
+                    await self.fill_missing()
+                else:
+                    await self.search()
                 logger.info("[DouYinCrawler.start] Douyin Crawler finished ...")
             finally:
                 await self._close_capture()
+
+    def _load_fill_targets(self) -> list[dict[str, Any]]:
+        raw_path = os.environ.get("TRIPPOSTCOLLECT_DOUYIN_FILL_TARGETS", "").strip()
+        if not raw_path:
+            raise RuntimeError("douyin_fill_targets_missing")
+        try:
+            payload = json.loads(Path(raw_path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError("douyin_fill_targets_invalid") from exc
+        if not isinstance(payload, list):
+            raise RuntimeError("douyin_fill_targets_invalid")
+        targets: list[dict[str, Any]] = []
+        for item in payload:
+            if not isinstance(item, dict):
+                raise RuntimeError("douyin_fill_targets_invalid")
+            post_id = str(item.get("platform_post_id") or "").strip()
+            detail_target = str(item.get("detail_target") or "").strip()
+            missing = item.get("missing_fields")
+            if (
+                not post_id
+                or detail_target != note_page_url(post_id)
+                or not isinstance(missing, list)
+                or not missing
+            ):
+                raise RuntimeError("douyin_fill_targets_invalid")
+            targets.append(
+                {
+                    "platform_post_id": post_id,
+                    "missing_fields": [str(field) for field in missing],
+                }
+            )
+        return targets
+
+    def _publish_fill_observations(self, observations: list[dict[str, Any]]) -> None:
+        writer = getattr(self.ports, "write_fill_observations", None)
+        if callable(writer):
+            writer(observations)
+
+    async def fill_missing(self) -> None:
+        """逐条打开作品页补缺。运行级阻断立刻停轮，不继续后面的目标。"""
+
+        pages = self.detail_pages
+        if pages is None:
+            raise RuntimeError("douyin_detail_pages_missing")
+        observations: list[dict[str, Any]] = []
+        try:
+            for target in self._load_fill_targets():
+                post_id = target["platform_post_id"]
+                need_author = any(
+                    field in {"author_profile_url", "author_verified"}
+                    for field in target["missing_fields"]
+                )
+                try:
+                    observed = await pages.open_note_for_fill(post_id, need_author=need_author)
+                except DouyinDetailFetchError as exc:
+                    if exc.runtime_blocking:
+                        raise PlatformRuntimeError(f"douyin {exc.code}", code=exc.code) from exc
+                    observations.append(
+                        DouyinFillObservation(
+                            platform_post_id=post_id,
+                            kind="candidate_failed",
+                            error_code=exc.code,
+                        ).as_dict()
+                    )
+                    continue
+                observations.append(observed.as_dict())
+        finally:
+            self._publish_fill_observations(observations)
 
     async def search(self) -> None:
         """#124：每轮从第 1 页（offset 0、空 search ID）连续翻到平台 has_more=false。

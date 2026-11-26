@@ -309,6 +309,11 @@ def douyin_dependencies(config):
             ),
         )
 
+    def _write_douyin_fill_observations(observations: list[dict]) -> None:
+        from trippostcollect.application.repair import write_douyin_fill_observations
+
+        write_douyin_fill_observations(observations)
+
     return {
         "settings": settings,
         "ports": DouyinCrawlerPorts(
@@ -327,6 +332,7 @@ def douyin_dependencies(config):
             content_sink=content_sink, image_stager=image_stager,
             fetch_image_bytes_with_retry=fetch_image_bytes_with_retry,
             launch_profile_context=launch_profile_context,
+            write_fill_observations=_write_douyin_fill_observations,
         ),
     }
 

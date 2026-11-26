@@ -51,9 +51,11 @@ from trippostcollect.runtime.process import (
 from trippostcollect.xhs.leases import DeferredTerminationSignals
 from trippostcollect.application.repair import (
     ADMIT_UNAVAILABLE_CODES,
+    FILL_MISSING_FIELDS,
     MISSING_WEIBO_AUTHOR_PLATFORM_ID,
     without_weibo_side_user_fields,
 )
+from trippostcollect.application.visit_gate import validate_content_visits
 from trippostcollect.application.repair_runtime import (
     _complete_no_op,
     _fatal_child_failure,
@@ -74,7 +76,7 @@ from trippostcollect.application.repair_runtime import (
 )
 
 
-PLATFORMS = ("weibo", "zhihu")
+PLATFORMS = ("douyin", "weibo", "zhihu")
 # 与通用 runner 相同：首个 SIGINT/SIGTERM/SIGHUP 锁存，独立会话里的 child 收不到终端信号。
 REPAIR_INTERRUPT_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 REPAIR_CHILD_POLL_SECONDS = 0.2
@@ -125,9 +127,10 @@ def run_repair_child(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Repair existing Weibo or Zhihu rows in bounded detail-mode "
-            "batches without touching discovery state. Zhihu also accepts "
-            "--dedupe-images, --refresh-all, and --admit-seen. Weibo accepts --refresh-all."
+            "Repair existing Douyin, Weibo, or Zhihu rows in bounded detail-mode "
+            "batches without touching discovery state. Douyin only accepts "
+            "--fill-missing. Zhihu also accepts --dedupe-images, --refresh-all, "
+            "and --admit-seen. Weibo accepts --refresh-all."
         )
     )
     parser.add_argument("--platform", required=True, choices=PLATFORMS)
@@ -171,6 +174,14 @@ def parse_args() -> argparse.Namespace:
         "--request-pause",
         action="store_true",
         help="Write a per-platform pause request and exit. The running repair stops after the current batch.",
+    )
+    parser.add_argument(
+        "--fill-missing",
+        action="store_true",
+        help=(
+            "Douyin only: fill author_profile_url, author_verified, or a missing "
+            "content_detail_status. Existing values are left unchanged."
+        ),
     )
     parser.add_argument(
         "--admit-seen",
@@ -350,6 +361,381 @@ def _selection_predicate(
             f" AND json_type({column}, '$.author_json.weibo_verify') IS NULL"
         )
     raise ValueError(f"refresh-all is not supported for {platform}")
+
+
+def _fill_missing_predicate(column: str = "raw_sample_json") -> str:
+    prefix = f"{column.split('.', 1)[0]}." if "." in column else ""
+    return f"""(
+        {prefix}author_profile_url IS NULL OR {prefix}author_profile_url = ''
+        OR {prefix}author_verified IS NULL
+        OR json_type({column}, '$.content_detail_status') IS NULL
+    )"""
+
+
+def _missing_fields_for_row(row: sqlite3.Row) -> list[str]:
+    fields: list[str] = []
+    profile = row["author_profile_url"]
+    if profile is None or profile == "":
+        fields.append("author_profile_url")
+    if row["author_verified"] is None:
+        fields.append("author_verified")
+    raw_text = str(row["raw_sample_json"] or "")
+    try:
+        parsed = json.loads(raw_text) if raw_text else {}
+    except json.JSONDecodeError:
+        parsed = None
+    if not isinstance(parsed, dict) or "content_detail_status" not in parsed:
+        fields.append("content_detail_status")
+    return fields
+
+
+def select_fill_missing_targets(
+    conn: sqlite3.Connection,
+    *,
+    post_ids: list[str],
+    max_items: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
+    """抖音 web_posts 里主页、认证或详情状态有空缺的行。豁免表仍拒绝。"""
+
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        f"""
+        SELECT id, platform_post_id, canonical_url, keyword, artifact_dir,
+               author_profile_url, author_verified, author_verified_text,
+               raw_sample_json
+        FROM web_posts
+        WHERE platform_key='douyin'
+          AND {_fill_missing_predicate()}
+        ORDER BY id
+        """
+    ).fetchall()
+    pending = len(rows)
+    requested = {str(value).strip() for value in post_ids if str(value).strip()}
+    waivers = load_post_detail_repair_waivers(conn, "douyin")
+    targets: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    for row in rows:
+        post_id = str(row["platform_post_id"] or "").strip()
+        if requested and post_id not in requested:
+            continue
+        missing = _missing_fields_for_row(row)
+        detail_target = f"https://www.douyin.com/note/{post_id}" if re.fullmatch(r"[0-9]+", post_id) else None
+        item = {
+            "web_post_id": int(row["id"]),
+            "platform_post_id": post_id,
+            "detail_target": detail_target,
+            "keyword": str(row["keyword"] or ""),
+            "artifact_dir": str(row["artifact_dir"] or ""),
+            "repair_fallback": {},
+            "missing_fields": missing,
+            "reason": "",
+        }
+        if post_id in waivers:
+            item["reason"] = "post_detail_repair_waived"
+            item["repair_waiver"] = waivers[post_id]
+            rejected.append(item)
+        elif not post_id:
+            item["reason"] = "missing_platform_post_id"
+            rejected.append(item)
+        elif not item["keyword"]:
+            item["reason"] = "missing_original_keyword"
+            rejected.append(item)
+        elif not missing:
+            continue
+        elif detail_target is None:
+            item["reason"] = "invalid_douyin_post_id"
+            rejected.append(item)
+        else:
+            targets.append(item)
+    if max_items > 0:
+        targets = targets[:max_items]
+    return targets, rejected, pending
+
+
+def _blank_column(value: Any) -> bool:
+    return value is None or value == ""
+
+
+def _fill_gate_record(observation: dict[str, Any]) -> dict[str, Any]:
+    refs = {
+        "ledger_id": str(observation.get("ledger_id") or ""),
+        "note_detail": str(observation.get("note_visit_id") or ""),
+        "images": [],
+    }
+    creator = str(observation.get("creator_visit_id") or "")
+    if creator:
+        refs["creator_profile"] = creator
+    return {
+        "aweme_id": str(observation.get("platform_post_id") or ""),
+        "author_platform_id": str(observation.get("author_uid") or ""),
+        "content_visit_refs": refs,
+        "image_assets": [],
+    }
+
+
+def fill_visit_ok(observation: dict[str, Any], ledger_paths: list[str]) -> bool:
+    if not observation.get("note_visit_id") or not observation.get("ledger_id"):
+        return False
+    if not ledger_paths:
+        return False
+    result = validate_content_visits(
+        [_fill_gate_record(observation)],
+        ledger_paths,
+        platform="douyin",
+        mode="repair",
+        manifests=[],
+    )
+    return bool(result.get("content_visit_ok"))
+
+
+def apply_fill_missing_row(
+    conn: sqlite3.Connection,
+    *,
+    web_post_id: int,
+    missing_fields: list[str],
+    observation: dict[str, Any],
+    run_id: str,
+    observed_at: str,
+    ledger_paths: list[str],
+) -> dict[str, Any]:
+    """在一个事务里重读目标行，只填仍为空的列。"""
+
+    if observation.get("kind") != "observed":
+        return {"applied": False, "visit_rejected": False}
+    if not fill_visit_ok(observation, ledger_paths):
+        return {"applied": False, "visit_rejected": True}
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = conn.execute(
+            """
+            SELECT id, author_profile_url, author_verified, author_verified_text,
+                   raw_sample_json
+            FROM web_posts
+            WHERE id=? AND platform_key='douyin'
+            """,
+            (web_post_id,),
+        ).fetchone()
+        if row is None:
+            conn.execute("ROLLBACK")
+            return {"applied": False, "visit_rejected": False, "missing_row": True}
+        try:
+            parsed = json.loads(str(row["raw_sample_json"] or "{}"))
+        except json.JSONDecodeError:
+            parsed = {}
+        raw = parsed if isinstance(parsed, dict) else {}
+        filled: list[str] = []
+        already: list[str] = []
+        unresolved = [
+            field
+            for field in observation.get("unresolved_fields") or []
+            if field in FILL_MISSING_FIELDS
+        ]
+        assignments: dict[str, Any] = {}
+        if "author_profile_url" in missing_fields:
+            incoming = str(observation.get("author_profile_url") or "")
+            if not _blank_column(row["author_profile_url"]):
+                already.append("author_profile_url")
+            elif incoming:
+                assignments["author_profile_url"] = incoming
+                filled.append("author_profile_url")
+        if "author_verified" in missing_fields:
+            if row["author_verified"] is not None:
+                already.append("author_verified")
+            elif "author_verified" not in observation or "author_verified" in unresolved:
+                if "author_verified" not in unresolved:
+                    unresolved.append("author_verified")
+            else:
+                assignments["author_verified"] = int(observation["author_verified"])
+                filled.append("author_verified")
+        incoming_text = observation.get("author_verified_text")
+        if isinstance(incoming_text, str) and incoming_text:
+            if _blank_column(row["author_verified_text"]):
+                assignments["author_verified_text"] = incoming_text
+                filled.append("author_verified_text")
+            else:
+                already.append("author_verified_text")
+        if "content_detail_status" in missing_fields:
+            if "content_detail_status" in raw:
+                already.append("content_detail_status")
+            elif observation.get("content_detail_observed") is True:
+                raw["content_detail_status"] = "detail_observed"
+                filled.append("content_detail_status")
+                if "content_detail_source" not in raw:
+                    raw["content_detail_source"] = "note_post_list"
+                    filled.append("content_detail_source")
+        refs = _fill_gate_record(observation)["content_visit_refs"]
+        raw["fill_missing"] = {
+            "run_id": run_id,
+            "observed_at": observed_at,
+            "filled_fields": filled,
+            "unresolved_fields": unresolved,
+            "already_filled_fields": already,
+            "content_visit_refs": refs,
+        }
+        assignments["raw_sample_json"] = json.dumps(raw, ensure_ascii=False, sort_keys=True)
+        columns = list(assignments)
+        sets = ", ".join(f"{column}=?" for column in columns)
+        conn.execute(
+            f"UPDATE web_posts SET {sets}, updated_at=datetime('now') WHERE id=?",
+            [assignments[column] for column in columns] + [web_post_id],
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return {
+        "applied": True,
+        "visit_rejected": False,
+        "filled_fields": filled,
+        "unresolved_fields": unresolved,
+        "already_filled_fields": already,
+    }
+
+
+def fill_outcome_from_write(write: dict[str, Any]) -> tuple[str, str]:
+    """有写入记 filled。一个字段都没写出、又有仍不可判定的，记 unresolved。
+
+    写前重读发现字段已被填上、本次没有空列可写时，reason 为 already_filled。
+    这不算失败；outcome 仍用 filled，汇总里的 filled_count 只数真正写入的字段。
+    """
+
+    if write.get("visit_rejected"):
+        return "candidate_failed", "content_visit_rejected"
+    filled = list(write.get("filled_fields") or [])
+    unresolved = list(write.get("unresolved_fields") or [])
+    already = list(write.get("already_filled_fields") or [])
+    if filled:
+        return "filled", ""
+    if already and not unresolved:
+        return "filled", "already_filled"
+    return "unresolved", ""
+
+
+def collect_fill_observations(summaries: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    found: dict[str, dict[str, Any]] = {}
+    for summary in summaries:
+        for record in summary.get("records") or []:
+            if not isinstance(record, dict):
+                continue
+            for item in record.get("fill_observations") or []:
+                if isinstance(item, dict) and item.get("platform_post_id"):
+                    found[str(item["platform_post_id"])] = item
+    return found
+
+
+def collect_fill_ledger_paths(summaries: list[dict[str, Any]]) -> list[str]:
+    paths: list[str] = []
+    for summary in summaries:
+        for record in summary.get("records") or []:
+            if not isinstance(record, dict):
+                continue
+            output = record.get("output") if isinstance(record.get("output"), dict) else {}
+            for path in output.get("content_visit_paths") or []:
+                text = str(path)
+                if text and text not in paths:
+                    paths.append(text)
+    return paths
+
+
+def fill_persistence_failure(results: list[dict[str, Any]]) -> str:
+    """全是 unresolved / unavailable、且没有候选或运行失败时，不报 no_progress。"""
+
+    outcomes = {str(item.get("outcome") or "") for item in results}
+    benign = outcomes & {"filled", "unresolved", "unavailable"}
+    if "candidate_failed" in outcomes and not benign:
+        return "post_detail_repair_no_progress"
+    return ""
+
+
+def build_fill_target_results(
+    *,
+    targets: list[dict[str, Any]],
+    rejected: list[dict[str, Any]],
+    observations: dict[str, dict[str, Any]],
+    writes: dict[str, dict[str, Any]],
+    executed: bool,
+    not_attempted_ids: set[str],
+    batch_runtime_failed_ids: set[str],
+    batch_runtime_reasons: dict[str, str],
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for item in rejected:
+        results.append(
+            {
+                "platform_post_id": str(item.get("platform_post_id") or ""),
+                "web_post_id": item.get("web_post_id"),
+                "outcome": "rejected",
+                "reason": str(item.get("reason") or ""),
+                "detail": "",
+                "missing_fields": list(item.get("missing_fields") or []),
+                "filled_fields": [],
+                "unresolved_fields": [],
+                "already_filled_fields": [],
+            }
+        )
+    for item in targets:
+        post_id = str(item.get("platform_post_id") or "")
+        base = {
+            "platform_post_id": post_id,
+            "web_post_id": item.get("web_post_id"),
+            "missing_fields": list(item.get("missing_fields") or []),
+            "filled_fields": [],
+            "unresolved_fields": [],
+            "already_filled_fields": [],
+            "detail": "",
+        }
+        if not executed:
+            results.append({**base, "outcome": "planned", "reason": ""})
+            continue
+        if post_id in not_attempted_ids:
+            results.append({**base, "outcome": "not_attempted", "reason": ""})
+            continue
+        if post_id in batch_runtime_failed_ids:
+            results.append(
+                {
+                    **base,
+                    "outcome": "batch_runtime_failed",
+                    "reason": batch_runtime_reasons.get(post_id) or "runtime_failed",
+                }
+            )
+            continue
+        observation = observations.get(post_id) or {}
+        kind = str(observation.get("kind") or "")
+        if kind == "unavailable":
+            results.append(
+                {
+                    **base,
+                    "outcome": "unavailable",
+                    "reason": str(observation.get("error_code") or ""),
+                    "detail": str(observation.get("landing_shape") or ""),
+                }
+            )
+            continue
+        if kind == "candidate_failed":
+            results.append(
+                {
+                    **base,
+                    "outcome": "candidate_failed",
+                    "reason": str(observation.get("error_code") or "candidate_failed"),
+                }
+            )
+            continue
+        write = writes.get(post_id) or {}
+        if write.get("visit_rejected") or kind != "observed":
+            results.append({**base, "outcome": "candidate_failed", "reason": "content_visit_rejected"})
+            continue
+        outcome, reason = fill_outcome_from_write(write)
+        results.append(
+            {
+                **base,
+                "outcome": outcome,
+                "reason": reason,
+                "filled_fields": list(write.get("filled_fields") or []),
+                "unresolved_fields": list(write.get("unresolved_fields") or []),
+                "already_filled_fields": list(write.get("already_filled_fields") or []),
+            }
+        )
+    return results
 
 
 def _repair_fallback_for_row(
@@ -674,6 +1060,7 @@ def build_child_command(
     headless: bool,
     keep_stored_images: bool = False,
     admit_seen: bool = False,
+    fill_missing: bool = False,
 ) -> list[str]:
     command = [
         sys.executable,
@@ -695,11 +1082,18 @@ def build_child_command(
         "--post-repair",
         "--repair-targets-file",
         str(targets_path),
-        "--download-images",
-        "--media-root",
-        str(LOCAL_MEDIA_ROOT.resolve()),
         "--no-checkpoint-write",
     ]
+    if fill_missing:
+        command.extend(["--fill-missing", "--no-import"])
+    else:
+        command.extend(
+            [
+                "--download-images",
+                "--media-root",
+                str(LOCAL_MEDIA_ROOT.resolve()),
+            ]
+        )
     if admit_seen:
         command.append("--admit-seen")
     if keep_stored_images:
@@ -822,13 +1216,19 @@ def pending_count(
     platform: str,
     *,
     refresh_all: bool = False,
+    fill_missing: bool = False,
 ) -> int:
+    predicate = (
+        _fill_missing_predicate()
+        if fill_missing
+        else _selection_predicate(refresh_all, platform=platform)
+    )
     row = conn.execute(
         f"""
         SELECT COUNT(*)
         FROM web_posts
         WHERE platform_key=?
-          AND {_selection_predicate(refresh_all, platform=platform)}
+          AND {predicate}
         """,
         (platform,),
     ).fetchone()
@@ -840,6 +1240,7 @@ def waived_pending_count(
     platform: str,
     *,
     refresh_all: bool = False,
+    fill_missing: bool = False,
 ) -> int:
     if not conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='post_detail_repair_waivers'"
@@ -851,7 +1252,11 @@ def waived_pending_count(
         FROM post_detail_repair_waivers AS w
         JOIN web_posts AS p ON p.id=w.web_post_id
         WHERE p.platform_key=?
-          AND {_selection_predicate(refresh_all, platform=platform, column="p.raw_sample_json")}
+          AND {(
+              _fill_missing_predicate("p.raw_sample_json")
+              if fill_missing
+              else _selection_predicate(refresh_all, platform=platform, column="p.raw_sample_json")
+          )}
         """,
         (platform,),
     ).fetchone()
@@ -1238,9 +1643,24 @@ def _dedupe_summary(
 
 
 def _validate_repair_modes(args: argparse.Namespace) -> None:
+    fill_missing = bool(getattr(args, "fill_missing", False))
     admit = bool(getattr(args, "admit_seen", False))
     job_ids = list(getattr(args, "admit_seen_job_ids", None) or [])
     exclude_file = str(getattr(args, "exclude_post_ids_file", "") or "")
+    if args.platform == "douyin" and not fill_missing:
+        raise SystemExit("--platform douyin requires --fill-missing")
+    if fill_missing and args.platform != "douyin":
+        raise SystemExit("--fill-missing requires --platform douyin")
+    if fill_missing and (
+        args.refresh_all
+        or args.dedupe_images
+        or admit
+        or args.keep_stored_images
+    ):
+        raise SystemExit(
+            "--fill-missing cannot be combined with --refresh-all, --dedupe-images, "
+            "--admit-seen, or --keep-stored-images"
+        )
     if admit and args.platform != "zhihu":
         raise SystemExit("--admit-seen requires --platform zhihu")
     if admit and not job_ids:
@@ -1462,6 +1882,17 @@ def main() -> int:
                 exclude_ids=exclude_ids,
             )
             initial_waived_pending = 0
+        elif args.fill_missing:
+            targets, rejected, initial_pending = select_fill_missing_targets(
+                conn,
+                post_ids=args.post_ids,
+                max_items=args.max_items,
+            )
+            initial_waived_pending = waived_pending_count(
+                conn,
+                args.platform,
+                fill_missing=True,
+            )
         else:
             targets, rejected, initial_pending = select_targets(
                 conn,
@@ -1501,6 +1932,9 @@ def main() -> int:
             }
             if args.admit_seen:
                 entry["admit"] = True
+            if args.fill_missing:
+                entry["missing_fields"] = list(item.get("missing_fields") or [])
+                entry["repair_fallback"] = {}
             child_targets.append(entry)
         targets_path = write_json(run_dir / "batches" / f"batch-{index:04d}-targets.json", child_targets)
         command = build_child_command(
@@ -1512,6 +1946,7 @@ def main() -> int:
             headless=args.headless,
             keep_stored_images=args.keep_stored_images,
             admit_seen=args.admit_seen,
+            fill_missing=args.fill_missing,
         )
         batch_plans.append(
             {
@@ -1542,13 +1977,19 @@ def main() -> int:
         "batch_count": len(batch_plans),
         "headed": not args.headless,
         "discovery_writes": False,
-        "local_image_storage_required": True,
+        "local_image_storage_required": not args.fill_missing,
         "media_root": str(LOCAL_MEDIA_ROOT.resolve()),
         "backup_path": str(backup_path),
         "manifest": str(manifest_path),
         "commands": str(commands_path),
         "selection": (
-            "admit_seen" if args.admit_seen else "refresh_all" if args.refresh_all else "pending_detail"
+            "fill_missing"
+            if args.fill_missing
+            else "admit_seen"
+            if args.admit_seen
+            else "refresh_all"
+            if args.refresh_all
+            else "pending_detail"
         ),
         "keep_stored_images": bool(args.keep_stored_images),
     }
@@ -1576,7 +2017,19 @@ def main() -> int:
         "images_downloaded": 0,
         "images_reused": 0,
     }
-    if args.admit_seen:
+    if args.fill_missing:
+        base_summary["selection"] = "fill_missing"
+        base_summary["target_results"] = build_fill_target_results(
+            targets=targets,
+            rejected=rejected,
+            observations={},
+            writes={},
+            executed=False,
+            not_attempted_ids=set(),
+            batch_runtime_failed_ids=set(),
+            batch_runtime_reasons={},
+        )
+    elif args.admit_seen:
         base_summary["selection"] = "admit_seen"
     elif args.refresh_all:
         base_summary["selection"] = "refresh_all"
@@ -1646,6 +2099,7 @@ def main() -> int:
         return 0
 
     backup: dict[str, Any] = {}
+    fill_results: list[dict[str, Any]] | None = None
     batch_results: list[dict[str, Any]] = []
     child_summaries: list[dict[str, Any]] = []
     candidate_failures: list[dict[str, Any]] = []
@@ -1829,101 +2283,72 @@ def main() -> int:
                 "command_executed",
                 evidence={"backup": backup, "batches": batch_results},
             )
-            successful = [
-                summary for summary in child_summaries if summary.get("import_completion_met")
-            ]
-            state.begin("artifacts_verified")
-            artifact_checks = [
-                verify_image_artifacts(
-                    summary,
-                    project_root=PROJECT_ROOT,
-                    expect_promotion=True,
-                )
-                for summary in successful
-            ]
-            artifacts_ok = bool(successful) and all(check["ok"] for check in artifact_checks)
-            if not successful:
+            if args.fill_missing:
+                state.begin("artifacts_verified")
                 state.complete(
                     "artifacts_verified",
-                    evidence={"skipped": True, "reason": "no_successful_child_imports"},
+                    evidence={"skipped": True, "reason": "fill_missing_no_images"},
                     skipped=True,
                 )
-            elif not artifacts_ok:
-                fatal_error = "post_detail_repair_image_artifacts_incomplete"
-                state.fail(
-                    "artifacts_verified",
-                    error=fatal_error,
-                    evidence={"checks": artifact_checks},
-                )
-            else:
-                state.complete("artifacts_verified", evidence={"checks": artifact_checks})
-
-            if not fatal_error:
                 state.begin("persistence_verified")
-                persistence_checks = [
-                    verify_image_persistence(
-                        summary,
-                        db_path,
-                        project_root=PROJECT_ROOT,
-                        media_root=LOCAL_MEDIA_ROOT,
-                    )
-                    for summary in successful
-                ]
-                target_ids = [item["platform_post_id"] for item in targets]
+                observations = collect_fill_observations(child_summaries)
+                ledger_paths = collect_fill_ledger_paths(child_summaries)
+                writes: dict[str, dict[str, Any]] = {}
+                observed_at = utc_iso()
                 with sqlite3.connect(db_path) as conn:
                     conn.row_factory = sqlite3.Row
-                    statuses = (
-                        repaired_rows(conn, args.platform, target_ids, refresh_all=True)
-                        if args.refresh_all
-                        else repaired_rows(conn, args.platform, target_ids)
-                    )
-                    remaining_pending = (
-                        pending_count(conn, args.platform, refresh_all=True)
-                        if args.refresh_all
-                        else pending_count(conn, args.platform)
-                    )
-                    remaining_waived_pending = (
-                        waived_pending_count(conn, args.platform, refresh_all=True)
-                        if args.refresh_all
-                        else waived_pending_count(conn, args.platform)
-                    )
-                recovered_ids = sorted(
-                    post_id for post_id, value in statuses.items() if value["recovered"]
+                    for item in targets:
+                        post_id = str(item["platform_post_id"])
+                        if post_id in not_attempted_ids or post_id in batch_runtime_failed_ids:
+                            continue
+                        observation = observations.get(post_id)
+                        if not observation or observation.get("kind") != "observed":
+                            continue
+                        writes[post_id] = apply_fill_missing_row(
+                            conn,
+                            web_post_id=int(item["web_post_id"]),
+                            missing_fields=list(item.get("missing_fields") or []),
+                            observation=observation,
+                            run_id=run_id,
+                            observed_at=observed_at,
+                            ledger_paths=ledger_paths,
+                        )
+                fill_results = build_fill_target_results(
+                    targets=targets,
+                    rejected=rejected,
+                    observations=observations,
+                    writes=writes,
+                    executed=True,
+                    not_attempted_ids=not_attempted_ids,
+                    batch_runtime_failed_ids=batch_runtime_failed_ids,
+                    batch_runtime_reasons=batch_runtime_reasons,
                 )
-                unavailable_ids = collect_unavailable_ids(child_summaries) if args.admit_seen else []
-                remaining_target_ids, _listed_unavailable = partition_unrecovered_ids(
-                    target_ids,
-                    recovered_ids,
-                    unavailable_ids,
-                    admit=args.admit_seen,
-                )
+                persistence_failure = fill_persistence_failure(fill_results)
+                benign_ids = [
+                    item["platform_post_id"]
+                    for item in fill_results
+                    if item["outcome"] in {"filled", "unresolved", "unavailable"}
+                ]
+                remaining_ids = [
+                    item["platform_post_id"]
+                    for item in fill_results
+                    if item["outcome"] not in {"filled", "unresolved", "unavailable", "rejected"}
+                ]
                 persistence_evidence = {
-                    "checks": persistence_checks,
-                    "target_statuses_sample": dict(list(statuses.items())[:20]),
-                    "target_count": len(target_ids),
-                    "recovered_count": len(recovered_ids),
-                    "recovered_ids_sample": recovered_ids[:20],
-                    "remaining_target_count": len(remaining_target_ids),
-                    "remaining_target_ids_sample": remaining_target_ids[:20],
-                    "remaining_pending_count": remaining_pending,
-                    "remaining_waived_pending_count": remaining_waived_pending,
-                    "remaining_unwaived_pending_count": max(
-                        0, remaining_pending - remaining_waived_pending
+                    "target_count": len(targets),
+                    "filled_count": sum(
+                        1
+                        for item in fill_results
+                        if item["outcome"] == "filled" and item.get("filled_fields")
                     ),
-                    "candidate_failure_count": len(candidate_failures),
-                    "candidate_failures_sample": candidate_failures[:20],
+                    "unresolved_count": sum(1 for item in fill_results if item["outcome"] == "unresolved"),
+                    "unavailable_count": sum(1 for item in fill_results if item["outcome"] == "unavailable"),
+                    "candidate_failure_count": sum(
+                        1 for item in fill_results if item["outcome"] == "candidate_failed"
+                    ),
+                    "benign_ids_sample": benign_ids[:20],
+                    "remaining_target_ids_sample": remaining_ids[:20],
                 }
-                persistence_failure = adjust_admit_persistence_failure(
-                    repair_persistence_failure_reason(
-                        recovered_ids=recovered_ids,
-                        successful_child_summaries=successful,
-                        persistence_checks=persistence_checks,
-                    ),
-                    admit=args.admit_seen,
-                    target_ids=target_ids,
-                    unavailable_ids=unavailable_ids,
-                    candidate_failures=candidate_failures,
-                )
                 if persistence_failure:
                     fatal_error = persistence_failure
                     state.fail(
@@ -1933,15 +2358,126 @@ def main() -> int:
                     )
                 else:
                     state.complete("persistence_verified", evidence=persistence_evidence)
-                    if pause_info is not None and remaining_target_ids:
+                    if pause_info is not None and remaining_ids:
                         outcome = "paused"
                     else:
-                        outcome = (
-                            "completed"
-                            if not remaining_target_ids
-                            else "completed_with_remaining"
-                        )
+                        outcome = "completed" if not remaining_ids else "completed_with_remaining"
                     state.finalize(outcome=outcome, evidence=persistence_evidence)
+                successful = []
+            else:
+                successful = [
+                    summary for summary in child_summaries if summary.get("import_completion_met")
+                ]
+                state.begin("artifacts_verified")
+                artifact_checks = [
+                    verify_image_artifacts(
+                        summary,
+                        project_root=PROJECT_ROOT,
+                        expect_promotion=True,
+                    )
+                    for summary in successful
+                ]
+                artifacts_ok = bool(successful) and all(check["ok"] for check in artifact_checks)
+                if not successful:
+                    state.complete(
+                        "artifacts_verified",
+                        evidence={"skipped": True, "reason": "no_successful_child_imports"},
+                        skipped=True,
+                    )
+                elif not artifacts_ok:
+                    fatal_error = "post_detail_repair_image_artifacts_incomplete"
+                    state.fail(
+                        "artifacts_verified",
+                        error=fatal_error,
+                        evidence={"checks": artifact_checks},
+                    )
+                else:
+                    state.complete("artifacts_verified", evidence={"checks": artifact_checks})
+
+                if not fatal_error:
+                    state.begin("persistence_verified")
+                    persistence_checks = [
+                        verify_image_persistence(
+                            summary,
+                            db_path,
+                            project_root=PROJECT_ROOT,
+                            media_root=LOCAL_MEDIA_ROOT,
+                        )
+                        for summary in successful
+                    ]
+                    target_ids = [item["platform_post_id"] for item in targets]
+                    with sqlite3.connect(db_path) as conn:
+                        conn.row_factory = sqlite3.Row
+                        statuses = (
+                            repaired_rows(conn, args.platform, target_ids, refresh_all=True)
+                            if args.refresh_all
+                            else repaired_rows(conn, args.platform, target_ids)
+                        )
+                        remaining_pending = (
+                            pending_count(conn, args.platform, refresh_all=True)
+                            if args.refresh_all
+                            else pending_count(conn, args.platform)
+                        )
+                        remaining_waived_pending = (
+                            waived_pending_count(conn, args.platform, refresh_all=True)
+                            if args.refresh_all
+                            else waived_pending_count(conn, args.platform)
+                        )
+                    recovered_ids = sorted(
+                        post_id for post_id, value in statuses.items() if value["recovered"]
+                    )
+                    unavailable_ids = collect_unavailable_ids(child_summaries) if args.admit_seen else []
+                    remaining_target_ids, _listed_unavailable = partition_unrecovered_ids(
+                        target_ids,
+                        recovered_ids,
+                        unavailable_ids,
+                        admit=args.admit_seen,
+                    )
+                    persistence_evidence = {
+                        "checks": persistence_checks,
+                        "target_statuses_sample": dict(list(statuses.items())[:20]),
+                        "target_count": len(target_ids),
+                        "recovered_count": len(recovered_ids),
+                        "recovered_ids_sample": recovered_ids[:20],
+                        "remaining_target_count": len(remaining_target_ids),
+                        "remaining_target_ids_sample": remaining_target_ids[:20],
+                        "remaining_pending_count": remaining_pending,
+                        "remaining_waived_pending_count": remaining_waived_pending,
+                        "remaining_unwaived_pending_count": max(
+                            0, remaining_pending - remaining_waived_pending
+                        ),
+                        "candidate_failure_count": len(candidate_failures),
+                        "candidate_failures_sample": candidate_failures[:20],
+                    }
+                    persistence_failure = adjust_admit_persistence_failure(
+                        repair_persistence_failure_reason(
+                            recovered_ids=recovered_ids,
+                            successful_child_summaries=successful,
+                            persistence_checks=persistence_checks,
+                        ),
+                        admit=args.admit_seen,
+                        target_ids=target_ids,
+                        unavailable_ids=unavailable_ids,
+                        candidate_failures=candidate_failures,
+                    )
+                    if persistence_failure:
+                        fatal_error = persistence_failure
+                        state.fail(
+                            "persistence_verified",
+                            error=fatal_error,
+                            evidence=persistence_evidence,
+                        )
+                    else:
+                        state.complete("persistence_verified", evidence=persistence_evidence)
+                        if pause_info is not None and remaining_target_ids:
+                            outcome = "paused"
+                        else:
+                            outcome = (
+                                "completed"
+                                if not remaining_target_ids
+                                else "completed_with_remaining"
+                            )
+                        state.finalize(outcome=outcome, evidence=persistence_evidence)
     except Exception as exc:
         if latch.signal_received is not None:
             interrupt_signum = int(latch.signal_received)
@@ -1991,19 +2527,23 @@ def main() -> int:
                 conn.row_factory = sqlite3.Row
                 final_target_ids = [item["platform_post_id"] for item in targets]
                 final_statuses = (
-                    repaired_rows(conn, args.platform, final_target_ids, refresh_all=True)
+                    {}
+                    if args.fill_missing
+                    else repaired_rows(conn, args.platform, final_target_ids, refresh_all=True)
                     if args.refresh_all
                     else repaired_rows(conn, args.platform, final_target_ids)
                 )
-                final_pending = (
-                    pending_count(conn, args.platform, refresh_all=True)
-                    if args.refresh_all
-                    else pending_count(conn, args.platform)
+                final_pending = pending_count(
+                    conn,
+                    args.platform,
+                    refresh_all=args.refresh_all,
+                    fill_missing=args.fill_missing,
                 )
-                final_waived_pending = (
-                    waived_pending_count(conn, args.platform, refresh_all=True)
-                    if args.refresh_all
-                    else waived_pending_count(conn, args.platform)
+                final_waived_pending = waived_pending_count(
+                    conn,
+                    args.platform,
+                    refresh_all=args.refresh_all,
+                    fill_missing=args.fill_missing,
                 )
             recovered_ids = sorted(
                 post_id for post_id, value in final_statuses.items() if value["recovered"]
@@ -2057,7 +2597,49 @@ def main() -> int:
                 ),
                 "finished_at": utc_iso(),
             }
-            if args.admit_seen:
+            if args.fill_missing:
+                if fill_results is None:
+                    fill_results = build_fill_target_results(
+                        targets=targets,
+                        rejected=rejected,
+                        observations=collect_fill_observations(child_summaries),
+                        writes={},
+                        executed=not args.dry_run,
+                        not_attempted_ids=not_attempted_ids,
+                        batch_runtime_failed_ids=batch_runtime_failed_ids,
+                        batch_runtime_reasons=batch_runtime_reasons,
+                    )
+                listed_unavailable = [
+                    item["platform_post_id"]
+                    for item in fill_results
+                    if item["outcome"] == "unavailable"
+                ]
+                unavailable_path = write_json(run_dir / "unavailable_ids.json", listed_unavailable)
+                summary["target_results"] = fill_results
+                summary["filled_count"] = sum(
+                    1 for item in fill_results if item["outcome"] == "filled" and item.get("filled_fields")
+                )
+                summary["unresolved_count"] = sum(1 for item in fill_results if item["outcome"] == "unresolved")
+                summary["unavailable_count"] = len(listed_unavailable)
+                summary["unavailable_ids_sample"] = listed_unavailable[:20]
+                summary["unavailable_ids_path"] = str(unavailable_path)
+                summary["candidate_failure_count"] = sum(
+                    1 for item in fill_results if item["outcome"] == "candidate_failed"
+                )
+                summary["all_selected_targets_recovered"] = all(
+                    item["outcome"] in {"filled", "unresolved", "unavailable"}
+                    for item in fill_results
+                    if item["outcome"] != "rejected"
+                )
+                summary["recovered_count"] = sum(
+                    1 for item in fill_results if item["outcome"] in {"filled", "unresolved", "unavailable"}
+                )
+                summary["remaining_target_count"] = sum(
+                    1
+                    for item in fill_results
+                    if item["outcome"] not in {"filled", "unresolved", "unavailable", "rejected"}
+                )
+            elif args.admit_seen:
                 unavailable_path = write_json(run_dir / "unavailable_ids.json", listed_unavailable)
                 summary["unavailable_count"] = len(listed_unavailable)
                 summary["unavailable_ids_sample"] = listed_unavailable[:20]

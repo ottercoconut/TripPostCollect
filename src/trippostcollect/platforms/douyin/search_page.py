@@ -67,7 +67,17 @@ DOUYIN_SEARCH_RULE = CaptureRule(
     body="json",
     decode=decode_douyin_json_body,
 )
-DOUYIN_CAPTURE_RULES = (DOUYIN_SEARCH_RULE, DOUYIN_USER_PROFILE_RULE)
+# #223 补缺：作品页自己发出的作者作品列表。discovery 不把这条响应记成访问。
+DOUYIN_AWEME_POST_RULE = CaptureRule(
+    name="douyin.aweme_post",
+    stage="note_detail",
+    method="GET",
+    host="www.douyin.com",
+    path="/aweme/v1/web/aweme/post/",
+    resource_types=API_RESOURCE_TYPES,
+    body="json",
+)
+DOUYIN_CAPTURE_RULES = (DOUYIN_SEARCH_RULE, DOUYIN_USER_PROFILE_RULE, DOUYIN_AWEME_POST_RULE)
 SEARCH_STREAM_ENDPOINT = "GET www.douyin.com /aweme/v1/web/general/search/stream/"
 SEARCH_SINGLE_ENDPOINT = "GET www.douyin.com /aweme/v1/web/general/search/single/"
 BROWSER_SEARCH_RESPONSE_MISSING = "browser_search_response_missing"

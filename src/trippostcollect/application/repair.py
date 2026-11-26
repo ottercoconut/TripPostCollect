@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 
 from trippostcollect.artifacts.image_staging import MAX_IMAGE_BYTES, ImageStagingError, inspect_image_bytes
 from trippostcollect.core import paths as core_paths
+from trippostcollect.records.sanitization import sanitize_author_avatar_data
 
 # 与 platforms/zhihu/models.py 的同名集合保持一致。应用层不导入知乎包，避免未选中知乎时加载它。
 ADMIT_UNAVAILABLE_CODES = frozenset({
@@ -23,6 +24,13 @@ ADMIT_UNAVAILABLE_CODES = frozenset({
     "admit_not_found",
     "admit_id_mismatch",
 })
+# #223：作品页拿不到目标，或最终地址离开了 /note/{id}。不计失败。
+FILL_UNAVAILABLE_CODES = frozenset({
+    "fill_target_not_in_post_list",
+    "fill_target_redirected",
+})
+FILL_MISSING_FIELDS = ("author_profile_url", "author_verified", "content_detail_status")
+_FILL_OBSERVATION_KINDS = frozenset({"observed", "unavailable", "candidate_failed"})
 
 
 # #211：这些作者字段必须来自本次 sideUser，修复回退不得从旧行带回。
@@ -347,7 +355,7 @@ def load_post_repair_targets(
     db_path: str | Path | None = None,
     admit: bool = False,
 ) -> list[dict[str, Any]]:
-    if platform_key not in {"weibo", "zhihu"}:
+    if platform_key not in {"weibo", "zhihu", "douyin"}:
         raise SystemExit(f"unsupported post repair platform: {platform_key}")
     if admit and platform_key != "zhihu":
         raise SystemExit("--admit-seen requires zhihu repair targets")
@@ -378,12 +386,28 @@ def load_post_repair_targets(
         if admit and not flagged:
             raise SystemExit(f"post repair target {index} requires admit: true")
 
-        if platform_key == "weibo":
+        if platform_key == "douyin":
+            valid = bool(
+                detail_target == f"https://www.douyin.com/note/{post_id}"
+                and re.fullmatch(r"[0-9]+", post_id)
+            )
+            missing_fields = value.get("missing_fields")
+            if (
+                not isinstance(missing_fields, list)
+                or not missing_fields
+                or any(item not in FILL_MISSING_FIELDS for item in missing_fields)
+            ):
+                raise SystemExit(
+                    f"post repair target {index} requires missing_fields for douyin fill-missing"
+                )
+        elif platform_key == "weibo":
             valid = bool(
                 re.fullmatch(r"https://weibo\.com/[0-9A-Za-z]+/" + re.escape(post_id), detail_target)
                 and re.fullmatch(r"[0-9]+", post_id)
             )
+            missing_fields = None
         else:
+            missing_fields = None
             parsed = urlparse(detail_target.split("#", 1)[0].split("?", 1)[0])
             answer = bool(
                 parsed.hostname in {"zhihu.com", "www.zhihu.com"}
@@ -409,25 +433,26 @@ def load_post_repair_targets(
                 f"post repair target does not match {platform_key} ID {post_id}: {detail_target!r}"
             )
         seen_ids.add(post_id)
-        payload_fallback = {} if admit else value.get("repair_fallback")
+        payload_fallback = {} if admit or platform_key == "douyin" else value.get("repair_fallback")
         raw_targets.append(
             (
                 post_id,
                 detail_target,
                 keyword,
                 payload_fallback if isinstance(payload_fallback, dict) else {},
+                list(missing_fields or []),
             )
         )
     fallbacks = (
         {}
-        if admit
+        if admit or platform_key == "douyin"
         else load_post_repair_fallbacks(
             db_path,
             platform_key,
-            {post_id for post_id, _, _, _ in raw_targets},
+            {post_id for post_id, _, _, _, _ in raw_targets},
         )
     )
-    for post_id, detail_target, keyword, payload_fallback in raw_targets:
+    for post_id, detail_target, keyword, payload_fallback, missing_fields in raw_targets:
         value = {
             "platform_post_id": post_id,
             "detail_target": detail_target,
@@ -435,7 +460,9 @@ def load_post_repair_targets(
         }
         if admit:
             value["admit"] = True
-        merged_fallback = {**payload_fallback, **fallbacks.get(post_id, {})}
+        if missing_fields:
+            value["missing_fields"] = missing_fields
+        merged_fallback = {} if platform_key == "douyin" else {**payload_fallback, **fallbacks.get(post_id, {})}
         if merged_fallback:
             value["repair_fallback"] = merged_fallback
         targets.append(value)
@@ -443,6 +470,104 @@ def load_post_repair_targets(
         raise SystemExit("post repair target file contains no targets")
     return targets
 
+
+def _public_fill_observation(item: Any) -> dict[str, Any] | None:
+    """丢掉正文、查询串和头像。主页只留不带查询串的规范地址。"""
+
+    if not isinstance(item, dict):
+        return None
+    post_id = str(item.get("platform_post_id") or "").strip()
+    kind = str(item.get("kind") or "")
+    if not post_id or "://" in post_id or kind not in _FILL_OBSERVATION_KINDS:
+        return None
+    profile = str(item.get("author_profile_url") or "")
+    if "?" in profile or not re.fullmatch(r"https://www\.douyin\.com/user/[A-Za-z0-9_.-]+", profile):
+        profile = ""
+    landing = str(item.get("landing_shape") or "")
+    if "://" in landing or "?" in landing:
+        landing = ""
+    public: dict[str, Any] = {
+        "platform_post_id": post_id,
+        "kind": kind,
+        "error_code": str(item.get("error_code") or ""),
+        "landing_shape": landing,
+        "note_visit_id": str(item.get("note_visit_id") or ""),
+        "creator_visit_id": str(item.get("creator_visit_id") or ""),
+        "ledger_id": str(item.get("ledger_id") or ""),
+        "author_profile_url": profile,
+        "author_uid": str(item.get("author_uid") or ""),
+        "content_detail_observed": item.get("content_detail_observed") is True,
+        "unresolved_fields": [
+            str(field)
+            for field in item.get("unresolved_fields") or []
+            if str(field) in FILL_MISSING_FIELDS
+        ],
+    }
+    verified = item.get("author_verified")
+    if isinstance(verified, int) and not isinstance(verified, bool):
+        public["author_verified"] = verified
+    text = item.get("author_verified_text")
+    if isinstance(text, str) and text.strip():
+        public["author_verified_text"] = text
+    sanitized = sanitize_author_avatar_data(public)
+    return sanitized if isinstance(sanitized, dict) else public
+
+
+def _write_sanitized_json(path_value: str, payload: Any) -> None:
+    path = Path(path_value)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = sanitize_author_avatar_data(payload)
+    text = json.dumps(body, ensure_ascii=False, sort_keys=True)
+    part = path.with_name(f".{path.name}.{secrets.token_hex(4)}.part")
+    part.write_text(text + "\n", encoding="utf-8")
+    os.replace(part, path)
+
+
+def write_douyin_fill_observations(observations: list[dict[str, Any]]) -> None:
+    """写补缺观察，并给不可得和候选失败各留一条修复结果。"""
+
+    cleaned: list[dict[str, Any]] = []
+    outcomes: list[dict[str, Any]] = []
+    for item in observations:
+        public = _public_fill_observation(item)
+        if public is None:
+            continue
+        cleaned.append(public)
+        if public["kind"] in {"unavailable", "candidate_failed"} and public["error_code"]:
+            outcomes.append(
+                {
+                    "platform_post_id": public["platform_post_id"],
+                    "error_code": public["error_code"],
+                    "evidence_source": "douyin_fill",
+                    "attempts": 1,
+                    "retryable": False,
+                }
+            )
+    observations_path = os.environ.get("TRIPPOSTCOLLECT_DOUYIN_FILL_OBSERVATIONS", "").strip()
+    if observations_path:
+        _write_sanitized_json(observations_path, {"observations": cleaned})
+    outcomes_path = os.environ.get("TRIPPOSTCOLLECT_DOUYIN_REPAIR_OUTCOMES_PATH", "").strip()
+    if outcomes_path:
+        _write_sanitized_json(outcomes_path, {"outcomes": outcomes})
+
+
+def load_douyin_fill_observations(path_value: str | Path | None) -> list[dict[str, Any]]:
+    if not path_value:
+        return []
+    path = Path(path_value).expanduser()
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return []
+    raw_items = value.get("observations") if isinstance(value, dict) else None
+    if not isinstance(raw_items, list):
+        return []
+    cleaned = []
+    for item in raw_items:
+        public = _public_fill_observation(item)
+        if public is not None:
+            cleaned.append(public)
+    return cleaned
 
 
 def load_xhs_repair_report(path_value: str | Path | None) -> dict[str, Any]:
@@ -633,6 +758,17 @@ def weibo_posted_repair_outcomes(
     return _posted_repair_outcomes(records, "weibo")
 
 
+def douyin_posted_repair_outcomes(
+    records: list[dict[str, Any]],
+    platform: str,
+) -> list[dict[str, Any]] | None:
+    """只读取抖音补缺子进程写回的不可得和候选失败。"""
+
+    if platform != "douyin":
+        return None
+    return _posted_repair_outcomes(records, "douyin")
+
+
 def zhihu_posted_repair_outcomes(
     records: list[dict[str, Any]],
     platform: str,
@@ -739,7 +875,7 @@ def post_repair_pagination_evidence(
         }
         if outcome.get("evidence"):
             failure["evidence"] = outcome["evidence"]
-        if not materialization_failure and error_code in ADMIT_UNAVAILABLE_CODES:
+        if not materialization_failure and error_code in ADMIT_UNAVAILABLE_CODES | FILL_UNAVAILABLE_CODES:
             unavailable_ids.append(post_id)
             continue
         failures.append(failure)
