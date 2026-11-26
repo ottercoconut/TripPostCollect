@@ -22,7 +22,6 @@ ADMIT_UNAVAILABLE_CODES = frozenset({
     "admit_redirect_article",
     "admit_not_found",
     "admit_id_mismatch",
-    "admit_redirect_unexpected",
 })
 
 

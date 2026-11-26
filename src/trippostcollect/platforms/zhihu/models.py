@@ -28,7 +28,9 @@ ANSWER_NAME = "answer"
 ARTICLE_NAME = "article"
 VIDEO_NAME = "zvideo"
 
-# #209：按回答 ID 直开后的落点。这些码只表示目标不可得，不重试、不改开其他地址。
+# #209：按回答 ID 直开后的落点。都不重试、不改开其他地址。
+# 只有平台明确给出的落点（首页、文章页、404、换成别的回答）记为不可得；
+# 无法识别的落点按普通失败处理，不推断成已删除。
 ADMIT_REDIRECT_HOME = "admit_redirect_home"
 ADMIT_REDIRECT_ARTICLE = "admit_redirect_article"
 ADMIT_NOT_FOUND = "admit_not_found"
@@ -39,8 +41,8 @@ ADMIT_UNAVAILABLE_CODES = frozenset({
     ADMIT_REDIRECT_ARTICLE,
     ADMIT_NOT_FOUND,
     ADMIT_ID_MISMATCH,
-    ADMIT_REDIRECT_UNEXPECTED,
 })
+ADMIT_NO_RETRY_CODES = ADMIT_UNAVAILABLE_CODES | {ADMIT_REDIRECT_UNEXPECTED}
 
 
 class ZhihuContent(BaseModel):

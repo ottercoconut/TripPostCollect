@@ -226,7 +226,7 @@ class ZhihuDetailPages:
             try:
                 return await self._open_once(content, direct_url=direct_url)
             except ZhihuDetailFetchError as exc:
-                if exc.runtime_blocking or exc.code in constant.ADMIT_UNAVAILABLE_CODES:
+                if exc.runtime_blocking or exc.code in constant.ADMIT_NO_RETRY_CODES:
                     raise
                 last_code = exc.code
                 logger.warning(
@@ -271,10 +271,7 @@ class ZhihuDetailPages:
             if _page_closed(detail_page) or _page_closed(self.search_page):
                 raise self._runtime(content, BROWSER_TARGET_CLOSED)
             if parsed is None or not visit_id:
-                failure = code or DETAIL_ENTITY_MISSING
-                if bare_id and failure == DETAIL_ENTITY_MISSING:
-                    failure = constant.ADMIT_NOT_FOUND
-                raise self._candidate(content, failure)
+                raise self._candidate(content, code or DETAIL_ENTITY_MISSING)
             if bare_id:
                 if str(parsed.content_id or "") != bare_id:
                     raise self._candidate(content, constant.ADMIT_ID_MISMATCH)

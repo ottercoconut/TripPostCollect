@@ -137,6 +137,25 @@ async def test_bad_landing_is_unavailable_and_does_not_open_another_url(
 
 
 @pytest.mark.asyncio
+async def test_unexpected_landing_is_a_plain_failure_not_unavailable(monkeypatch, tmp_path):
+    crawler, _page, root = prepare(monkeypatch, tmp_path)
+    _arm(crawler, {"url": "https://www.zhihu.com/question/10", "status": 200})
+
+    result = await crawler.get_note_detail(ANSWER, asyncio.Semaphore(1))
+
+    opened = _opened(crawler)
+    assert result is not None
+    assert result.content_detail_status == "request_failed"
+    assert not result.content_text
+    assert ADMIT_REDIRECT_UNEXPECTED not in ADMIT_UNAVAILABLE_CODES
+    assert opened.requested_urls == [ANSWER]
+    assert crawler._repair_outcomes == []
+    actions = [line["action"] for line in ledger_lines(root) if line["kind"] == "action"]
+    assert actions.count("navigate") == 1
+    assert "click_author" not in actions
+
+
+@pytest.mark.asyncio
 async def test_canonical_repair_url_keeps_entity_question_id(monkeypatch, tmp_path):
     crawler, _page, _root = prepare(monkeypatch, tmp_path)
     canonical = "https://www.zhihu.com/question/10/answer/101"
