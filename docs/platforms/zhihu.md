@@ -154,7 +154,7 @@ ID、累计摘要中的有效 ID 与持久已处理候选在详情和图片请�
 `--zhihu-detail-urls-file <JSON数组文件> --no-import` 诊断模式。它不写正式 checkpoint 或数据库，
 也不能作为正式轮次完成证据；不要绕过根执行器直接运行 worker 入口。
 
-历史库回填走 `scripts/repair_post_details.py`，知乎另有两种专用模式（二者互斥；默认模式见下文）。建议先分别 dry-run，再去重，去重完成后再刷新。写默认库前加 `--confirm-default-db-repair`。非 dry-run 会先做 SQLite 一致性备份。
+历史库回填走 `scripts/repair_post_details.py`，知乎另有三种专用模式（两两互斥；默认模式见下文）。建议先分别 dry-run，再去重，去重完成后再刷新。写默认库前加 `--confirm-default-db-repair`。非 dry-run 会先做 SQLite 一致性备份。
 
 离线图片去重（`--dedupe-images`）不访问平台。每条知乎帖子的 `image_role='content'` 行按与解析器相同的规则合并：同一 `v2-<32位十六进制>` 只留一张，优先级 `_r` > 无后缀 > `_1440w` > `_720w` > `_b`。解析不出 v2 哈希的 URL 原样保留。被淘汰的图片行删除，保留行的 `image_index` 从该帖原来的起始值重新连续编号，`post_images_count` 重算。`raw_sample_json` 不改，与 #184 迁移一样保留原始证据。被淘汰行的本地文件只在没有任何其他 `web_post_images` 行仍引用同一 `local_path` 时，移动到 `data/backups/post_detail_repair/<run_id>/media/<原相对路径>`，不删除。改写在一个事务里。`--dry-run` 只输出计划。重复执行变更数为 0。
 
@@ -198,7 +198,37 @@ python scripts/repair_post_details.py \
   --confirm-default-db-repair
 ```
 
-默认模式（不加上述两个开关）仍只处理非 `detail_observed` 的既有行。总控清单把既有内容 ID 与 answer/article HTTPS URL
+按已见 ID 准入（`--admit-seen`，#209）把指定知乎任务 seen 表中尚未入库的回答作为新行补进库。目标取自
+`--admit-seen-job <job id>`（可重复）对应的 `crawl_discovery_seen_candidates`，只取纯数字 ID，排除已入库、
+`crawl_discovery_candidate_exclusions` 中的 ID 和 `--exclude-post-ids-file`（JSON 字符串数组）中的 ID。每条的
+`keyword` 取该 ID 最早 `first_seen_at` 那条候选所属任务的 `params_json.keyword`，取不到时以
+`admit_keyword_missing` 拒绝，不猜。目标没有旧行，不带任何回落字段。
+
+每条按 `https://www.zhihu.com/answer/{id}` 以 `navigate` 打开，最终地址必须是同一回答的
+`/question/{qid}/answer/{id}`，问题 ID 只取最终地址；随后照常读 `js-initialData`、停留、真实点击作者页，正文图
+走已登记的 CDN 直连。纯文字回答也入库（#191），按 `topic_relevant` 与其他记录一样区分是否研究可用。
+落到首页（`admit_redirect_home`）、文章页（`admit_redirect_article`）、404（`admit_not_found`）或换成别的回答
+（`admit_id_mismatch`）时，该 ID 记为不可得：不重试，不改开 `zhuanlan` 或其他地址，不计失败，列入运行目录
+`unavailable_ids.json`，摘要给出 `unavailable_count`。落点无法识别（`admit_redirect_unexpected`）或页面状态读不到
+目标回答时按普通候选失败处理。导入只插入新行，同 ID 已存在时跳过（`already_present_rows`），不覆盖。准入不写
+seen、排除表、checkpoint 或 discovery 事件；摘要 `selection` 为 `admit_seen`。不能与 `--refresh-all`、
+`--dedupe-images`、`--keep-stored-images` 同用。
+
+```bash
+source .venv/bin/activate
+python scripts/repair_post_details.py \
+  --platform zhihu \
+  --admit-seen \
+  --admit-seen-job <job id> \
+  --keyword 青岛旅游 \
+  --batch-size 20 \
+  --dry-run
+```
+
+正式运行把 `--dry-run` 换成 `--confirm-default-db-repair`。续跑时可把上一轮 `unavailable_ids.json` 传给
+`--exclude-post-ids-file`，已入库的 ID 会自动排除。
+
+默认模式（不加上述三个开关）仍只处理非 `detail_observed` 的既有行。总控清单把既有内容 ID 与 answer/article HTTPS URL
 严格绑定，detail 结果仍必须取得 `answer_detail` 或 `article_detail` 和作者页粉丝证据；有正文图时还要完整正文图，
 纯文字回答/文章可以没有正文图（#191），再走媒体晋升与 SQLite 事务。
 详情解析必须在页面结构化 JSON 中按请求 ID 精确选取非空 answer/article entity，不能取实体字典中的
