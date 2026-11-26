@@ -210,7 +210,7 @@ python scripts/repair_post_details.py \
 落到首页（`admit_redirect_home`）、文章页（`admit_redirect_article`）、404（`admit_not_found`）或换成别的回答
 （`admit_id_mismatch`）时，该 ID 记为不可得：不重试，不改开 `zhuanlan` 或其他地址，不计失败，列入运行目录
 `unavailable_ids.json`，摘要给出 `unavailable_count`。落点无法识别（`admit_redirect_unexpected`）或页面状态读不到
-目标回答时按普通候选失败处理。导入只插入新行，同 ID 已存在时跳过（`already_present_rows`），不覆盖。准入不写
+目标回答时按普通候选失败处理；前者在 worker 日志里记下落点形状（主机加路径，数字段换成 `{id}`，不含查询）和状态码，供取证。导入只插入新行，同 ID 已存在时跳过（`already_present_rows`），不覆盖。准入不写
 seen、排除表、checkpoint 或 discovery 事件；摘要 `selection` 为 `admit_seen`。不能与 `--refresh-all`、
 `--dedupe-images`、`--keep-stored-images` 同用。
 
