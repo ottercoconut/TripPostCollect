@@ -2,7 +2,7 @@
 
 #136：微博标准模式持久 context 与 B站行为会话改由 ``runtime.browser_runtime.launch_profile_context`` 启动，
 与 warmup 同一套参数，kwargs 中不再出现 ``user_agent`` 键；对应断言随之改为“无 user_agent 键”。
-#139：共享函数不再传 ``viewport``，改为 ``no_viewport=True`` 加 ``--window-size=1450,900``；warmup 与微博标准模式
+#139：共享函数不再传 ``viewport``，改为 ``no_viewport=True`` 加 ``--window-size=1470,956``；warmup 与微博标准模式
 #142：知乎持久模式也改为共享原生窗口；只剩微博、知乎非持久路径用 ``PROFILE_VIEWPORT``。
 全部离线：假 page/context/playwright，不访问网络、不启动浏览器。
 """
@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BROWSER_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
 WARMUP_VIEWPORT = {"width": 1280, "height": 900}
 # #139：warmup 与共享持久 context 改按原生窗口启动，``WARMUP_VIEWPORT`` 只剩两个平台的非持久路径对照。
-NATIVE_WINDOW_ARG = "--window-size=1450,900"
+NATIVE_WINDOW_ARG = "--window-size=1470,956"
 
 
 class FakePage:

@@ -9,7 +9,7 @@
 - 正式入口：`crawl_runner.py` 经 `mediacrawler_crawl.py` 启动根包 worker（`trippostcollect.platforms.entry`）
   执行微博搜索，实现位于 `src/trippostcollect/platforms/weibo/`。
 - 浏览器沿用标准模式持久 profile `data/runtime/platform_sessions/weibo/profile`，与 warmup 共用
-  `launch_profile_context`：不强制 User-Agent，原生窗口 1450×900，`zh-CN` 与 `Asia/Shanghai`，沙箱开启，
+  `launch_profile_context`：不强制 User-Agent，原生窗口 1470×956，`zh-CN` 与 `Asia/Shanghai`，沙箱开启，
   不做 viewport 设备模拟（#136、#139）。持久 profile 是登录态的唯一权威来源，worker 不向浏览器注入 Cookie。
 - 登录确认只读页面状态：worker 打开 `https://weibo.com/`，经已登记的状态脚本读取 `window.$CONFIG.uid`。
   值存在且为真（非 0 数字或非空字符串）才算已登录，访问账本记为 `page_state`。读不到、为假，或页面落到

@@ -20,12 +20,12 @@ def test_external_launch_accepts_native_window_args_and_environment(monkeypatch,
 
     BrowserLauncher(project_browser_args=lambda: ["--lang=zh-CN"]).launch_browser(
         "/fake/chrome", 9222, headless=False, user_data_dir=str(tmp_path / "profile"),
-        extra_args=["--accept-lang=zh-CN", "--window-size=1450,900"], env=env,
+        extra_args=["--accept-lang=zh-CN", "--window-size=1470,956"], env=env,
     )
 
     arguments = popen.call_args.args[0]
     assert "--accept-lang=zh-CN" in arguments
-    assert "--window-size=1450,900" in arguments
+    assert "--window-size=1470,956" in arguments
     assert "--start-maximized" not in arguments
     assert popen.call_args.kwargs["env"] is env
 
@@ -48,7 +48,7 @@ async def test_only_zhihu_manager_adds_language_window_and_timezone(monkeypatch,
     await manager._launch_browser("/fake/chrome", headless=False)
 
     kwargs = manager.launcher.launch_browser.call_args.kwargs
-    assert kwargs["extra_args"] == ["--accept-lang=zh-CN", "--window-size=1450,900"]
+    assert kwargs["extra_args"] == ["--accept-lang=zh-CN", "--window-size=1470,956"]
     assert kwargs["env"]["TZ"] == "Asia/Shanghai"
 
 

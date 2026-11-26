@@ -12,7 +12,9 @@ if TYPE_CHECKING:
     from playwright.async_api import BrowserContext, BrowserType
 
 
-XHS_NATIVE_WINDOW_SIZE = (1450, 900)
+# 窗口按操作人 Mac 的屏幕尺寸 1470×956 请求，macOS 把它收进可用区域（实测 1470×863）。
+# 此前 1450×900 让窗口右侧空出 20px。
+XHS_NATIVE_WINDOW_SIZE = (1470, 956)
 # #139：通用平台持久 context 与小红书共用同一原生窗口尺寸，不再用 viewport 做设备模拟。
 NATIVE_WINDOW_SIZE = XHS_NATIVE_WINDOW_SIZE
 XHS_WINDOW_SIZE_ENV = "TRIPPOSTCOLLECT_XHS_WINDOW_SIZE"
@@ -54,7 +56,7 @@ async def launch_profile_context(
 
     沙箱开启、locale/timezone 与运行时环境三处一致；不传 UA，浏览器自报真实 UA。
     #139：不设 viewport、不做设备模拟，按原生窗口 ``native_window_size``（缺省 ``NATIVE_WINDOW_SIZE``，
-    与小红书相同的 1450×900）启动；macOS 会把窗口收进屏幕可用区域，``screen``、DPR、``outer*``、
+    与小红书相同的 1470×956）启动；macOS 会把窗口收进屏幕可用区域，``screen``、DPR、``outer*``、
     ``inner*`` 均由浏览器按真实值给出。
     ``runtime_args`` / ``env`` 缺省时调用时取 ``browser_runtime_args()`` / ``browser_launch_environment()``；
     warmup 与 B站行为会话经各自已有的注入点求值后传入，取值与缺省相同。

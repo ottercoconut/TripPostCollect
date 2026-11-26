@@ -268,8 +268,8 @@ Chrome 由共享 CDP 启动器（`runtime/browser_launcher.py`）自启：
   `--enable-automation`，`navigator.webdriver` 保持原生 `false`，主线程与 Worker 读到的都是原生值。
 - 行为证据的 `runtime_fingerprint` 另记 `window_size`（`outer_width`、`outer_height`）与 `screen`（`width`、
   `height`、`avail_width`、`avail_height`），`viewport.device_pixel_ratio` 照旧；这些只记录、不参与门禁。用途是
-  核对固定窗口 1450×900 能否放进屏幕可用区域：操作人 Mac 的可用区域是 1470×863，高度差 37px，Chrome
-  是否把窗口收进可用区域待实测。
+  核对固定窗口能否放进屏幕可用区域：操作人 Mac 屏幕 1470×956、可用区域 1470×863。窗口原为 1450×900，实测被收成
+  1450×863，右侧空出 20px；2026-11-26 起改为按屏幕尺寸 1470×956 请求，由 macOS 收进可用区域。
 
 正式轮（含 repair）的鼠标动作都经 `runtime/human_pointer.py`（#84）。算法移植自 CloakBrowser 包装层
 `cloakbrowser/human/`（MIT，提交 `fbf005bc`，许可见 `resources/licenses/CloakBrowser-LICENSE`），参数按操作人
