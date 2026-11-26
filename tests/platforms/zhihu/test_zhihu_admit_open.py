@@ -7,7 +7,7 @@ import asyncio
 import pytest
 
 from trippostcollect.application.visit_gate import validate_content_visits
-from trippostcollect.platforms.zhihu.detail_page import classify_admit_landing
+from trippostcollect.platforms.zhihu.detail_page import admit_landing_shape, classify_admit_landing
 from trippostcollect.platforms.zhihu.search_capture import ZhihuPageCapture
 from trippostcollect.application.repair import ADMIT_UNAVAILABLE_CODES as REPAIR_UNAVAILABLE_CODES
 from trippostcollect.platforms.zhihu.models import (
@@ -44,6 +44,14 @@ def test_classify_admit_landing_names_the_four_outcomes() -> None:
     assert classify_admit_landing("https://www.zhihu.com/question/10", "101", 200)[1] == (
         ADMIT_REDIRECT_UNEXPECTED
     )
+
+
+def test_admit_landing_shape_masks_ids_and_drops_query() -> None:
+    assert admit_landing_shape("https://www.zhihu.com/question/123/answer/456?utm=1#x") == (
+        "https://www.zhihu.com/question/{id}/answer/{id}"
+    )
+    assert admit_landing_shape("https://www.zhihu.com/answer/456") == "https://www.zhihu.com/answer/{id}"
+    assert admit_landing_shape("") == "://"
 
 
 def _arm(crawler, rule: dict) -> None:
@@ -137,7 +145,8 @@ async def test_bad_landing_is_unavailable_and_does_not_open_another_url(
 
 
 @pytest.mark.asyncio
-async def test_unexpected_landing_is_a_plain_failure_not_unavailable(monkeypatch, tmp_path):
+async def test_unexpected_landing_is_a_plain_failure_not_unavailable(monkeypatch, tmp_path, caplog):
+    caplog.set_level("WARNING", logger="TripPostCollect")
     crawler, _page, root = prepare(monkeypatch, tmp_path)
     _arm(crawler, {"url": "https://www.zhihu.com/question/10", "status": 200})
 
@@ -150,6 +159,8 @@ async def test_unexpected_landing_is_a_plain_failure_not_unavailable(monkeypatch
     assert ADMIT_REDIRECT_UNEXPECTED not in ADMIT_UNAVAILABLE_CODES
     assert opened.requested_urls == [ANSWER]
     assert crawler._repair_outcomes == []
+    assert "shape=https://www.zhihu.com/question/{id} status=200" in caplog.text
+    assert "/question/10" not in caplog.text
     actions = [line["action"] for line in ledger_lines(root) if line["kind"] == "action"]
     assert actions.count("navigate") == 1
     assert "click_author" not in actions

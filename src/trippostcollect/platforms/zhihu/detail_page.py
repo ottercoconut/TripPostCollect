@@ -105,6 +105,15 @@ def bare_admit_answer_id(url: str) -> str:
     return match.group(1) if match else ""
 
 
+def admit_landing_shape(url: str) -> str:
+    """落点的形状，只用于日志：主机加路径，数字段换成 ``{id}``，不含查询和片段。"""
+
+    parsed = urlsplit(str(url or "").split("#", 1)[0])
+    host = (parsed.hostname or "").lower()[:80]
+    path = re.sub(r"[0-9]+", "{id}", parsed.path or "")[:120]
+    return f"{parsed.scheme}://{host}{path}"
+
+
 def classify_admit_landing(
     final_url: str,
     target_id: str,
@@ -261,6 +270,13 @@ class ZhihuDetailPages:
                     self._last_direct_status,
                 )
                 if landing_code:
+                    if landing_code == constant.ADMIT_REDIRECT_UNEXPECTED:
+                        # #209：记下落点形状供取证，不记原始地址或 ID。
+                        logger.warning(
+                            "[ZhihuDetailPages] admit landing unexpected shape=%s status=%s",
+                            admit_landing_shape(str(getattr(detail_page, "url", "") or "")),
+                            self._last_direct_status,
+                        )
                     raise self._candidate(content, landing_code)
                 content.question_id = question_from_url
             state_text, visit_id = await self._read_initial_data(detail_page, content, trigger_id)
