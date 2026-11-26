@@ -377,7 +377,7 @@ async def test_target_in_first_and_later_slots(tmp_path, monkeypatch):
     rejected = dict(plain.as_dict())
     rejected["image_assets"] = [{"source_index": 0}]
     gate = validate_content_visits(
-        [repair._fill_gate_record(rejected) | {"image_assets": rejected["image_assets"]}],
+        [repair.douyin_fill_gate_record(rejected) | {"image_assets": rejected["image_assets"]}],
         [str(second_ledger)],
         platform="douyin",
         mode="repair",
@@ -888,3 +888,62 @@ def test_fill_observations_are_really_written_and_read_back(tmp_path, monkeypatc
     assert by_id[AWEME]["author_profile_url"] == f"https://www.douyin.com/user/{SEC}"
     outcomes = json.loads(outcomes_path.read_text(encoding="utf-8"))["outcomes"]
     assert [item["error_code"] for item in outcomes] == ["fill_target_not_in_post_list"]
+
+
+@pytest.mark.asyncio
+async def test_fill_round_passes_the_summary_visit_gate(tmp_path, monkeypatch):
+    """#223 第二次正式运行：补缺没有正式入库记录，门禁无人引用账本，节奏判失败。
+
+    这里走真实账本与 collection 的门禁入口，不替换门禁或行为校验。
+    """
+
+    from trippostcollect.application.collection import summary_content_visits
+    from trippostcollect.application.repair import load_douyin_fill_observations, write_douyin_fill_observations
+
+    pages, ledger = _harness(tmp_path, monkeypatch)
+    page = pages.search_page
+    page.post_payload = _post_list(AWEME, target_index=0)
+    page.links = [{"href": f"/user/{SEC}", "visible": True}]
+    page.profiles = [(
+        200,
+        _profile(SEC, text="青岛创作者"),
+        "https://www.douyin.com/aweme/v1/web/user/profile/other/",
+    )]
+    observed = await pages.open_note_for_fill(AWEME, need_author=True)
+    assert observed.kind == "observed" and observed.creator_visit_id
+
+    observations_path = tmp_path / "logs" / "douyin_fill_observations.json"
+    monkeypatch.setenv("TRIPPOSTCOLLECT_DOUYIN_FILL_OBSERVATIONS", str(observations_path))
+    monkeypatch.setenv("TRIPPOSTCOLLECT_DOUYIN_REPAIR_OUTCOMES_PATH", str(tmp_path / "logs" / "outcomes.json"))
+    write_douyin_fill_observations([
+        observed.as_dict(),
+        {"platform_post_id": "7123456789012345679", "kind": "unavailable", "error_code": FILL_TARGET_NOT_IN_POST_LIST},
+    ])
+    summary = {
+        "records": [{
+            "platform": "douyin",
+            "output": {"content_visit_paths": [str(ledger)]},
+            "fill_observations": load_douyin_fill_observations(observations_path),
+        }]
+    }
+
+    gate = summary_content_visits(
+        summary, [], ["douyin"], repair_mode=True, stop_event=None, douyin_fill_missing=True
+    )["douyin"]
+    assert gate["content_visit_ok"] is True
+    assert gate["checked_records"] == 1
+    assert gate["request_pacing_ok"] is True
+    assert gate["continuity_ok"] is True
+
+    # 修复前的口径：没有正式记录时没有被检查的账本，节奏必然判失败。
+    before = summary_content_visits(summary, [], ["douyin"], repair_mode=True, stop_event=None)["douyin"]
+    assert before["checked_records"] == 0 and before["request_pacing_ok"] is False
+
+    # 全部不可得时没有写库对象，门禁仍失败关闭，不放宽。
+    summary["records"][0]["fill_observations"] = [
+        item for item in summary["records"][0]["fill_observations"] if item["kind"] != "observed"
+    ]
+    empty = summary_content_visits(
+        summary, [], ["douyin"], repair_mode=True, stop_event=None, douyin_fill_missing=True
+    )["douyin"]
+    assert empty["checked_records"] == 0 and empty["request_pacing_ok"] is False

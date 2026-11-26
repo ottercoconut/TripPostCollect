@@ -28,6 +28,7 @@ from trippostcollect.application.repair import load_post_repair_targets as load_
 from trippostcollect.application.repair import reject_keep_stored_images_scope as reject_keep_stored_images_scope
 from trippostcollect.application.repair import load_stored_content_images as load_stored_content_images
 from trippostcollect.application.repair import write_stored_content_images as write_stored_content_images
+from trippostcollect.application.repair import douyin_fill_gate_items as douyin_fill_gate_items
 from trippostcollect.application.repair import douyin_posted_repair_outcomes as douyin_posted_repair_outcomes
 from trippostcollect.application.repair import load_douyin_fill_observations as load_douyin_fill_observations
 from trippostcollect.application.repair import load_weibo_repair_outcomes as load_weibo_repair_outcomes
@@ -1075,6 +1076,38 @@ def _run_platform_without_policy(
     return result
 
 
+def summary_content_visits(
+    summary: dict[str, Any],
+    content_valid_records: list[dict[str, Any]],
+    platforms: list[str],
+    *,
+    repair_mode: bool,
+    stop_event: dict[str, Any] | None,
+    douyin_fill_missing: bool = False,
+) -> dict[str, dict[str, Any]]:
+    """对纳入门禁的平台执行访问门禁。
+
+    抖音补缺不产生正式入库记录，门禁记录取自会写库的补缺观察；否则账本无人引用，
+    节奏检查会因没有被检查的账本而判失败。
+    """
+
+    results: dict[str, dict[str, Any]] = {}
+    for platform_key in platforms:
+        if platform_key not in VISIT_GATED_PLATFORMS:
+            continue
+        items = content_valid_records
+        if douyin_fill_missing and repair_mode and platform_key == "douyin":
+            items = douyin_fill_gate_items(list(summary.get("records") or []))
+        results[platform_key] = validate_summary_content_visits(
+            summary,
+            items,
+            platform_key,
+            repair_mode=repair_mode,
+            stop_event=stop_event,
+        )
+    return results
+
+
 def effective_attempt_exit_code(record: dict[str, Any]) -> int:
     run = record.get("run") or {}
     raw_returncode = run.get("returncode")
@@ -1621,17 +1654,14 @@ def _run_main(
             repair_mode=True,
             progress_callback=progress_callback,
         )
-    content_visits = {
-        platform_key: validate_summary_content_visits(
-            summary,
-            content_valid_records,
-            platform_key,
-            repair_mode=repair_mode,
-            stop_event=pagination_evidence.get("stop_event"),
-        )
-        for platform_key in platforms
-        if platform_key in VISIT_GATED_PLATFORMS
-    }
+    content_visits = summary_content_visits(
+        summary,
+        content_valid_records,
+        platforms,
+        repair_mode=repair_mode,
+        stop_event=pagination_evidence.get("stop_event"),
+        douyin_fill_missing=bool(getattr(args, "fill_missing", False)),
+    )
     if content_visits:
         behavior_validation = collect_behavior_validation(
             records,
