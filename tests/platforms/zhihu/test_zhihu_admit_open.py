@@ -38,6 +38,9 @@ def test_classify_admit_landing_names_the_four_outcomes() -> None:
     assert classify_admit_landing("https://zhuanlan.zhihu.com/p/101", "101", 200)[1] == ADMIT_REDIRECT_ARTICLE
     assert classify_admit_landing("https://www.zhihu.com/p/101", "101", 200)[1] == ADMIT_REDIRECT_ARTICLE
     assert classify_admit_landing(FINAL, "101", 404)[1] == ADMIT_NOT_FOUND
+    # #209 实测：跳到知乎自己的 404 页，状态码 200。
+    assert classify_admit_landing("https://www.zhihu.com/404", "101", 200)[1] == ADMIT_NOT_FOUND
+    assert classify_admit_landing("https://www.zhihu.com/4040", "101", 200)[1] == ADMIT_REDIRECT_UNEXPECTED
     assert classify_admit_landing(
         "https://www.zhihu.com/question/10/answer/999", "101", 200,
     )[1] == ADMIT_ID_MISMATCH
@@ -125,6 +128,7 @@ async def test_bare_answer_redirect_uses_final_question_id_and_existing_visits(m
         ({"url": "https://www.zhihu.com/", "status": 200}, ADMIT_REDIRECT_HOME),
         ({"url": "https://zhuanlan.zhihu.com/p/101", "status": 200}, ADMIT_REDIRECT_ARTICLE),
         ({"url": "https://www.zhihu.com/404", "status": 404}, ADMIT_NOT_FOUND),
+        ({"url": "https://www.zhihu.com/404", "status": 200}, ADMIT_NOT_FOUND),
         ({"url": "https://www.zhihu.com/question/10/answer/999", "status": 200}, ADMIT_ID_MISMATCH),
     ],
 )
