@@ -324,6 +324,8 @@ class ZhihuPorts:
     current_timestamp: Callable[[], int]
     content_sink_factory: Callable[[], ContentSink]
     image_stager_factory: Callable[[], ImageStager]
+    # #209：仅 admit 子进程在环境变量给出路径时写出；缺省不写。
+    write_repair_outcomes: Callable[[list[dict]], None] | None = None
 
 
 @dataclass(frozen=True)

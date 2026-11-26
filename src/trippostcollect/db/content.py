@@ -143,12 +143,14 @@ def import_valid_records(
     media_root: str | Path = LOCAL_MEDIA_ROOT,
     require_local_images: bool = False,
     progress_callback: Callable[[], object] | None = None,
+    skip_existing: bool = False,
 ) -> dict[str, Any]:
     _runtime_progress(progress_callback)
     db_path = ensure_parent(db_path)
     captured_at = str(summary.get("captured_at") or datetime.now(timezone.utc).isoformat(timespec="seconds"))
     keyword = str(summary.get("keyword") or "")
     processed = inserted = updated = 0
+    already_present = 0
     relevant_inserted = relevant_updated = 0
     irrelevant_inserted = irrelevant_updated = 0
     conn = connect_db(db_path, busy_timeout_ms=FORMAL_SQLITE_BUSY_TIMEOUT_MS)
@@ -168,6 +170,9 @@ def import_valid_records(
                 keyword=keyword,
                 materialized_images=item.get("materialized_images"),
             )
+            if skip_existing and find_existing_post(conn, row):
+                already_present += 1
+                continue
             _, was_inserted = upsert_web_post(
                 conn,
                 row,
@@ -209,4 +214,5 @@ def import_valid_records(
         "skipped": 0,
         "skipped_video": 0,
         "parse_errors": 0,
+        **({"already_present_rows": already_present} if skip_existing else {}),
     }

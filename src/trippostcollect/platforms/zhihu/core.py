@@ -36,7 +36,7 @@ from .models import (
     ZhihuImageDownloadError, ZhihuDetailFetchError,
 )
 from .client import ZHIHU_CONTENT_IMAGE_RULE, ZhiHuClient
-from .detail_page import ZhihuDetailPages
+from .detail_page import ZhihuDetailPages, bare_admit_answer_id
 from .parser import ZhihuExtractor, judge_zhihu_url, merge_search_content_detail
 from .search_capture import ZhihuPageCapture
 from . import parser as zhihu_store
@@ -70,6 +70,7 @@ class ZhihuCrawler:
         self._opened_search_keyword: str | None = None
         # 每次详情都新建 ZhihuDetailPages，作者停留记忆放在 crawler 上，一轮共用，不落盘。
         self._visited_author_keys: set[tuple[str, str]] = set()
+        self._repair_outcomes: list[dict[str, Any]] = []
 
 
     async def _activate_latest_zhihu_page(self) -> None:
@@ -477,6 +478,24 @@ class ZhihuCrawler:
         self._page_capture = None
         await capture.aclose()
 
+    def _remember_repair_outcome(self, post_id: str, exc: ZhihuDetailFetchError) -> None:
+        """记下 admit 不可得。不写 seen、排除表或 checkpoint。"""
+
+        identity = str(post_id or "").strip()
+        if not identity or "://" in identity or exc.code not in constant.ADMIT_UNAVAILABLE_CODES:
+            return
+        item = {
+            "platform_post_id": identity,
+            "error_code": str(exc.code),
+            "evidence_source": "zhihu_admit",
+            "attempts": max(1, int(exc.attempts)),
+            "retryable": False,
+        }
+        self._repair_outcomes.append(item)
+        writer = getattr(self.ports, "write_repair_outcomes", None)
+        if callable(writer):
+            writer(list(self._repair_outcomes))
+
     async def get_note_detail(
         self, full_note_url: str, semaphore: asyncio.Semaphore
     ) -> Optional[ZhihuContent]:
@@ -494,12 +513,18 @@ class ZhihuCrawler:
                 f"[ZhihuCrawler.get_specified_notes] Begin get specified note {full_note_url}"
             )
             note_type: str = judge_zhihu_url(full_note_url)
+            bare_id = bare_admit_answer_id(full_note_url)
             if note_type == constant.VIDEO_NAME:
                 logger.info(
                     "[ZhihuCrawler.get_note_detail] Skip zvideo URL; video is not a detail target"
                 )
                 return None
-            if note_type == constant.ANSWER_NAME:
+            if bare_id:
+                # 问题 ID 等最终地址，不从 /answer/{id} 的路径段猜测。
+                note_type = constant.ANSWER_NAME
+                content_id = bare_id
+                question_id = ""
+            elif note_type == constant.ANSWER_NAME:
                 content_id = full_note_url.split("/")[-1]
                 question_id = full_note_url.split("/")[-3]
             elif note_type == constant.ARTICLE_NAME:
@@ -520,6 +545,9 @@ class ZhihuCrawler:
             try:
                 result = await self._detail_pages().open_direct(placeholder, full_note_url)
             except ZhihuDetailFetchError as exc:
+                if exc.code in constant.ADMIT_UNAVAILABLE_CODES:
+                    self._remember_repair_outcome(content_id, exc)
+                    return None
                 if exc.runtime_blocking:
                     raise PlatformRuntimeError(str(exc), code=exc.code) from exc
                 status = (

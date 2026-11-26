@@ -182,7 +182,7 @@ shasum -a 256 data/backups/trippostcollect-before-<run_id>.sqlite
 ## 通用平台历史详情修复
 
 `scripts/repair_post_details.py` 默认只处理微博或知乎中已经存在、但
-`raw_sample_json.content_detail_status != detail_observed` 的记录。知乎另有离线图片去重和全量刷新两种模式，见下文「知乎历史回填」。它不是新内容发现入口：每个 child
+`raw_sample_json.content_detail_status != detail_observed` 的记录。知乎另有离线图片去重、全量刷新和按已见 ID 准入三种模式，见下文「知乎历史回填」。它不是新内容发现入口：每个 child
 只接收冻结清单中的平台 ID 和详情入口，强制 `--no-checkpoint-write`，成功子集仍经过正文、作者粉丝、
 图片 staging/manifest、行为策略、长期媒体晋升和 SQLite 事务门禁。修复时逐条保留原记录的关键词，
 不会把本轮行为搜索词冒充原始发现词。
@@ -299,7 +299,7 @@ python scripts/repair_post_details.py \
 
 ## 知乎历史回填
 
-`scripts/repair_post_details.py` 的 `--dedupe-images` 只接受 `--platform zhihu`；`--refresh-all` 接受知乎与微博（#213），两个开关不能同时使用。默认选择（两个开关都不加）仍只处理非 `detail_observed` 的行。写默认库前都要 `--confirm-default-db-repair`。非 dry-run 会先用与详情修复相同的 SQLite 一致性备份，写到 `data/backups/post_detail_repair/<run_id>/`。
+`scripts/repair_post_details.py` 的 `--dedupe-images` 和 `--admit-seen` 只接受 `--platform zhihu`；`--refresh-all` 接受知乎与微博（#213），三个开关两两不能同时使用。默认选择（两个开关都不加）仍只处理非 `detail_observed` 的行。写默认库前都要 `--confirm-default-db-repair`。非 dry-run 会先用与详情修复相同的 SQLite 一致性备份，写到 `data/backups/post_detail_repair/<run_id>/`。
 
 建议顺序：先对两种模式分别 dry-run，确认计划后再去重，去重完成后再刷新。
 
@@ -358,6 +358,15 @@ python scripts/repair_post_details.py \
   --batch-size 20 \
   --confirm-default-db-repair
 ```
+
+### 按已见 ID 准入
+
+`--admit-seen --admit-seen-job <job id>`（#209）从该知乎任务 seen 表里选出尚未入库、未被排除的回答 ID，按
+`https://www.zhihu.com/answer/{id}` 直开并作为新行入库；它只用已经发现过的 ID，不扩大发现范围，也不写 seen、
+排除表、checkpoint 或 discovery 事件。选择、落点核对、不可得口径和命令见 `docs/platforms/zhihu.md`。限速、批次、
+备份、暂停和中断处理与全量刷新相同。不可得 ID（首页、文章页、404、换成别的回答）写入运行目录
+`unavailable_ids.json`，不计失败；续跑可传给 `--exclude-post-ids-file`。全部目标不可得且没有其他失败时整轮
+正常结束。
 
 ## 作者资料回填
 

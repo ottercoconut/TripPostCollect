@@ -50,6 +50,7 @@ from trippostcollect.runtime.process import (
 )
 from trippostcollect.xhs.leases import DeferredTerminationSignals
 from trippostcollect.application.repair import (
+    ADMIT_UNAVAILABLE_CODES,
     MISSING_WEIBO_AUTHOR_PLATFORM_ID,
     without_weibo_side_user_fields,
 )
@@ -124,9 +125,9 @@ def run_repair_child(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Repair existing Douyin, Weibo, or Zhihu rows in bounded detail-mode "
+            "Repair existing Weibo or Zhihu rows in bounded detail-mode "
             "batches without touching discovery state. Zhihu also accepts "
-            "--dedupe-images. Zhihu and Weibo accept --refresh-all."
+            "--dedupe-images, --refresh-all, and --admit-seen. Weibo accepts --refresh-all."
         )
     )
     parser.add_argument("--platform", required=True, choices=PLATFORMS)
@@ -170,6 +171,27 @@ def parse_args() -> argparse.Namespace:
         "--request-pause",
         action="store_true",
         help="Write a per-platform pause request and exit. The running repair stops after the current batch.",
+    )
+    parser.add_argument(
+        "--admit-seen",
+        action="store_true",
+        help=(
+            "Zhihu only: open seen-but-unstored numeric answer IDs and insert new rows. "
+            "Requires at least one --admit-seen-job."
+        ),
+    )
+    parser.add_argument(
+        "--admit-seen-job",
+        action="append",
+        dest="admit_seen_job_ids",
+        type=int,
+        default=None,
+        help="Crawl job id whose seen candidates are eligible. Repeatable. Zhihu --admit-seen only.",
+    )
+    parser.add_argument(
+        "--exclude-post-ids-file",
+        default="",
+        help="JSON array of post ID strings to skip. Zhihu --admit-seen only.",
     )
     return parser.parse_args()
 
@@ -435,6 +457,203 @@ def select_targets(
     return targets, rejected, pending_count
 
 
+def load_exclude_post_ids(path_value: str) -> set[str]:
+    path = Path(path_value).expanduser()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"invalid exclude post ids file: {path}: {exc}") from exc
+    if not isinstance(payload, list) or any(not isinstance(item, str) for item in payload):
+        raise SystemExit("exclude post ids file must be a JSON array of strings")
+    return {item.strip() for item in payload if item.strip()}
+
+
+def _job_keyword(params_json: str) -> str:
+    try:
+        payload = json.loads(params_json or "")
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    keyword = payload.get("keyword")
+    if not isinstance(keyword, str):
+        return ""
+    return keyword.strip()
+
+
+def select_admit_seen_targets(
+    conn: sqlite3.Connection,
+    *,
+    job_ids: list[int],
+    post_ids: list[str],
+    max_items: int,
+    exclude_ids: set[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
+    """从指定知乎任务的已见候选里选出尚未入库的纯数字回答 ID。
+
+    只读。keyword 取该 ID 最早 ``first_seen_at`` 那条候选所属任务的 ``params_json.keyword``。
+    取不到就不猜，记为 ``admit_keyword_missing``。已入库、排除表、非数字和续跑排除文件都不进入目标。
+    """
+
+    ordered: list[int] = []
+    seen_jobs: set[int] = set()
+    for job_id in job_ids:
+        if job_id not in seen_jobs:
+            seen_jobs.add(job_id)
+            ordered.append(int(job_id))
+    placeholders = ",".join("?" for _ in ordered)
+    job_rows = conn.execute(
+        f"SELECT id, site_key, params_json FROM crawl_jobs WHERE id IN ({placeholders})",
+        ordered,
+    ).fetchall()
+    found = {int(row["id"]): row for row in job_rows}
+    missing = [job_id for job_id in ordered if job_id not in found]
+    if missing:
+        raise SystemExit(
+            "admit-seen job not found: " + ", ".join(str(job_id) for job_id in missing)
+        )
+    foreign = [job_id for job_id in ordered if str(found[job_id]["site_key"] or "") != "zhihu"]
+    if foreign:
+        raise SystemExit(
+            "admit-seen job is not zhihu: " + ", ".join(str(job_id) for job_id in foreign)
+        )
+    keywords = {job_id: _job_keyword(str(found[job_id]["params_json"] or "")) for job_id in ordered}
+    seen_rows = conn.execute(
+        f"""
+        SELECT platform_post_id, job_id, first_seen_at, query_fingerprint
+        FROM crawl_discovery_seen_candidates
+        WHERE job_id IN ({placeholders})
+          AND platform_key = 'zhihu'
+        """,
+        ordered,
+    ).fetchall()
+    earliest: dict[str, sqlite3.Row] = {}
+    for row in seen_rows:
+        post_id = str(row["platform_post_id"] or "").strip()
+        if not post_id:
+            continue
+        current = earliest.get(post_id)
+        rank = (
+            str(row["first_seen_at"] or ""),
+            int(row["job_id"]),
+            str(row["query_fingerprint"] or ""),
+        )
+        if current is None:
+            earliest[post_id] = row
+            continue
+        current_rank = (
+            str(current["first_seen_at"] or ""),
+            int(current["job_id"]),
+            str(current["query_fingerprint"] or ""),
+        )
+        if rank < current_rank:
+            earliest[post_id] = row
+    stored = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT platform_post_id FROM web_posts WHERE platform_key = 'zhihu'"
+        )
+        if str(row[0] or "").strip()
+    }
+    excluded = {
+        str(row[0])
+        for row in conn.execute(
+            """
+            SELECT platform_post_id
+            FROM crawl_discovery_candidate_exclusions
+            WHERE platform_key = 'zhihu'
+            """
+        )
+        if str(row[0] or "").strip()
+    }
+    requested = {str(value).strip() for value in post_ids if str(value).strip()}
+    targets: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    for post_id in sorted(earliest, key=lambda item: (str(earliest[item]["first_seen_at"] or ""), item)):
+        if requested and post_id not in requested:
+            continue
+        if not re.fullmatch(r"[0-9]+", post_id):
+            continue
+        if post_id in stored or post_id in excluded or post_id in exclude_ids:
+            continue
+        row = earliest[post_id]
+        keyword = keywords.get(int(row["job_id"]), "")
+        item = {
+            "platform_post_id": post_id,
+            "detail_target": f"https://www.zhihu.com/answer/{post_id}",
+            "keyword": keyword,
+            "admit": True,
+            "repair_fallback": {},
+        }
+        if not keyword:
+            item["reason"] = "admit_keyword_missing"
+            rejected.append(item)
+            continue
+        targets.append(item)
+    pending_count = len(targets)
+    if max_items > 0:
+        targets = targets[:max_items]
+    return targets, rejected, pending_count
+
+
+def collect_unavailable_ids(summaries: list[dict[str, Any]]) -> list[str]:
+    found: list[str] = []
+    seen: set[str] = set()
+    for summary in summaries:
+        if not isinstance(summary, dict):
+            continue
+        evidence = summary.get("pagination_evidence")
+        if not isinstance(evidence, dict):
+            validation = summary.get("formal_validation")
+            evidence = validation.get("pagination_evidence") if isinstance(validation, dict) else None
+        if not isinstance(evidence, dict):
+            continue
+        for item in evidence.get("unavailable_candidate_ids") or []:
+            post_id = str(item or "").strip()
+            if post_id and post_id not in seen:
+                seen.add(post_id)
+                found.append(post_id)
+    return found
+
+
+def partition_unrecovered_ids(
+    target_ids: list[str],
+    recovered_ids: list[str],
+    unavailable_ids: list[str],
+    *,
+    admit: bool,
+) -> tuple[list[str], list[str]]:
+    """返回仍待处理的 ID，以及 admit 模式下从剩余里拆出的不可得 ID。"""
+
+    recovered = set(recovered_ids)
+    unrecovered = sorted({post_id for post_id in target_ids if post_id not in recovered})
+    if not admit:
+        return unrecovered, []
+    unavailable = [post_id for post_id in unavailable_ids if post_id in set(target_ids)]
+    unavailable_set = set(unavailable)
+    remaining = [post_id for post_id in unrecovered if post_id not in unavailable_set]
+    return remaining, unavailable
+
+
+def adjust_admit_persistence_failure(
+    persistence_failure: str,
+    *,
+    admit: bool,
+    target_ids: list[str],
+    unavailable_ids: list[str],
+    candidate_failures: list[dict[str, Any]],
+) -> str:
+    """全部剩余目标都不可得时，不把整轮记成没有进展。"""
+
+    if not admit or persistence_failure != "post_detail_repair_no_progress":
+        return persistence_failure
+    if not target_ids or candidate_failures:
+        return persistence_failure
+    if set(target_ids) <= set(unavailable_ids):
+        return ""
+    return persistence_failure
+
+
 def chunked(values: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
     return [values[index : index + size] for index in range(0, len(values), size)]
 
@@ -454,6 +673,7 @@ def build_child_command(
     targets_path: Path,
     headless: bool,
     keep_stored_images: bool = False,
+    admit_seen: bool = False,
 ) -> list[str]:
     command = [
         sys.executable,
@@ -480,6 +700,8 @@ def build_child_command(
         str(LOCAL_MEDIA_ROOT.resolve()),
         "--no-checkpoint-write",
     ]
+    if admit_seen:
+        command.append("--admit-seen")
     if keep_stored_images:
         command.append("--keep-stored-images")
     if not headless:
@@ -1016,6 +1238,25 @@ def _dedupe_summary(
 
 
 def _validate_repair_modes(args: argparse.Namespace) -> None:
+    admit = bool(getattr(args, "admit_seen", False))
+    job_ids = list(getattr(args, "admit_seen_job_ids", None) or [])
+    exclude_file = str(getattr(args, "exclude_post_ids_file", "") or "")
+    if admit and args.platform != "zhihu":
+        raise SystemExit("--admit-seen requires --platform zhihu")
+    if admit and not job_ids:
+        raise SystemExit("--admit-seen requires at least one --admit-seen-job")
+    if job_ids and not admit:
+        raise SystemExit("--admit-seen-job requires --admit-seen")
+    if exclude_file and not admit:
+        raise SystemExit("--exclude-post-ids-file requires --admit-seen")
+    if admit and args.refresh_all:
+        raise SystemExit("--admit-seen and --refresh-all are mutually exclusive")
+    if admit and args.dedupe_images:
+        raise SystemExit("--admit-seen and --dedupe-images are mutually exclusive")
+    if admit and getattr(args, "keep_stored_images", False):
+        raise SystemExit("--admit-seen and --keep-stored-images are mutually exclusive")
+    if any(job_id <= 0 for job_id in job_ids):
+        raise SystemExit("--admit-seen-job must be a positive integer")
     if args.dedupe_images and args.refresh_all:
         raise SystemExit("--dedupe-images and --refresh-all are mutually exclusive")
     if args.dedupe_images and args.platform != "zhihu":
@@ -1207,18 +1448,33 @@ def main() -> int:
 
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
-        targets, rejected, initial_pending = select_targets(
-            conn,
-            platform=args.platform,
-            post_ids=args.post_ids,
-            max_items=args.max_items,
-            refresh_all=args.refresh_all,
-        )
-        initial_waived_pending = waived_pending_count(
-            conn,
-            args.platform,
-            refresh_all=args.refresh_all,
-        )
+        if args.admit_seen:
+            exclude_ids = (
+                load_exclude_post_ids(args.exclude_post_ids_file)
+                if args.exclude_post_ids_file
+                else set()
+            )
+            targets, rejected, initial_pending = select_admit_seen_targets(
+                conn,
+                job_ids=list(args.admit_seen_job_ids or []),
+                post_ids=args.post_ids,
+                max_items=args.max_items,
+                exclude_ids=exclude_ids,
+            )
+            initial_waived_pending = 0
+        else:
+            targets, rejected, initial_pending = select_targets(
+                conn,
+                platform=args.platform,
+                post_ids=args.post_ids,
+                max_items=args.max_items,
+                refresh_all=args.refresh_all,
+            )
+            initial_waived_pending = waived_pending_count(
+                conn,
+                args.platform,
+                refresh_all=args.refresh_all,
+            )
     selected_waived = [
         item for item in rejected if item.get("reason") == "post_detail_repair_waived"
     ]
@@ -1235,15 +1491,17 @@ def main() -> int:
     batch_plans: list[dict[str, Any]] = []
     frozen_inputs = [FORMAL_CRAWL_CONTRACT, manifest_path]
     for index, batch in enumerate(chunked(targets, args.batch_size), start=1):
-        child_targets = [
-            {
+        child_targets = []
+        for item in batch:
+            entry = {
                 "platform_post_id": item["platform_post_id"],
                 "detail_target": item["detail_target"],
                 "keyword": item["keyword"],
-                "repair_fallback": item.get("repair_fallback") or {},
+                "repair_fallback": {} if args.admit_seen else (item.get("repair_fallback") or {}),
             }
-            for item in batch
-        ]
+            if args.admit_seen:
+                entry["admit"] = True
+            child_targets.append(entry)
         targets_path = write_json(run_dir / "batches" / f"batch-{index:04d}-targets.json", child_targets)
         command = build_child_command(
             platform=args.platform,
@@ -1253,6 +1511,7 @@ def main() -> int:
             targets_path=targets_path,
             headless=args.headless,
             keep_stored_images=args.keep_stored_images,
+            admit_seen=args.admit_seen,
         )
         batch_plans.append(
             {
@@ -1288,7 +1547,9 @@ def main() -> int:
         "backup_path": str(backup_path),
         "manifest": str(manifest_path),
         "commands": str(commands_path),
-        "selection": "refresh_all" if args.refresh_all else "pending_detail",
+        "selection": (
+            "admit_seen" if args.admit_seen else "refresh_all" if args.refresh_all else "pending_detail"
+        ),
         "keep_stored_images": bool(args.keep_stored_images),
     }
     state = FrozenExecutionState.create(
@@ -1315,7 +1576,9 @@ def main() -> int:
         "images_downloaded": 0,
         "images_reused": 0,
     }
-    if args.refresh_all:
+    if args.admit_seen:
+        base_summary["selection"] = "admit_seen"
+    elif args.refresh_all:
         base_summary["selection"] = "refresh_all"
         base_summary["target_results"] = build_target_results(
             targets=targets,
@@ -1512,6 +1775,15 @@ def main() -> int:
             if int(plan["batch"]) not in started_batches:
                 not_attempted_ids.update(str(post_id) for post_id in plan.get("target_ids") or [])
 
+        if args.admit_seen:
+            unavailable_seen = set(collect_unavailable_ids(child_summaries))
+            candidate_failures[:] = [
+                item
+                for item in candidate_failures
+                if str(item.get("platform_post_id") or "") not in unavailable_seen
+                and str(item.get("error_code") or "") not in ADMIT_UNAVAILABLE_CODES
+            ]
+
         if interrupt_signum is None and latch.signal_received is not None:
             interrupt_signum = int(latch.signal_received)
         if interrupt_signum is not None:
@@ -1618,7 +1890,13 @@ def main() -> int:
                 recovered_ids = sorted(
                     post_id for post_id, value in statuses.items() if value["recovered"]
                 )
-                remaining_target_ids = sorted(set(target_ids) - set(recovered_ids))
+                unavailable_ids = collect_unavailable_ids(child_summaries) if args.admit_seen else []
+                remaining_target_ids, _listed_unavailable = partition_unrecovered_ids(
+                    target_ids,
+                    recovered_ids,
+                    unavailable_ids,
+                    admit=args.admit_seen,
+                )
                 persistence_evidence = {
                     "checks": persistence_checks,
                     "target_statuses_sample": dict(list(statuses.items())[:20]),
@@ -1635,10 +1913,16 @@ def main() -> int:
                     "candidate_failure_count": len(candidate_failures),
                     "candidate_failures_sample": candidate_failures[:20],
                 }
-                persistence_failure = repair_persistence_failure_reason(
-                    recovered_ids=recovered_ids,
-                    successful_child_summaries=successful,
-                    persistence_checks=persistence_checks,
+                persistence_failure = adjust_admit_persistence_failure(
+                    repair_persistence_failure_reason(
+                        recovered_ids=recovered_ids,
+                        successful_child_summaries=successful,
+                        persistence_checks=persistence_checks,
+                    ),
+                    admit=args.admit_seen,
+                    target_ids=target_ids,
+                    unavailable_ids=unavailable_ids,
+                    candidate_failures=candidate_failures,
                 )
                 if persistence_failure:
                     fatal_error = persistence_failure
@@ -1724,8 +2008,15 @@ def main() -> int:
             recovered_ids = sorted(
                 post_id for post_id, value in final_statuses.items() if value["recovered"]
             )
-            remaining_ids = sorted(
+            final_unavailable = collect_unavailable_ids(child_summaries) if args.admit_seen else []
+            unrecovered_ids = sorted(
                 {item["platform_post_id"] for item in targets} - set(recovered_ids)
+            )
+            remaining_ids, listed_unavailable = partition_unrecovered_ids(
+                [item["platform_post_id"] for item in targets],
+                recovered_ids,
+                final_unavailable,
+                admit=args.admit_seen,
             )
             if latch.signal_received is not None and interrupt_signum is None:
                 interrupt_signum = int(latch.signal_received)
@@ -1751,7 +2042,7 @@ def main() -> int:
                 "remaining_unwaived_pending_count": max(
                     0, final_pending - final_waived_pending
                 ),
-                "all_selected_targets_recovered": not remaining_ids,
+                "all_selected_targets_recovered": not unrecovered_ids,
                 "candidate_failure_count": len(candidate_failures),
                 "candidate_failures_sample": candidate_failures[:20],
                 "not_attempted_count": sum(
@@ -1766,6 +2057,11 @@ def main() -> int:
                 ),
                 "finished_at": utc_iso(),
             }
+            if args.admit_seen:
+                unavailable_path = write_json(run_dir / "unavailable_ids.json", listed_unavailable)
+                summary["unavailable_count"] = len(listed_unavailable)
+                summary["unavailable_ids_sample"] = listed_unavailable[:20]
+                summary["unavailable_ids_path"] = str(unavailable_path)
             if throttle_stop is not None:
                 summary["throttle"] = throttle_stop
             if (

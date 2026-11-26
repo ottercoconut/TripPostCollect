@@ -89,6 +89,49 @@ ARTICLE_TITLE_SELECTORS = (
     "a[href*='/p/{content_id}']",
 )
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_-]+$")
+_BARE_ANSWER_RE = re.compile(r"^/answer/([0-9]+)/?$")
+_FINAL_ANSWER_RE = re.compile(r"^/question/([0-9]+)/answer/([0-9]+)/?$")
+_ARTICLE_PATH_RE = re.compile(r"^/p/[^/]+/?$")
+_ZHIHU_HOSTS = frozenset({"zhihu.com", "www.zhihu.com"})
+
+
+def bare_admit_answer_id(url: str) -> str:
+    """``https://www.zhihu.com/answer/{数字}`` 的回答 ID。其他地址返回空串。"""
+
+    parsed = urlsplit(str(url or "").split("#", 1)[0])
+    if parsed.scheme != "https" or (parsed.hostname or "").lower() not in _ZHIHU_HOSTS:
+        return ""
+    match = _BARE_ANSWER_RE.fullmatch(parsed.path or "")
+    return match.group(1) if match else ""
+
+
+def classify_admit_landing(
+    final_url: str,
+    target_id: str,
+    status: int | None,
+) -> tuple[str, str]:
+    """核对直开 ``/answer/{id}`` 之后的最终地址。
+
+    成功时返回 ``(question_id, "")``。问题 ID 只取自最终地址。
+    首页、文章页、404、回答 ID 不符或其他落点返回 ``("", 不可得码)``，调用方不得改开别的 URL。
+    """
+
+    if status == 404:
+        return "", constant.ADMIT_NOT_FOUND
+    parsed = urlsplit(str(final_url or "").split("#", 1)[0])
+    host = (parsed.hostname or "").lower()
+    path = parsed.path or ""
+    if host in _ZHIHU_HOSTS and path in {"", "/"}:
+        return "", constant.ADMIT_REDIRECT_HOME
+    if host == "zhuanlan.zhihu.com" or (host in _ZHIHU_HOSTS and _ARTICLE_PATH_RE.fullmatch(path)):
+        return "", constant.ADMIT_REDIRECT_ARTICLE
+    match = _FINAL_ANSWER_RE.fullmatch(path)
+    if parsed.scheme == "https" and host in _ZHIHU_HOSTS and match:
+        question_id, answer_id = match.group(1), match.group(2)
+        if answer_id != str(target_id):
+            return "", constant.ADMIT_ID_MISMATCH
+        return question_id, ""
+    return "", constant.ADMIT_REDIRECT_UNEXPECTED
 
 
 def blocking_code_for_url(url: str) -> str | None:
@@ -169,6 +212,7 @@ class ZhihuDetailPages:
         self._opened: Any = None
         # 正式轮次每次详情都新建本类，集合由 ZhihuCrawler 传入，一轮共用。
         self._visited_authors = set() if visited_authors is None else visited_authors
+        self._last_direct_status: int | None = None
 
     async def open_from_search(self, content: ZhihuContent) -> ZhihuContent:
         return await self._attempts(content, direct_url="")
@@ -182,7 +226,7 @@ class ZhihuDetailPages:
             try:
                 return await self._open_once(content, direct_url=direct_url)
             except ZhihuDetailFetchError as exc:
-                if exc.runtime_blocking:
+                if exc.runtime_blocking or exc.code in constant.ADMIT_NO_RETRY_CODES:
                     raise
                 last_code = exc.code
                 logger.warning(
@@ -197,7 +241,9 @@ class ZhihuDetailPages:
     async def _open_once(self, content: ZhihuContent, *, direct_url: str) -> ZhihuContent:
         self._raise_if_closed(self.search_page, "search page")
         self._opened = None
+        self._last_direct_status = None
         detail_page: Any = None
+        bare_id = bare_admit_answer_id(direct_url) if direct_url else ""
         try:
             if direct_url:
                 detail_page, trigger_id = await self._open_direct_tab(content, direct_url)
@@ -207,6 +253,16 @@ class ZhihuDetailPages:
             await self._wait_loaded(detail_page)
             await self._raise_if_blocking(detail_page)
             await self._raise_if_blocking(self.search_page)
+            question_from_url = ""
+            if bare_id:
+                question_from_url, landing_code = classify_admit_landing(
+                    str(getattr(detail_page, "url", "") or ""),
+                    bare_id,
+                    self._last_direct_status,
+                )
+                if landing_code:
+                    raise self._candidate(content, landing_code)
+                content.question_id = question_from_url
             state_text, visit_id = await self._read_initial_data(detail_page, content, trigger_id)
             parsed, code = self.extractor.content_from_initial_data(
                 state_text, str(content.content_id or ""), content.content_type,
@@ -216,6 +272,13 @@ class ZhihuDetailPages:
                 raise self._runtime(content, BROWSER_TARGET_CLOSED)
             if parsed is None or not visit_id:
                 raise self._candidate(content, code or DETAIL_ENTITY_MISSING)
+            if bare_id:
+                if str(parsed.content_id or "") != bare_id:
+                    raise self._candidate(content, constant.ADMIT_ID_MISMATCH)
+                parsed.question_id = question_from_url
+                parsed.content_url = (
+                    f"{constant.ZHIHU_URL}/question/{question_from_url}/answer/{bare_id}"
+                )
             author_visit = await self._visit_author(detail_page, parsed, visit_id)
             refs = {
                 "ledger_id": self.channel.ledger.ledger_id,
@@ -282,9 +345,15 @@ class ZhihuDetailPages:
             target={"content_id": str(content.content_id or ""), "content_type": content.content_type},
         )
         try:
-            await detail_page.goto(url, wait_until="domcontentloaded", timeout=DETAIL_LOAD_TIMEOUT_MS)
+            response = await detail_page.goto(
+                url, wait_until="domcontentloaded", timeout=DETAIL_LOAD_TIMEOUT_MS,
+            )
         except (PlaywrightTimeoutError, TimeoutError) as exc:
             raise self._candidate(content, DETAIL_TAB_NOT_OPENED) from exc
+        raw_status = getattr(response, "status", None) if response is not None else None
+        self._last_direct_status = (
+            raw_status if isinstance(raw_status, int) and not isinstance(raw_status, bool) else None
+        )
         return detail_page, trigger_id
 
     async def _find_title_link(self, page: Any, content: ZhihuContent) -> Any | None:

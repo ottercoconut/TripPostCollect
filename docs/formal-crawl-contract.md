@@ -26,6 +26,8 @@
 > **授权记录（2026-11-25）：** 操作人授权临时解冻，同步 #213 微博历史刷新复用已入库正文图。
 >
 > **授权记录（2026-11-25）：** 操作人授权临时解冻，同步 #235 微博修复失败项的更细错误码与证据。
+>
+> **授权记录（2026-11-25）：** 操作人授权临时解冻，同步 #209 知乎按已见未入库 ID 准入的修复口径。
 
 本文定义正式抓取的机器语义。平台参数和必需字段 profile：通用平台在
 `config/crawl_targets.json` 中配置；小红书在 `config/xhs_targets.json` 和
@@ -320,6 +322,15 @@ checkpoint 按最后完整批次正常推进。`candidate_skipped` 不增加有�
 失败清单为空时 `completion_met=true`。父入口必须再次按 SQLite 状态计算恢复数与残留数，并汇总
 `candidate_failure_count`；整轮零恢复且没有运行级或持久化阻断时使用
 `post_detail_repair_no_progress`，不得误报为 `post_detail_repair_persistence_not_verified`。
+
+知乎按已见 ID 准入（`--admit-seen`，#209）是历史详情修复的一种选择：冻结目标是指定知乎任务的
+`crawl_discovery_seen_candidates` 中尚未入库、未被排除的纯数字回答 ID。它按
+`https://www.zhihu.com/answer/{id}` 走 repair 链的 `navigate` 打开，最终地址必须是同一回答的
+`/question/{qid}/answer/{id}`，问题 ID 只取最终地址；成功行作为新行经同一套字段、图片、行为与访问门禁
+插入，导入时同平台同 ID 已存在则跳过，不覆盖。平台明确落到首页、文章页、404 或换成别的回答时，
+该目标记为不可得，列入运行目录 `unavailable_ids.json`，不计入失败清单，不重试，也不改开其他地址；
+无法识别的落点和页面状态里读不到目标回答仍是普通候选失败。冻结目标全部不可得且没有其他失败时，
+整轮正常结束，不报 `post_detail_repair_no_progress`。准入不写 seen、排除表、checkpoint 或 discovery 事件。
 
 用户在有限重试及证据复核后可以明确放弃某些既有帖子的后续历史详情修复。该决定只写独立的
 `post_detail_repair_waivers` 审计表，保存精确 `web_post_id`、原因、授权人、授权时间和既有运行证据；

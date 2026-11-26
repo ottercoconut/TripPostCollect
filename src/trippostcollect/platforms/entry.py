@@ -367,6 +367,14 @@ def _zhihu_dependencies(config):
     save_data_path = config.SAVE_DATA_PATH
     logger = logging.getLogger("TripPostCollect")
 
+    def write_zhihu_repair_outcomes(outcomes: list[dict]) -> None:
+        raw_path = os.environ.get("TRIPPOSTCOLLECT_ZHIHU_REPAIR_OUTCOMES_PATH", "").strip()
+        if not raw_path:
+            return
+        from trippostcollect.artifacts.evidence import write_weibo_repair_outcomes
+
+        write_weibo_repair_outcomes(raw_path, outcomes)
+
     def accumulator_factory(platform):
         accumulator = AdaptiveAccumulator.for_platform(
             platform,
@@ -428,6 +436,7 @@ def _zhihu_dependencies(config):
                 f"body images for content {content_id}"
             ),
         ),
+        write_repair_outcomes=write_zhihu_repair_outcomes,
     )
 
 def xhs_dependencies(config, *, repair=None):

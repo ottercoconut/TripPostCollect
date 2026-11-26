@@ -143,6 +143,7 @@ class Page:
         self.closed = False
         self.context = None
         self.mouse = QuietMouse()
+        self.requested_urls: list[str] = []
         self.listeners = {"response": [], "requestfailed": []}
         self.fronts = 0
 
@@ -179,7 +180,19 @@ class Page:
         self.closed = True
 
     async def goto(self, url, **kwargs):
-        self.url = url
+        self.requested_urls.append(url)
+        rule = {}
+        if self.context is not None:
+            rule = getattr(self.context, "redirects", {}).get(url) or {}
+        self.url = rule.get("url", url)
+        if rule.get("state") is not None:
+            self.initial_text = rule["state"]
+        if rule.get("author_links") is not None:
+            self.author_links = list(rule["author_links"])
+        status = rule.get("status")
+        if status is None:
+            return None
+        return SimpleNamespace(status=status)
 
 
 class ExpectPage:
@@ -210,6 +223,7 @@ class Context:
         self.pages = [page]
         self.pending = None
         self._on_page = None
+        self.redirects: dict[str, dict] = {}
         page.context = self
 
     def on(self, event, callback):

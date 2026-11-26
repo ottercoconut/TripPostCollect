@@ -21,6 +21,8 @@
 > **授权记录（2026-11-24）：** 操作人授权临时解冻，同步 #70 移除 `author_json.creator_hash`（schema v25）。
 >
 > **授权记录（2026-11-25）：** 操作人授权临时解冻，同步 #213 微博历史刷新复用已入库正文图。
+>
+> **授权记录（2026-11-25）：** 操作人授权临时解冻，同步 #209 知乎按已见未入库 ID 准入的导入口径。
 
 ## 数据库文件
 
@@ -325,6 +327,10 @@ B站还要按本轮 `artifact_dir` 检查 `raw_sample_json.content_detail_status
   }
 }
 ```
+
+知乎按已见 ID 准入（`repair_post_details.py --admit-seen`，#209）只插入新行：导入时同平台同 ID 已存在的记录
+跳过、不覆盖，`import_result` 另给 `already_present_rows` 计数。其他导入与修复模式没有这个字段，
+`updated_rows` 仍表示覆盖既有行。
 
 ## 页面级抓取结果入库
 
