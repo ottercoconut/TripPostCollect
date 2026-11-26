@@ -311,7 +311,15 @@ checkpoint 仍写入本轮最后的 page、offset、search ID 与停止原因供
   （`backfill_author_profiles.py --platform douyin`）原先走 httpx，已随 #222 删除。2026-11-20 正式库 1085 行中，
   只有 1 行没有详情证据，2 行缺作者主页链接。页面取数版的修复与回填不急，操作人决定以后另做
   （2026-11-20），跟踪于 #223。
-- `/note/{id}` 页面能渲染完整作品，但不发 `/aweme/detail/`，作品数据由服务端写在 `self.__pace_f` 的文本块里，
-  格式尚未解开（2026-11-20 侦察）。#223 做修复链时先侦察它。
+- **旧方式数据继续沿用（操作人 2026-11-26 决定，只适用于抖音）**：#222 之前经浏览器外 httpx 抓取的历史行，只要
+  字段可用、没有问题，就继续使用，不因取数方式变了而整行重取，也不因无法离线复核旧口径（例如粉丝取
+  `follower_count` 还是 `mplatform_followers_count`）而重取。历史回填只补缺：只填原来为空的字段，已有值不覆盖。
+  2026-11-26 正式库 1085 行中待补的是 13 行：10 行缺 `author_verified`，2 行同时缺 `author_profile_url` 与
+  `author_verified`，1 行缺 `content_detail_status`。作者简介为空（225 行，都做过作者资料回填）与粉丝为 0
+  （2 行）是平台值，不算缺失。
+- 侦察（2026-11-26，#223）：`/note/{id}` 不发 `/aweme/detail/`，`self.__pace_f` 与 `RENDER_DATA` 里没有目标作品；
+  页面自身请求的作者作品列表 `/aweme/v1/web/aweme/post/` 在 6 个样本中有 5 个含目标，都在 `aweme_list[0]`，
+  正文、图片、发布时间、互动数与 `author.sec_uid` 齐全；另 1 个不在列表里。作者入口真实点击与该对象
+  `author.sec_uid` 一致的链接，新标签作者页自身发 `/user/profile/other/`。
 
 共享的有限重试、`candidate_skipped`、运行级阻断和媒体失败语义见[正式契约](../formal-crawl-contract.md)。
