@@ -53,6 +53,7 @@ from trippostcollect.application.repair import (
     ADMIT_UNAVAILABLE_CODES,
     FILL_MISSING_FIELDS,
     MISSING_WEIBO_AUTHOR_PLATFORM_ID,
+    douyin_fill_gate_record,
     without_weibo_side_user_fields,
 )
 from trippostcollect.application.visit_gate import validate_content_visits
@@ -456,30 +457,13 @@ def _blank_column(value: Any) -> bool:
     return value is None or value == ""
 
 
-def _fill_gate_record(observation: dict[str, Any]) -> dict[str, Any]:
-    refs = {
-        "ledger_id": str(observation.get("ledger_id") or ""),
-        "note_detail": str(observation.get("note_visit_id") or ""),
-        "images": [],
-    }
-    creator = str(observation.get("creator_visit_id") or "")
-    if creator:
-        refs["creator_profile"] = creator
-    return {
-        "aweme_id": str(observation.get("platform_post_id") or ""),
-        "author_platform_id": str(observation.get("author_uid") or ""),
-        "content_visit_refs": refs,
-        "image_assets": [],
-    }
-
-
 def fill_visit_ok(observation: dict[str, Any], ledger_paths: list[str]) -> bool:
     if not observation.get("note_visit_id") or not observation.get("ledger_id"):
         return False
     if not ledger_paths:
         return False
     result = validate_content_visits(
-        [_fill_gate_record(observation)],
+        [douyin_fill_gate_record(observation)],
         ledger_paths,
         platform="douyin",
         mode="repair",
@@ -574,7 +558,7 @@ def apply_fill_missing_row(
                 if "content_detail_source" not in raw:
                     raw["content_detail_source"] = "note_post_list"
                     filled.append("content_detail_source")
-        refs = _fill_gate_record(observation)["content_visit_refs"]
+        refs = douyin_fill_gate_record(observation)["content_visit_refs"]
         raw["fill_missing"] = {
             "run_id": run_id,
             "observed_at": observed_at,

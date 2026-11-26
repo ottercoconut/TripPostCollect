@@ -553,6 +553,37 @@ def write_douyin_fill_observations(observations: list[dict[str, Any]]) -> None:
         _write_sanitized_json(outcomes_path, {"outcomes": outcomes})
 
 
+def douyin_fill_gate_record(observation: dict[str, Any]) -> dict[str, Any]:
+    """补缺观察换成访问门禁记录：只引用作品页与作者页访问，没有正文图。"""
+
+    refs: dict[str, Any] = {
+        "ledger_id": str(observation.get("ledger_id") or ""),
+        "note_detail": str(observation.get("note_visit_id") or ""),
+        "images": [],
+    }
+    creator = str(observation.get("creator_visit_id") or "")
+    if creator:
+        refs["creator_profile"] = creator
+    return {
+        "aweme_id": str(observation.get("platform_post_id") or ""),
+        "author_platform_id": str(observation.get("author_uid") or ""),
+        "content_visit_refs": refs,
+        "image_assets": [],
+    }
+
+
+def douyin_fill_gate_items(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """补缺模式不产生正式入库记录；访问门禁改查会写库的 observed 观察。"""
+
+    return [
+        {"platform": "douyin", "record": douyin_fill_gate_record(observation), "manifest_paths": []}
+        for record in records
+        if isinstance(record, dict) and record.get("platform") == "douyin"
+        for observation in record.get("fill_observations") or []
+        if isinstance(observation, dict) and observation.get("kind") == "observed"
+    ]
+
+
 def load_douyin_fill_observations(path_value: str | Path | None) -> list[dict[str, Any]]:
     if not path_value:
         return []
