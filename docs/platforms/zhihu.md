@@ -206,7 +206,7 @@ python scripts/repair_post_details.py \
 
 每条按 `https://www.zhihu.com/answer/{id}` 以 `navigate` 打开，最终地址必须是同一回答的
 `/question/{qid}/answer/{id}`，问题 ID 只取最终地址；随后照常读 `js-initialData`、停留、真实点击作者页，正文图
-走已登记的 CDN 直连。纯文字回答也入库（#191），按 `topic_relevant` 与其他记录一样区分是否研究可用。
+走已登记的 CDN 直连。纯文字回答也入库（#191）。
 落到首页（`admit_redirect_home`）、文章页（`admit_redirect_article`）、404（`admit_not_found`）或换成别的回答
 （`admit_id_mismatch`）时，该 ID 记为不可得：不重试，不改开 `zhuanlan` 或其他地址，不计失败，列入运行目录
 `unavailable_ids.json`，摘要给出 `unavailable_count`。落点无法识别（`admit_redirect_unexpected`）或页面状态读不到
