@@ -665,6 +665,84 @@ def test_apply_fills_only_empty_fields_and_keeps_concurrent_values(tmp_path, mon
     assert images == 1
 
 
+def _bare_row(conn, **values):
+    return _insert(conn, AWEME, **values)
+
+
+def test_author_fields_need_an_author_visit(tmp_path, monkeypatch):
+    db_path = _db(tmp_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        post_id = _bare_row(conn, profile="", verified=None, verified_text="")
+        conn.commit()
+        monkeypatch.setattr(repair, "fill_visit_ok", lambda *_a, **_k: True)
+        result = repair.apply_fill_missing_row(
+            conn,
+            web_post_id=post_id,
+            missing_fields=["author_profile_url", "author_verified"],
+            observation={
+                "kind": "observed",
+                "platform_post_id": AWEME,
+                "note_visit_id": "v1",
+                "ledger_id": "ledger",
+                "author_uid": UID,
+                "author_profile_url": f"https://www.douyin.com/user/{SEC}",
+                "author_verified": 1,
+                "author_verified_text": "认证文字",
+                "content_detail_observed": True,
+                "unresolved_fields": [],
+            },
+            run_id="douyin-test",
+            observed_at="2026-11-26T12:00:00+08:00",
+            ledger_paths=["ledger.jsonl"],
+        )
+        stored = conn.execute(
+            "SELECT author_profile_url, author_verified, author_verified_text FROM web_posts WHERE id=?",
+            (post_id,),
+        ).fetchone()
+    assert result["filled_fields"] == []
+    assert sorted(result["unresolved_fields"]) == ["author_profile_url", "author_verified"]
+    assert stored["author_profile_url"] == ""
+    assert stored["author_verified"] is None
+    assert stored["author_verified_text"] == ""
+
+
+def test_verified_text_is_not_added_to_a_row_stored_as_unverified(tmp_path, monkeypatch):
+    db_path = _db(tmp_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        post_id = _bare_row(conn, profile="", verified=0, verified_text="")
+        conn.commit()
+        monkeypatch.setattr(repair, "fill_visit_ok", lambda *_a, **_k: True)
+        result = repair.apply_fill_missing_row(
+            conn,
+            web_post_id=post_id,
+            missing_fields=["author_profile_url"],
+            observation={
+                "kind": "observed",
+                "platform_post_id": AWEME,
+                "note_visit_id": "v1",
+                "creator_visit_id": "v2",
+                "ledger_id": "ledger",
+                "author_uid": UID,
+                "author_profile_url": f"https://www.douyin.com/user/{SEC}",
+                "author_verified": 1,
+                "author_verified_text": "认证文字",
+                "content_detail_observed": True,
+                "unresolved_fields": [],
+            },
+            run_id="douyin-test",
+            observed_at="2026-11-26T12:00:00+08:00",
+            ledger_paths=["ledger.jsonl"],
+        )
+        stored = conn.execute(
+            "SELECT author_verified, author_verified_text FROM web_posts WHERE id=?", (post_id,),
+        ).fetchone()
+    assert result["filled_fields"] == ["author_profile_url"]
+    assert stored["author_verified"] == 0
+    assert stored["author_verified_text"] == ""
+
+
 def test_null_verification_stays_unresolved(tmp_path, monkeypatch):
     db_path = _db(tmp_path)
     with sqlite3.connect(db_path) as conn:

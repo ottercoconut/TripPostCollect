@@ -531,14 +531,20 @@ def apply_fill_missing_row(
             if field in FILL_MISSING_FIELDS
         ]
         assignments: dict[str, Any] = {}
-        if "author_profile_url" in missing_fields:
+        # 作者字段只能来自本轮已过门禁的作者页访问；没有作者访问引用就一个都不写。
+        author_observed = bool(observation.get("creator_visit_id"))
+        if not author_observed:
+            for field in ("author_profile_url", "author_verified"):
+                if field in missing_fields and field not in unresolved:
+                    unresolved.append(field)
+        if author_observed and "author_profile_url" in missing_fields:
             incoming = str(observation.get("author_profile_url") or "")
             if not _blank_column(row["author_profile_url"]):
                 already.append("author_profile_url")
             elif incoming:
                 assignments["author_profile_url"] = incoming
                 filled.append("author_profile_url")
-        if "author_verified" in missing_fields:
+        if author_observed and "author_verified" in missing_fields:
             if row["author_verified"] is not None:
                 already.append("author_verified")
             elif "author_verified" not in observation or "author_verified" in unresolved:
@@ -548,7 +554,12 @@ def apply_fill_missing_row(
                 assignments["author_verified"] = int(observation["author_verified"])
                 filled.append("author_verified")
         incoming_text = observation.get("author_verified_text")
-        if isinstance(incoming_text, str) and incoming_text:
+        # 认证文字只跟着本次补上的“已认证”，或库里原本就是已认证；不给原记为未认证的行配上文字。
+        text_allowed = author_observed and (
+            ("author_verified" in filled and assignments.get("author_verified") == 1)
+            or row["author_verified"] == 1
+        )
+        if text_allowed and isinstance(incoming_text, str) and incoming_text:
             if _blank_column(row["author_verified_text"]):
                 assignments["author_verified_text"] = incoming_text
                 filled.append("author_verified_text")
