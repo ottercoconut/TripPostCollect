@@ -509,14 +509,16 @@ def _public_fill_observation(item: Any) -> dict[str, Any] | None:
     text = item.get("author_verified_text")
     if isinstance(text, str) and text.strip():
         public["author_verified_text"] = text
-    sanitized = sanitize_author_avatar_data(public)
-    return sanitized if isinstance(sanitized, dict) else public
+    sanitized = sanitize_author_avatar_data(public).value
+    if not isinstance(sanitized, dict):
+        raise TypeError("douyin fill observation must stay a JSON object after avatar sanitization")
+    return sanitized
 
 
 def _write_sanitized_json(path_value: str, payload: Any) -> None:
     path = Path(path_value)
     path.parent.mkdir(parents=True, exist_ok=True)
-    body = sanitize_author_avatar_data(payload)
+    body = sanitize_author_avatar_data(payload).value
     text = json.dumps(body, ensure_ascii=False, sort_keys=True)
     part = path.with_name(f".{path.name}.{secrets.token_hex(4)}.part")
     part.write_text(text + "\n", encoding="utf-8")
