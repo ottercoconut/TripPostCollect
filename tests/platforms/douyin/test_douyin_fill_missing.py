@@ -846,3 +846,45 @@ def test_runtime_block_stops_later_batches(tmp_path, monkeypatch):
     with sqlite3.connect(db_path) as conn:
         verified = [row[0] for row in conn.execute("SELECT author_verified FROM web_posts ORDER BY id")]
     assert verified == [None, None]
+
+
+def test_fill_observations_are_really_written_and_read_back(tmp_path, monkeypatch):
+    """#223 首次正式运行时写盘崩溃（头像清除的结果对象未取 .value）；这里走真实写盘，不替换写函数。"""
+
+    from trippostcollect.application import repair as app_repair
+
+    observations_path = tmp_path / "logs" / "douyin_fill_observations.json"
+    outcomes_path = tmp_path / "logs" / "douyin_repair_outcomes.json"
+    monkeypatch.setenv("TRIPPOSTCOLLECT_DOUYIN_FILL_OBSERVATIONS", str(observations_path))
+    monkeypatch.setenv("TRIPPOSTCOLLECT_DOUYIN_REPAIR_OUTCOMES_PATH", str(outcomes_path))
+    app_repair.write_douyin_fill_observations(
+        [
+            {
+                "platform_post_id": AWEME,
+                "kind": "observed",
+                "note_visit_id": "ledger:v000001",
+                "creator_visit_id": "ledger:v000002",
+                "ledger_id": "ledger",
+                "author_profile_url": f"https://www.douyin.com/user/{SEC}",
+                "author_uid": UID,
+                "author_verified": 1,
+                "author_verified_text": "认证文字",
+                "content_detail_observed": True,
+                "unresolved_fields": [],
+                "avatar_thumb": {"url_list": [AVATAR]},
+            },
+            {
+                "platform_post_id": "7123456789012345679",
+                "kind": "unavailable",
+                "error_code": "fill_target_not_in_post_list",
+            },
+        ]
+    )
+    written = observations_path.read_text(encoding="utf-8")
+    assert AVATAR not in written
+    loaded = app_repair.load_douyin_fill_observations(observations_path)
+    by_id = {item["platform_post_id"]: item for item in loaded}
+    assert by_id[AWEME]["author_verified"] == 1
+    assert by_id[AWEME]["author_profile_url"] == f"https://www.douyin.com/user/{SEC}"
+    outcomes = json.loads(outcomes_path.read_text(encoding="utf-8"))["outcomes"]
+    assert [item["error_code"] for item in outcomes] == ["fill_target_not_in_post_list"]
