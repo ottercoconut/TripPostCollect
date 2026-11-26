@@ -17,7 +17,7 @@
   页面取数之后，图片客户端不再读取或保存 Cookie（#185）。
 - 启动浏览器时不强制 User-Agent，浏览器自报真实 UA；httpx 请求头的 `user-agent` 在首页加载后经已登记的
   状态脚本读取 `navigator.userAgent`，与 warmup 登录时同一浏览器一致，不写死版本串（#127）。正式轮走 CDP，
-  复用持久 profile 的默认 context；外部 Chrome 以 `--accept-lang=zh-CN`、原生窗口 1450×900 和
+  复用持久 profile 的默认 context；外部 Chrome 以 `--accept-lang=zh-CN`、原生窗口 1470×956 和
   `TZ=Asia/Shanghai` 启动，标准模式及 CDP 失败回退也经共享 `launch_profile_context`，不再用 viewport
   模拟设备（#142）。行为证据 `runtime_fingerprint` 同时记录 `languages`、`timezone`、真实 screen 与 DPR。
 - 只接受 answer 和 article；zvideo 在搜索解析阶段丢弃，只计为已处理候选并进入候选记忆，不写项目 JSONL。

@@ -16,7 +16,7 @@
 - 浏览器沿用标准模式持久 profile `data/runtime/platform_sessions/douyin/profile`，与 warmup 共用
   `launch_profile_context`（#136、#139）：
   - 沙箱开启，`zh-CN` 与 `Asia/Shanghai`；
-  - 不传 UA，不做 viewport 设备模拟，按原生窗口 1450×900 启动；
+  - 不传 UA，不做 viewport 设备模拟，按原生窗口 1470×956 启动；
   - 首页在持久 context 自带的第一页打开。
 
   持久 profile 是登录态的唯一权威来源。worker 不读取 Cookie 值，也不向浏览器注入 Cookie。

@@ -609,8 +609,8 @@ warmup、抖音与微博 crawl 标准模式的持久 profile、B站行为会话�
 （`trippostcollect.runtime.browser_runtime.launch_profile_context`，#136）：显式开启沙箱（不带 `--no-sandbox`）、
 `locale=zh-CN` 与 `timezone_id=Asia/Shanghai`、同一组启动参数和运行时环境，不传 UA 也不传代理；crawl 复用持久
 context 自带的第一页，不另开空白页。只有 `headless` 与浏览器可执行文件路径按入口不同。通用平台持久 context 与
-小红书一样不做设备模拟（#139）：不传 `viewport`，按原生窗口 1450×900（`NATIVE_WINDOW_SIZE`，即
-`--window-size=1450,900`）启动，macOS 会把窗口收进屏幕可用区域；`screen`、DPR 与窗口尺寸由浏览器给出真实值，
+小红书一样不做设备模拟（#139）：不传 `viewport`，按原生窗口 1470×956（`NATIVE_WINDOW_SIZE`，即
+`--window-size=1470,956`）启动，macOS 会把窗口收进屏幕可用区域；`screen`、DPR 与窗口尺寸由浏览器给出真实值，
 行为证据 `runtime_fingerprint` 记录真实 screen 与 DPR。
 知乎正式轮使用 CDP 时，外部 Chrome 以 `--accept-lang=zh-CN`、`TZ=Asia/Shanghai` 和同一原生窗口启动；
 新建 context 及标准/回退持久模式也不做 viewport 设备模拟（#142）。`runtime_fingerprint` 另记录

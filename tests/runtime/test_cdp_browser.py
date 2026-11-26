@@ -40,7 +40,7 @@ async def test_launched_browser_uses_discovered_websocket_url(monkeypatch):
 
 
 def test_xhs_browser_uses_stable_native_window_instead_of_maximizing(monkeypatch):
-    monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_WINDOW_SIZE", "1450,900")
+    monkeypatch.setenv("TRIPPOSTCOLLECT_XHS_WINDOW_SIZE", "1470,956")
     popen = MagicMock()
     monkeypatch.setattr("trippostcollect.runtime.browser_launcher.subprocess.Popen", popen)
 
@@ -52,7 +52,7 @@ def test_xhs_browser_uses_stable_native_window_instead_of_maximizing(monkeypatch
     )
 
     arguments = popen.call_args.args[0]
-    assert "--window-size=1450,900" in arguments
+    assert "--window-size=1470,956" in arguments
     assert "--start-maximized" not in arguments
 
 
@@ -325,7 +325,7 @@ async def test_non_xhs_cdp_profile_behavior_is_unchanged_and_ignores_xhs_env(
         "headless": True,
         "user_data_dir": resolved_profile,
         # #142：知乎 CDP 新增中文、原生窗口和时区；profile 与 XHS 隔离规则不变。
-        "extra_args": ["--accept-lang=zh-CN", "--window-size=1450,900"],
+        "extra_args": ["--accept-lang=zh-CN", "--window-size=1470,956"],
         "env": manager.launcher.launch_browser.call_args.kwargs["env"],
     }
     manager.launcher.launch_browser.assert_called_once_with(**expected_kwargs)

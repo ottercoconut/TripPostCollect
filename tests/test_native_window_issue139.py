@@ -2,7 +2,7 @@
 
 ``viewport=PROFILE_VIEWPORT``（1280×900）让 Playwright 模拟设备：页面读到 ``screen`` 1280×900、DPR 1，且
 ``outerHeight`` 被 macOS 收进可用区域后小于 ``innerHeight``，前后矛盾。现在共享函数缺省不传 ``viewport``、传
-``no_viewport=True``，启动参数末尾追加 ``--window-size=1450,900``，``screen``、DPR 与窗口尺寸由浏览器给出真实值。
+``no_viewport=True``，启动参数末尾追加 ``--window-size=1470,956``，``screen``、DPR 与窗口尺寸由浏览器给出真实值。
 
 全部离线：复用 #136 用例的替身 chromium，只记录 ``launch_persistent_context(**kwargs)``，不访问网络、不启动浏览器。
 """
@@ -37,7 +37,7 @@ def _assert_native_window(kwargs: dict, label: str) -> None:
 
 
 def test_native_window_size_matches_xhs() -> None:
-    assert browser_runtime.NATIVE_WINDOW_SIZE == browser_runtime.XHS_NATIVE_WINDOW_SIZE == (1450, 900)
+    assert browser_runtime.NATIVE_WINDOW_SIZE == browser_runtime.XHS_NATIVE_WINDOW_SIZE == (1470, 956)
 
 
 def test_shared_launcher_defaults_to_native_window(shared, tmp_path) -> None:  # noqa: F811
