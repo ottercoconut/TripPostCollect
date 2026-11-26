@@ -359,6 +359,24 @@ python scripts/repair_post_details.py \
   --confirm-default-db-repair
 ```
 
+### 抖音只补缺
+
+`--platform douyin --fill-missing`（#223）只填抖音历史行原来为空的作者主页链接、作者认证与详情状态，已有值不覆盖，
+不下载正文图。选择、访问链、不可得口径与补写规则见 `docs/platforms/douyin.md`。限速、批次、备份、暂停与中断处理与
+其他修复相同。
+
+```bash
+source .venv/bin/activate
+python scripts/repair_post_details.py \
+  --platform douyin \
+  --fill-missing \
+  --keyword 青岛旅游 \
+  --batch-size 20 \
+  --dry-run
+```
+
+正式运行把 `--dry-run` 换成 `--confirm-default-db-repair`。
+
 ### 按已见 ID 准入
 
 `--admit-seen --admit-seen-job <job id>`（#209）从该知乎任务 seen 表里选出尚未入库、未被排除的回答 ID，按

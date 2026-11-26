@@ -28,6 +28,8 @@
 > **授权记录（2026-11-25）：** 操作人授权临时解冻，同步 #235 微博修复失败项的更细错误码与证据。
 >
 > **授权记录（2026-11-25）：** 操作人授权临时解冻，同步 #209 知乎按已见未入库 ID 准入的修复口径。
+>
+> **授权记录（2026-11-26）：** 操作人授权临时解冻，同步 #223 抖音历史行只补缺的 repair 链。
 
 本文定义正式抓取的机器语义。平台参数和必需字段 profile：通用平台在
 `config/crawl_targets.json` 中配置；小红书在 `config/xhs_targets.json` 和
@@ -171,7 +173,13 @@ repair 链没有搜索访问：指定 `weibo.com/{uid}/{mid}` 以 `navigate` 打
 侧栏作者链接）打开新标签作者页，被动截获页面自身的 `/aweme/v1/web/user/profile/other/`（L1，`page_response`），
 只接受 `user.sec_uid` 与作者页 URL、搜索卡片作者一致的那一条；正文图是登记过的 CDN 直连例外，UA 取自浏览器，
 Referer 固定为 `https://www.douyin.com/`，不带 Cookie，不经第三方代理，访问账本以 `cdn_direct` 登记并参与 R5。
-抖音没有 repair 链。每条抖音入库记录须经 `content_visit_ok`。B站目前不纳入访问门禁（#111），
+抖音 repair 链只用于历史行只补缺（#223，`repair_post_details.py --platform douyin --fill-missing`）：链为
+`note_detail → creator_profile`，指定 `https://www.douyin.com/note/{id}` 在主标签以 `navigate` 打开，被动截获页面自身的
+`/aweme/v1/web/aweme/post/`（`douyin.aweme_post`，L1，`page_response`），只认 `aweme_id` 等于目标的对象；缺作者字段时
+真实点击 href 中 sec_uid 与该对象 `author.sec_uid` 一致的作者链接，新标签作者页仍截获 `douyin.user_profile`。该链不下载、
+不登记正文图，记录带任何正文图访问或资产即 R5 不通过；只缺详情状态、不点作者的记录不要求作者访问，引用了作者访问就
+按 R4 完整核验。补写只填原来为空的字段，作者字段只能来自本轮已核验的作者访问。目标不在作者作品列表里或最终地址离开
+`/note/{id}` 记为不可得，不翻页、不重试、不改开其他地址，不计失败。每条抖音入库或补写的记录须经 `content_visit_ok`。B站目前不纳入访问门禁（#111），
 计划在 2026-11-12（UTC−8）之后重构（#157）：浏览器负责登录、Cookie
 与行为证据，搜索、详情、作者与图片由浏览器外 HTTP 客户端取得，不写访问账本，也不参与 `content_visit_ok`。
 其中正文图片请求不带平台 Cookie，也不经第三方代理。
