@@ -9,6 +9,8 @@
 > **授权记录（2026-11-19）：** 操作人授权临时解冻，同步 #211 微博桌面站页面取数、访问门禁与全量扫描口径。
 >
 > **授权记录（2026-11-20）：** 操作人授权临时解冻，同步 #222 抖音页面取数与访问门禁口径。
+>
+> **授权记录（2026-11-26）：** 操作人授权临时解冻，同步 #223 抖音历史行只补缺的 repair 链。
 
 TripPostCollect 是一个用于授权 CTF 靶场的低频图文内容抓取、证据保留和 SQLite 入库项目。开始任务前先读 `docs/README.md`，再按问题类型读取对应文档。
 
@@ -60,8 +62,10 @@ TripPostCollect 是一个用于授权 CTF 靶场的低频图文内容抓取、�
   点击搜索卡片在同一标签打开浮层，读取地址栏 `modal_id` 与当前播放项（L1，`page_state`），浮层不另发作品请求，正文取
   同一轮搜索卡片 `aweme_info`；作者由浮层内两步真实点击（头像打开侧栏，再点侧栏作者链接）打开新标签作者页，被动截获
   页面自身的 `/user/profile/other/`（L1，`page_response`）；正文图是登记过的 CDN 直连例外（UA 取自浏览器，Referer 固定为
-  `https://www.douyin.com/`，不带 Cookie，不经第三方代理，访问账本以 `cdn_direct` 登记并参与 R5）；没有 repair 链；
-  每条入库记录须经 `content_visit_ok`。B站目前沿用浏览器负责登录、Cookie 与行为证据、取数走浏览器外 HTTP 客户端的
+  `https://www.douyin.com/`，不带 Cookie，不经第三方代理，访问账本以 `cdn_direct` 登记并参与 R5）；repair 链
+  只用于历史行只补缺（#223）：`navigate` 打开 `/note/{id}`，被动截获页面自身的 `/aweme/v1/web/aweme/post/`（L1，
+  `page_response`），缺作者字段时真实点击与作品作者一致的作者链接打开新标签作者页并截获 `/user/profile/other/`，
+  不下载正文图；每条入库或补写的记录须经 `content_visit_ok`。B站目前沿用浏览器负责登录、Cookie 与行为证据、取数走浏览器外 HTTP 客户端的
   方案（#111），不纳入访问门禁；该方案计划在 2026-11-12（UTC−8）之后重构（#157）。其正文图片请求不带平台 Cookie、
   不经第三方代理。分级与规则见
   `docs/formal-crawl-contract.md` 的“取数来源与真实访问门禁”。

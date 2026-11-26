@@ -2342,17 +2342,15 @@ def test_weibo_refresh_dry_run_reports_refreshable_total(
     assert "104" not in by_id
 
 
-def test_refresh_all_rejects_douyin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+def test_refresh_all_rejects_douyin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     db_path = tmp_path / "unused.sqlite"
     monkeypatch.setattr(
         sys,
         "argv",
         ["repair_post_details.py", "--platform", "douyin", "--db", str(db_path), "--refresh-all"],
     )
-    with pytest.raises(SystemExit) as raised:
+    with pytest.raises(SystemExit, match="requires --fill-missing"):
         repair.main()
-    assert raised.value.code == 2
-    assert "invalid choice" in capsys.readouterr().err
 
     class _Args:
         dedupe_images = False
@@ -2361,7 +2359,7 @@ def test_refresh_all_rejects_douyin(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         post_ids: list[str] = []
         max_items = 0
 
-    with pytest.raises(SystemExit, match="requires --platform zhihu"):
+    with pytest.raises(SystemExit, match="requires --fill-missing"):
         repair._validate_repair_modes(_Args())
 
 

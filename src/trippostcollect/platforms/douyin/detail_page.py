@@ -7,8 +7,10 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 import logging
 import random
+import re
 import time
 from typing import Any
 from urllib.parse import urlsplit
@@ -18,7 +20,9 @@ from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from trippostcollect.platforms.douyin.models import DataFetchError
 from trippostcollect.platforms.douyin.page_scripts import corner_close_handle, read_dom
+from trippostcollect.platforms.douyin.parser import _profile_verification, douyin_profile_url
 from trippostcollect.platforms.douyin.search_page import (
+    DOUYIN_AWEME_POST_RULE,
     DOUYIN_USER_PROFILE_RULE,
     blocking_code,
 )
@@ -58,6 +62,13 @@ MODAL_ADVANCED = "douyin_modal_advanced"
 AUTOPLAY_STILL_ON = "douyin_autoplay_still_on"
 MODAL_CLOSE_FAILED = "douyin_modal_close_failed"
 AUTHOR_LINK_MISSING = "author_link_missing"
+FILL_TARGET_NOT_IN_POST_LIST = "fill_target_not_in_post_list"
+FILL_TARGET_REDIRECTED = "fill_target_redirected"
+NOTE_NAVIGATION_FAILED = "note_navigation_failed"
+NOTE_NAVIGATION_TIMEOUT_MS = 30_000
+NOTE_URL_PREFIX = "https://www.douyin.com/note/"
+NOTE_AUTHOR_LINK_SELECTOR = 'a[href*="/user/"]'
+_LANDING_ID_RE = re.compile(r"[0-9a-fA-F]{16,}|\d{5,}|[A-Za-z0-9_-]{20,}")
 AUTHOR_TAB_NOT_OPENED = "author_tab_not_opened"
 AUTHOR_URL_MISMATCH = "author_url_mismatch"
 AUTHOR_PROFILE_MISSING = "author_profile_missing"
@@ -178,6 +189,130 @@ def _closed_error(exc: BaseException) -> bool:
         return "closed" in text or "target page" in text
     text = str(exc).lower()
     return "target closed" in text or "has been closed" in text or "browser has been closed" in text
+
+
+def note_page_url(aweme_id: str) -> str:
+    return f"{NOTE_URL_PREFIX}{aweme_id}"
+
+
+def note_page_matches(url: str, aweme_id: str) -> bool:
+    parts = urlsplit(str(url or "").strip())
+    return (
+        parts.scheme == "https"
+        and parts.netloc == "www.douyin.com"
+        and parts.path.rstrip("/") == f"/note/{aweme_id}"
+    )
+
+
+def landing_shape(url: str) -> str:
+    """主机加路径。数字段和长 ID 段换成 ``{id}``，不保留查询串。"""
+
+    parts = urlsplit(str(url or "").strip())
+    host = parts.hostname or ""
+    segments = []
+    for segment in parts.path.split("/"):
+        if segment and (_LANDING_ID_RE.fullmatch(segment) or segment.isdigit()):
+            segments.append("{id}")
+        else:
+            segments.append(segment)
+    path = "/".join(segments) or "/"
+    return f"{host}{path}" if host else path
+
+
+def aweme_in_post_list(payload: Any, aweme_id: str) -> dict[str, Any] | None:
+    """只认 ``aweme_id`` 等于目标的对象，不限下标。"""
+
+    if not isinstance(payload, dict):
+        return None
+    items = payload.get("aweme_list")
+    if not isinstance(items, list):
+        return None
+    for item in items:
+        if isinstance(item, dict) and str(item.get("aweme_id") or "") == aweme_id:
+            return item
+    return None
+
+
+def _verify_check(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("search_nil_type") == "verify_check":
+        return True
+    info = payload.get("search_nil_info")
+    return isinstance(info, dict) and info.get("search_nil_type") == "verify_check"
+
+
+def captured_runtime_code(captured: CapturedResponse) -> str | None:
+    """作品列表或资料响应上的运行级分类。``verify_check`` 与可见验证码同一停轮码。"""
+
+    code = profile_runtime_code(captured)
+    if code:
+        return code
+    if _verify_check(captured.json):
+        return "captcha_detected"
+    return None
+
+
+def profile_sec_uid_matches(payload: Any, sec_uid: str) -> bool:
+    """按 ``user.sec_uid`` 挑选。登录账号自己的资料会混在同一标签的响应里。"""
+
+    if not sec_uid or not isinstance(payload, dict) or payload.get("status_code") not in (0, "0"):
+        return False
+    user = payload.get("user")
+    return isinstance(user, dict) and str(user.get("sec_uid") or "") == sec_uid
+
+
+@dataclass(frozen=True)
+class DouyinFillObservation:
+    """补缺观察。不含正文、昵称、头像或原始查询串。"""
+
+    platform_post_id: str
+    kind: str
+    error_code: str = ""
+    landing_shape: str = ""
+    note_visit_id: str = ""
+    creator_visit_id: str = ""
+    ledger_id: str = ""
+    author_profile_url: str = ""
+    author_uid: str = ""
+    author_verified: int | None = None
+    author_verified_text: str | None = None
+    content_detail_observed: bool = False
+    unresolved_fields: tuple[str, ...] = ()
+
+    def as_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "platform_post_id": self.platform_post_id,
+            "kind": self.kind,
+            "error_code": self.error_code,
+            "landing_shape": self.landing_shape,
+            "note_visit_id": self.note_visit_id,
+            "creator_visit_id": self.creator_visit_id,
+            "ledger_id": self.ledger_id,
+            "author_profile_url": self.author_profile_url,
+            "author_uid": self.author_uid,
+            "content_detail_observed": self.content_detail_observed,
+            "unresolved_fields": list(self.unresolved_fields),
+        }
+        if self.author_verified is not None:
+            payload["author_verified"] = self.author_verified
+        if self.author_verified_text:
+            payload["author_verified_text"] = self.author_verified_text
+        return payload
+
+
+def _response_status(response: Any) -> int | None:
+    if response is None:
+        return None
+    status = getattr(response, "status", None)
+    if callable(status):
+        try:
+            status = status()
+        except Exception:
+            return None
+    if isinstance(status, bool) or not isinstance(status, int):
+        return None
+    return status
 
 
 def _page_closed(page: Any) -> bool:
@@ -743,3 +878,256 @@ class DouyinDetailPages:
 
     def _runtime(self, aweme_id: str, code: str) -> DouyinDetailFetchError:
         return DouyinDetailFetchError(aweme_id, code, runtime_blocking=True, retryable=False)
+
+    async def open_note_for_fill(self, aweme_id: str, *, need_author: bool) -> DouyinFillObservation:
+        """在主标签 navigate 到作品页。新标签只留给作者页，和发现链的页面角色一致。
+
+        只等这一次作品列表，不翻页、不滚动、不改地址、不重试。
+        """
+
+        page = self.search_page
+        self._raise_if_closed(aweme_id)
+        await self._raise_if_blocking(page, aweme_id)
+        url = note_page_url(aweme_id)
+        trigger_id = self.channel.action(
+            "navigate",
+            page_role="primary",
+            target={"aweme_id": aweme_id},
+        )
+        after_seq = self.channel.ledger.last_seq
+        try:
+            response = await page.goto(url, wait_until="domcontentloaded", timeout=NOTE_NAVIGATION_TIMEOUT_MS)
+        except (PlaywrightError, PlaywrightTimeoutError) as exc:
+            if _closed_error(exc) or _page_closed(page):
+                raise self._runtime(aweme_id, BROWSER_TARGET_CLOSED) from exc
+            return self._fill_candidate(aweme_id, NOTE_NAVIGATION_FAILED)
+        status = _response_status(response)
+        if status in (401, 403):
+            raise self._runtime(aweme_id, LOGIN_REQUIRED if status == 401 else BLOCKED_OR_FORBIDDEN)
+        if status == 429:
+            raise self._runtime(aweme_id, RATE_LIMITED)
+        await self._raise_if_blocking(page, aweme_id)
+        final_url = str(getattr(page, "url", "") or "")
+        if not note_page_matches(final_url, aweme_id):
+            shape = landing_shape(final_url)
+            logger.info(
+                "[DouyinDetailPages] fill redirected aweme_id=%s landing=%s",
+                aweme_id,
+                shape,
+            )
+            return self._fill_unavailable(aweme_id, FILL_TARGET_REDIRECTED, landing=shape)
+        captured = await self._take_post_list(aweme_id, after_seq)
+        if captured is None:
+            return self._fill_unavailable(aweme_id, FILL_TARGET_NOT_IN_POST_LIST)
+        code = captured_runtime_code(captured)
+        if code:
+            raise self._runtime(aweme_id, code)
+        aweme = aweme_in_post_list(captured.json, aweme_id)
+        if aweme is None:
+            return self._fill_unavailable(aweme_id, FILL_TARGET_NOT_IN_POST_LIST)
+        visit_id = self.channel.record_visit(
+            captured,
+            stage="note_detail",
+            subject_id=aweme_id,
+            trigger=trigger_id,
+        )
+        await self._pause(page, "note_detail", *DETAIL_DWELL_SECONDS)
+        author = aweme.get("author") if isinstance(aweme.get("author"), dict) else {}
+        sec_uid = str(author.get("sec_uid") or author.get("sec_user_id") or "").strip()
+        observed = DouyinFillObservation(
+            platform_post_id=aweme_id,
+            kind="observed",
+            note_visit_id=visit_id,
+            ledger_id=self.channel.ledger.ledger_id,
+            content_detail_observed=True,
+        )
+        if not need_author:
+            return observed
+        author_obs = await self._fill_author(page, aweme_id, sec_uid, visit_id)
+        return DouyinFillObservation(
+            platform_post_id=aweme_id,
+            kind=author_obs.kind,
+            error_code=author_obs.error_code,
+            note_visit_id=visit_id,
+            creator_visit_id=author_obs.creator_visit_id,
+            ledger_id=observed.ledger_id,
+            author_profile_url=author_obs.author_profile_url,
+            author_uid=author_obs.author_uid,
+            author_verified=author_obs.author_verified,
+            author_verified_text=author_obs.author_verified_text,
+            content_detail_observed=True,
+            unresolved_fields=author_obs.unresolved_fields,
+        )
+
+    async def _fill_author(
+        self,
+        page: Any,
+        aweme_id: str,
+        sec_uid: str,
+        detail_visit: str,
+    ) -> DouyinFillObservation:
+        if not sec_uid:
+            return self._fill_candidate(aweme_id, AUTHOR_LINK_MISSING)
+        await self._pause(page, "creator_profile", *AUTHOR_CLICK_PAUSE_SECONDS)
+        link = await self._note_author_link(page, sec_uid, aweme_id)
+        if link is None:
+            return self._fill_candidate(aweme_id, AUTHOR_LINK_MISSING)
+        try:
+            box = await link.bounding_box()
+        except (PlaywrightError, PlaywrightTimeoutError) as exc:
+            if _closed_error(exc) or _page_closed(page):
+                raise self._runtime(aweme_id, BROWSER_TARGET_CLOSED) from exc
+            return self._fill_candidate(aweme_id, AUTHOR_LINK_MISSING)
+        if not isinstance(box, dict) or not box.get("width") or not box.get("height"):
+            return self._fill_candidate(aweme_id, AUTHOR_LINK_MISSING)
+        click_id = self.channel.action(
+            "click_author",
+            page_role="primary",
+            target={"aweme_id": aweme_id},
+            from_visit=detail_visit,
+        )
+        after_seq = self.channel.ledger.last_seq
+        author_page = None
+        try:
+            async with self.channel.context.expect_page(timeout=CLICK_TIMEOUT_MS) as opened:
+                await link.click(timeout=CLICK_TIMEOUT_MS)
+            author_page = await opened.value
+        except (PlaywrightTimeoutError, TimeoutError) as exc:
+            if _closed_error(exc) or _page_closed(page):
+                raise self._runtime(aweme_id, BROWSER_TARGET_CLOSED) from exc
+            return self._fill_candidate(aweme_id, AUTHOR_TAB_NOT_OPENED)
+        self.channel.attach(author_page, "author")
+        try:
+            if _page_closed(author_page):
+                raise self._runtime(aweme_id, BROWSER_TARGET_CLOSED)
+            await self._wait_author_url(author_page, sec_uid, aweme_id)
+            await self._raise_if_blocking(author_page, aweme_id)
+            captured = await self._take_profile_by_sec_uid(aweme_id, sec_uid, after_seq)
+            user = captured.json.get("user") if isinstance(captured.json, dict) else None
+            if not isinstance(user, dict) or str(user.get("sec_uid") or "") != sec_uid:
+                return self._fill_candidate(aweme_id, AUTHOR_PROFILE_MISSING)
+            uid = str(user.get("uid") or "").strip() or sec_uid
+            verified, verified_text = _profile_verification(user)
+            profile_url = douyin_profile_url(str(user.get("sec_uid") or ""))
+            if not profile_url:
+                return self._fill_candidate(aweme_id, AUTHOR_PROFILE_MISSING)
+            visit_id = self.channel.record_visit(
+                captured,
+                stage="creator_profile",
+                subject_id=uid,
+                trigger=click_id,
+                url_user_id=uid,
+            )
+            unresolved: list[str] = []
+            if verified is None:
+                unresolved.append("author_verified")
+            await self._pause(
+                author_page,
+                "author_tab",
+                *self._author_tab_hold(sec_uid),
+                page_role="author",
+            )
+            return DouyinFillObservation(
+                platform_post_id=aweme_id,
+                kind="observed",
+                creator_visit_id=visit_id,
+                author_profile_url=profile_url,
+                author_uid=uid,
+                author_verified=verified,
+                author_verified_text=verified_text,
+                unresolved_fields=tuple(unresolved),
+            )
+        finally:
+            await self._close_author_tab(author_page, aweme_id)
+
+    async def _note_author_link(self, page: Any, sec_uid: str, aweme_id: str) -> Any | None:
+        """作品页上 href 的 sec_uid 与作品作者一致的可见链接。找不到不拼地址。"""
+
+        locator = page.locator(NOTE_AUTHOR_LINK_SELECTOR)
+        try:
+            count = await locator.count()
+        except (PlaywrightError, PlaywrightTimeoutError) as exc:
+            if _closed_error(exc) or _page_closed(page):
+                raise self._runtime(aweme_id, BROWSER_TARGET_CLOSED) from exc
+            return None
+        for index in range(count):
+            item = locator.nth(index)
+            if not await self._is_visible(item):
+                continue
+            try:
+                href = str(await item.get_attribute("href") or "")
+            except (PlaywrightError, PlaywrightTimeoutError) as exc:
+                if _closed_error(exc) or _page_closed(page):
+                    raise self._runtime(aweme_id, BROWSER_TARGET_CLOSED) from exc
+                continue
+            if user_sec_uid(href) != sec_uid:
+                continue
+            try:
+                await pointer_for(page).scroll_into_view(item)
+            except ElementNotInView:
+                continue
+            except (PlaywrightError, PlaywrightTimeoutError) as exc:
+                if _closed_error(exc) or _page_closed(page):
+                    raise self._runtime(aweme_id, BROWSER_TARGET_CLOSED) from exc
+                continue
+            if await self._is_visible(item):
+                return item
+        return None
+
+    async def _take_post_list(self, aweme_id: str, after_seq: int) -> CapturedResponse | None:
+        def predicate(item: Any) -> bool:
+            if not isinstance(item, CapturedResponse):
+                return False
+            if captured_runtime_code(item):
+                return True
+            return aweme_in_post_list(item.json, aweme_id) is not None
+
+        captured = await self.channel.wait_for(
+            DOUYIN_AWEME_POST_RULE.name,
+            after_seq=after_seq,
+            predicate=predicate,
+            timeout=MODAL_WAIT_SECONDS,
+        )
+        if not isinstance(captured, CapturedResponse):
+            return None
+        return captured
+
+    async def _take_profile_by_sec_uid(self, aweme_id: str, sec_uid: str, after_seq: int) -> CapturedResponse:
+        def predicate(item: Any) -> bool:
+            if not isinstance(item, CapturedResponse):
+                return False
+            if captured_runtime_code(item):
+                return True
+            return profile_sec_uid_matches(item.json, sec_uid)
+
+        captured = await self.channel.wait_for(
+            DOUYIN_USER_PROFILE_RULE.name,
+            after_seq=after_seq,
+            predicate=predicate,
+            timeout=AUTHOR_RESPONSE_TIMEOUT_SECONDS,
+        )
+        if not isinstance(captured, CapturedResponse):
+            raise self._candidate(aweme_id, AUTHOR_PROFILE_MISSING)
+        code = captured_runtime_code(captured)
+        if code:
+            raise self._runtime(aweme_id, code)
+        if not profile_sec_uid_matches(captured.json, sec_uid):
+            raise self._candidate(aweme_id, AUTHOR_PROFILE_MISSING)
+        return captured
+
+    def _fill_unavailable(self, aweme_id: str, code: str, *, landing: str = "") -> DouyinFillObservation:
+        return DouyinFillObservation(
+            platform_post_id=aweme_id,
+            kind="unavailable",
+            error_code=code,
+            landing_shape=landing,
+            ledger_id=self.channel.ledger.ledger_id,
+        )
+
+    def _fill_candidate(self, aweme_id: str, code: str) -> DouyinFillObservation:
+        return DouyinFillObservation(
+            platform_post_id=aweme_id,
+            kind="candidate_failed",
+            error_code=code,
+            ledger_id=self.channel.ledger.ledger_id,
+        )

@@ -28,6 +28,8 @@ from trippostcollect.application.repair import load_post_repair_targets as load_
 from trippostcollect.application.repair import reject_keep_stored_images_scope as reject_keep_stored_images_scope
 from trippostcollect.application.repair import load_stored_content_images as load_stored_content_images
 from trippostcollect.application.repair import write_stored_content_images as write_stored_content_images
+from trippostcollect.application.repair import douyin_posted_repair_outcomes as douyin_posted_repair_outcomes
+from trippostcollect.application.repair import load_douyin_fill_observations as load_douyin_fill_observations
 from trippostcollect.application.repair import load_weibo_repair_outcomes as load_weibo_repair_outcomes
 from trippostcollect.application.repair import load_xhs_repair_report as load_xhs_repair_report
 from trippostcollect.application.repair import post_repair_pagination_evidence as post_repair_pagination_evidence
@@ -668,6 +670,8 @@ def posted_repair_outcomes_for_platform(
 
     if platform == "zhihu":
         return zhihu_posted_repair_outcomes(records, platform)
+    if platform == "douyin":
+        return douyin_posted_repair_outcomes(records, platform)
     return weibo_posted_repair_outcomes(records, platform)
 
 
@@ -812,6 +816,17 @@ def _run_platform_without_policy(
     if platform_key == "zhihu" and getattr(args, "admit_seen", False):
         extra_env["TRIPPOSTCOLLECT_ZHIHU_REPAIR_OUTCOMES_PATH"] = str(
             (log_dir / "zhihu_repair_outcomes.json").resolve()
+        )
+    if platform_key == "douyin" and getattr(args, "fill_missing", False):
+        extra_env["TRIPPOSTCOLLECT_DOUYIN_FILL_MISSING"] = "1"
+        extra_env["TRIPPOSTCOLLECT_DOUYIN_FILL_TARGETS"] = str(
+            Path(args.repair_targets_file).expanduser().resolve()
+        )
+        extra_env["TRIPPOSTCOLLECT_DOUYIN_FILL_OBSERVATIONS"] = str(
+            (log_dir / "douyin_fill_observations.json").resolve()
+        )
+        extra_env["TRIPPOSTCOLLECT_DOUYIN_REPAIR_OUTCOMES_PATH"] = str(
+            (log_dir / "douyin_repair_outcomes.json").resolve()
         )
     if platform_key == "weibo" and getattr(args, "keep_stored_images", False):
         inventory_path = batch_dir / "stored_content_images.json"
@@ -999,6 +1014,10 @@ def _run_platform_without_policy(
         repair_outcomes = load_weibo_repair_outcomes(log_dir / "weibo_repair_outcomes.json")
     elif getattr(args, "post_repair", False) and platform_key == "zhihu" and getattr(args, "admit_seen", False):
         repair_outcomes = load_weibo_repair_outcomes(log_dir / "zhihu_repair_outcomes.json")
+    fill_observations: list[dict[str, Any]] = []
+    if getattr(args, "post_repair", False) and platform_key == "douyin" and getattr(args, "fill_missing", False):
+        repair_outcomes = load_weibo_repair_outcomes(log_dir / "douyin_repair_outcomes.json")
+        fill_observations = load_douyin_fill_observations(log_dir / "douyin_fill_observations.json")
     output = summarize_output_with_progress(
         save_path,
         args.keyword,
@@ -1051,6 +1070,8 @@ def _run_platform_without_policy(
         result["repair_report"] = repair_report
     if repair_outcomes:
         result["repair_outcomes"] = repair_outcomes
+    if fill_observations:
+        result["fill_observations"] = fill_observations
     return result
 
 
@@ -1316,10 +1337,15 @@ def _run_main(
     args.post_repair_metadata_by_identity = {}
     if getattr(args, "admit_seen", False) and (not args.post_repair or platforms != ["zhihu"]):
         raise SystemExit("--admit-seen requires --post-repair and --platforms zhihu")
+    if getattr(args, "fill_missing", False) and (not args.post_repair or platforms != ["douyin"]):
+        raise SystemExit("--fill-missing requires --post-repair and --platforms douyin")
     if args.post_repair:
-        if len(platforms) != 1 or platforms[0] not in {"weibo", "zhihu"}:
+        allowed = {"weibo", "zhihu", "douyin"} if getattr(args, "fill_missing", False) else {"weibo", "zhihu"}
+        if len(platforms) != 1 or platforms[0] not in allowed:
             raise SystemExit(
                 "--post-repair requires exactly one of --platforms weibo or zhihu"
+                if not getattr(args, "fill_missing", False)
+                else "--fill-missing requires --platforms douyin"
             )
         if not args.repair_targets_file:
             raise SystemExit("--post-repair requires --repair-targets-file")

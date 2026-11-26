@@ -678,7 +678,14 @@ def lines_of(capture: DouyinPageCapture) -> list[dict[str, Any]]:
 def test_policy_names_match_the_page_rules():
     policy = VISIT_POLICIES["douyin"]
     assert "douyin" in VISIT_GATED_PLATFORMS
-    assert "repair" not in policy.chains
+    assert tuple(policy.chains["repair"]) == ("note_detail", "creator_profile")
+    assert policy.spec("repair", "note_detail").rule == "douyin.aweme_post"
+    assert policy.spec("repair", "note_detail").source == "page_response"
+    assert policy.spec("repair", "note_detail").trigger == "navigate"
+    assert policy.spec("repair", "creator_profile").rule == "douyin.user_profile"
+    assert policy.spec("repair", "creator_profile").trigger == "click_author"
+    assert policy.image_free_modes == frozenset({"repair"})
+    assert policy.optional_creator_modes == frozenset({"repair"})
     assert policy.spec("discovery", "search_results").rule == "douyin.search_response"
     assert policy.spec("discovery", "search_results").source == "page_response"
     assert policy.spec("discovery", "note_detail").rule == "douyin.modal_state"

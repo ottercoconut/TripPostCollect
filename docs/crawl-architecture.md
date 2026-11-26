@@ -9,6 +9,8 @@
 > **授权记录（2026-11-20）：** 操作人授权临时解冻，同步 #222 抖音页面取数与访问门禁口径。
 >
 > **授权记录（2026-11-25）：** 操作人授权临时解冻，同步 #213 微博历史刷新复用已入库正文图。
+>
+> **授权记录（2026-11-26）：** 操作人授权临时解冻，同步 #223 抖音历史行只补缺的 repair 链。
 
 本文只描述组件边界和数据流。完成谓词、错误分类和候选记忆语义见
 [正式抓取执行契约](formal-crawl-contract.md)，操作步骤见[运行手册](operations-runbook.md)，表结构、
@@ -158,7 +160,9 @@ worker、是否启动执行和并发上限，便于区分 dry-run 计划与正�
 抖音（#222）搜索是本轮搜索页自身请求的被动截获（`douyin.search_response` / `page_response`）；详情由点击搜索卡片
 在同一标签打开浮层，经登记的状态脚本读取 `modal_id` 与当前播放项（`douyin.modal_state` / `page_state`），浮层不另发
 作品请求，正文取同一轮的搜索卡片；作者由浮层内两步点击打开新标签作者页，被动截获页面自身的资料请求
-（`douyin.user_profile` / `page_response`）。正文图是登记的 CDN 直连例外，账本来源为 `cdn_direct`。
+（`douyin.user_profile` / `page_response`）。正文图是登记的 CDN 直连例外，账本来源为 `cdn_direct`。抖音 repair 链只用于
+历史行只补缺（#223）：`navigate` 打开作品页，被动截获页面自身的作者作品列表（`douyin.aweme_post` / `page_response`），
+需要时再点击作者，不下载正文图。
 
 取数分级以[正式契约](formal-crawl-contract.md#取数来源与真实访问门禁)为准，本文不另行定义：L3 只指
 Playwright `page.request` / `context.request`，所有平台禁止；浏览器外 HTTP 客户端单列，已纳入门禁的

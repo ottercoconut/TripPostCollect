@@ -643,17 +643,26 @@ DOUYIN_USER_URL_PREFIX = "https://www.douyin.com/user/"
 _SEC_UID_PATTERN = re.compile(r"[A-Za-z0-9_.-]+")
 
 
+def douyin_profile_url(sec_uid: Any) -> str | None:
+    """由 sec_uid 拼出不带查询串的作者主页。只接受字母数字与 ``-_.``。"""
+
+    if not isinstance(sec_uid, str):
+        return None
+    text = sec_uid.strip()
+    if text and _SEC_UID_PATTERN.fullmatch(text):
+        return DOUYIN_USER_URL_PREFIX + text
+    return None
+
+
 def _author_profile_url(user_info: Dict, creator_profile: Dict) -> str | None:
     """#163：作者主页链接由 sec_uid 拼出（操作人 2026-11-12 允许保存）；sec_uid 本身不作为单独键写出。
 
     先取作品作者对象的 sec_uid，缺失时取作者资料 user 节点；只接受字母数字与 ``-_.``，其他值不写。
     """
     for source in (user_info if isinstance(user_info, dict) else {}, _profile_user_node(creator_profile)):
-        sec_uid = source.get("sec_uid")
-        if isinstance(sec_uid, str):
-            sec_uid = sec_uid.strip()
-            if sec_uid and _SEC_UID_PATTERN.fullmatch(sec_uid):
-                return DOUYIN_USER_URL_PREFIX + sec_uid
+        url = douyin_profile_url(source.get("sec_uid"))
+        if url is not None:
+            return url
     return None
 
 

@@ -278,7 +278,9 @@ checkpoint 仍写入本轮最后的 page、offset、search ID 与停止原因供
 
   作者访问按通用 R4 核验：由详情内的 `click_author` 触发，该点击的 `from_visit` 是本条详情访问；
   `subject_id` 与 `url_user_id` 都等于记录的作者 uid。
-- 抖音没有 repair 链。
+- repair 链只用于历史行只补缺（#223）：`note_detail`（`douyin.aweme_post` / `page_response` / `navigate`）→
+  `creator_profile`（`douyin.user_profile` / `page_response` / `click_author`），没有 images 阶段（`image_free_modes`）；
+  只缺详情状态、不点作者的记录不要求作者访问（`optional_creator_modes`），引用了作者访问就按 R4 核验。
 - 每条入库记录带 `content_visit_refs`：`ledger_id`、`search_results`、`note_detail`、`creator_profile`、`images`。
 
 ## 正文图片与资产键
@@ -311,6 +313,28 @@ checkpoint 仍写入本轮最后的 page、offset、search ID 与停止原因供
   （`backfill_author_profiles.py --platform douyin`）原先走 httpx，已随 #222 删除。2026-11-20 正式库 1085 行中，
   只有 1 行没有详情证据，2 行缺作者主页链接。页面取数版的修复与回填不急，操作人决定以后另做
   （2026-11-20），跟踪于 #223。
+- **只补缺入口**（#223）：`repair_post_details.py --platform douyin --fill-missing`。`--platform douyin` 只接受这一
+  模式，不能与 `--refresh-all`、`--dedupe-images`、`--admit-seen`、`--keep-stored-images` 同用；其他平台不接受
+  `--fill-missing`。选择 `author_profile_url` 为空、`author_verified IS NULL` 或缺 `raw_sample_json.content_detail_status`
+  的行，豁免表仍拒绝，`selection` 为 `fill_missing`。会话先照常做首页登录确认与搜索页行为阶段（不作取数来源），
+  然后每个目标在主标签 `navigate` `https://www.douyin.com/note/{id}`，等待页面自身的 `aweme/post`（上限
+  `MODAL_WAIT_SECONDS`），只认 `aweme_id` 等于目标的对象，任意下标都可。等不到记 `fill_target_not_in_post_list`，
+  最终地址离开 `/note/{id}` 记 `fill_target_redirected`（日志只记落点形状）；两者都是不可得，不翻页、不滚动、不重试、
+  不改开其他地址，写入 `unavailable_ids.json`，不计失败。缺作者字段时才点作者：只点 href 中 sec_uid 等于作品对象
+  `author.sec_uid` 的可见链接，找不到记候选失败 `author_link_missing`，不构造 URL；`profile/other` 按 `user.sec_uid`
+  挑选。补写规则：
+  - 每个目标一个事务，写前重读，只填仍为空的列；已有值不覆盖（记 `already_filled_fields`）。
+  - `author_profile_url` 规范为 `https://www.douyin.com/user/{sec_uid}`；`author_verified` / `author_verified_text`
+    按 `_profile_verification`，它判不出时不写、记 `unresolved_fields`，不推断、不算失败。认证文字只配给本次补成
+    已认证或原本已认证的行。作者字段只能来自本轮已过门禁的作者访问。
+  - `content_detail_status` / `content_detail_source` 缺失时写为 `detail_observed` / `note_post_list`。
+  - 不改正文、标题、发布时间、互动数、粉丝/关注/作品数、简介、图片、`topic_relevant`、`keyword`、`captured_at`。
+  - `raw_sample_json.fill_missing` 记 `run_id`、`observed_at`、`filled_fields`、`unresolved_fields`、
+    `already_filled_fields` 与访问引用。
+  逐目标 `target_results` 为 `filled`（写前发现已被填上时 `reason=already_filled`）、`unresolved`、`unavailable`、
+  `candidate_failed`、`batch_runtime_failed`、`not_attempted`、`rejected`。全部为 unresolved / unavailable 且没有其他
+  失败时整轮正常结束，不报 `post_detail_repair_no_progress`。响应里的 `verify_check` 按 `captcha_detected` 停轮，
+  该批已观察的目标不写库。
 - **旧方式数据继续沿用（操作人 2026-11-26 决定，只适用于抖音）**：#222 之前经浏览器外 httpx 抓取的历史行，只要
   字段可用、没有问题，就继续使用，不因取数方式变了而整行重取，也不因无法离线复核旧口径（例如粉丝取
   `follower_count` 还是 `mplatform_followers_count`）而重取。历史回填只补缺：只填原来为空的字段，已有值不覆盖。

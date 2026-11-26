@@ -164,6 +164,8 @@ class DouyinCrawlerPorts:
     fetch_image_bytes_with_retry: Callable[..., Any]
     # #136：标准模式持久 context 与 warmup 共用的启动函数（runtime.browser_runtime.launch_profile_context）。
     launch_profile_context: Callable[..., Any]
+    # #223：补缺观察。缺省不写。
+    write_fill_observations: Callable[[list[dict]], None] | None = None
 
 
 class XhsRuntimeSupervisionError(RuntimeError):

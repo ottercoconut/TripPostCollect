@@ -73,6 +73,11 @@ class VisitPolicy:
     creator_from_detail_page_response: bool = False
     # 正文图备选规格按模式声明。discovery 不放条目，因此不接受本地复用。
     note_image_fallbacks: Mapping[str, StageSpec] = field(default_factory=dict)
+    # 这些模式的链不含 images。记录不得带正文图访问或 image_assets。
+    # 比 allow_zero_content_images 窄：后者仍允许有图，并作用在平台全部模式上。
+    image_free_modes: frozenset[str] = frozenset()
+    # 链上有 creator_profile，但记录可以不引用。引用了就必须过 R4。
+    optional_creator_modes: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         for mode, specs in self.stages.items():
@@ -215,11 +220,13 @@ VISIT_POLICIES: dict[str, VisitPolicy] = {
         checks_filter_entry=False,
         creator_from_detail_page_response=True,
     ),
-    # #222：没有 repair 链。正文图以 cdn_direct 登记，入库须过 content_visit_ok。
+    # #222 discovery 仍要求正文图。#223 repair 只补缺：不下载、不登记正文图，
+    # 作者只在记录引用了 creator_profile 时才核验（缺作者字段才点击）。
     "douyin": VisitPolicy(
         platform="douyin",
         chains={
             "discovery": ("search_results", "note_detail", "creator_profile", "images"),
+            "repair": ("note_detail", "creator_profile"),
         },
         stages={
             "discovery": {
@@ -227,6 +234,10 @@ VISIT_POLICIES: dict[str, VisitPolicy] = {
                 "note_detail": StageSpec("douyin.modal_state", "page_state", trigger="click_card"),
                 "creator_profile": StageSpec("douyin.user_profile", "page_response", trigger="click_author"),
                 "note_image": StageSpec("douyin.content_image", "cdn_direct"),
+            },
+            "repair": {
+                "note_detail": StageSpec("douyin.aweme_post", "page_response", trigger="navigate"),
+                "creator_profile": StageSpec("douyin.user_profile", "page_response", trigger="click_author"),
             },
         },
         target_filter="",
@@ -236,6 +247,8 @@ VISIT_POLICIES: dict[str, VisitPolicy] = {
         target_id_field="aweme_id",
         detail_page_role="primary",
         checks_filter_entry=False,
+        image_free_modes=frozenset({"repair"}),
+        optional_creator_modes=frozenset({"repair"}),
     ),
 }
 # 已纳入访问门禁的平台；平台在其取数改造完成的批次加入。
@@ -484,19 +497,33 @@ def _check_record(
     if not isinstance(refs, Mapping) or not note_id:
         report.fail("R1", subject)
         return
+    image_free = mode in policy.image_free_modes
+    optional_creator = mode in policy.optional_creator_modes
     resolved: dict[str, tuple[_LedgerIndex, dict[str, Any]]] = {}
     for stage in chain:
         if stage == "images":
+            continue
+        if optional_creator and stage == "creator_profile" and not refs.get(stage):
             continue
         found = _resolve(indexes, refs.get(stage))
         if found is None:
             report.fail("R1", subject)
             return
         resolved[stage] = found
-    images = refs.get("images")
-    if not isinstance(images, list) or not all(_resolve(indexes, item) is not None for item in images):
-        report.fail("R1", subject)
-        return
+    if image_free:
+        raw_images = refs.get("images", [])
+        if raw_images is None:
+            raw_images = []
+        image_assets = [item for item in record.get("image_assets") or [] if isinstance(item, Mapping)]
+        if not isinstance(raw_images, list) or raw_images or image_assets:
+            report.fail("R5", subject)
+            return
+        images: list[Any] = []
+    else:
+        images = refs.get("images")
+        if not isinstance(images, list) or not all(_resolve(indexes, item) is not None for item in images):
+            report.fail("R1", subject)
+            return
     detail_index, detail = resolved["note_detail"]
     if str(refs.get("ledger_id") or "") != detail_index.ledger_id:
         report.fail("R1", subject)
@@ -541,55 +568,66 @@ def _check_record(
 
     # R4 作者访问。默认由详情内点击作者名触发，作者 ID 与页面 URL 一致。
     # 微博声明 creator_from_detail_page_response：与详情同一标签，晚于打开详情的那次触发。
-    creator_index, creator = resolved["creator_profile"]
-    creator_spec = policy.spec(mode, "creator_profile")
-    if policy.creator_from_detail_page_response:
+    if "creator_profile" not in resolved:
         author_click = None
-        creator_ok = bool(
-            user_id
-            and creator_index is detail_index
-            and _visit_matches(creator, creator_spec, "creator_profile")
-            and creator.get("subject_id") == user_id
-            and creator.get("page_role") == detail.get("page_role")
-            and trigger is not None
-            and str(creator.get("trigger") or "") == str(detail.get("trigger") or "")
-            and _seq(trigger) < _seq(creator)
-            and (creator.get("source") != "page_response" or creator.get("status") == 200)
-        )
+        creator_ok = "creator_profile" not in chain or optional_creator
+        creator_index = detail_index
     else:
-        author_click = creator_index.by_id.get(str(creator.get("trigger") or ""))
-        from_visit = (
-            creator_index.by_id.get(str(author_click.get("from_visit") or "")) if author_click is not None else None
-        )
-        creator_ok = bool(
-            user_id
-            and creator_index is detail_index
-            and _visit_matches(creator, creator_spec, "creator_profile")
-            and creator.get("subject_id") == user_id
-            and creator.get("url_user_id") == user_id
-            and author_click is not None
-            and author_click.get("kind") == "action"
-            and author_click.get("action") == creator_spec.trigger
-            and _seq(author_click) < _seq(creator)
-            and from_visit is not None
-            and from_visit.get("kind") == "visit"
-            and from_visit.get("stage") == "note_detail"
-        )
+        creator_index, creator = resolved["creator_profile"]
+        creator_spec = policy.spec(mode, "creator_profile")
+        if policy.creator_from_detail_page_response:
+            author_click = None
+            creator_ok = bool(
+                user_id
+                and creator_index is detail_index
+                and _visit_matches(creator, creator_spec, "creator_profile")
+                and creator.get("subject_id") == user_id
+                and creator.get("page_role") == detail.get("page_role")
+                and trigger is not None
+                and str(creator.get("trigger") or "") == str(detail.get("trigger") or "")
+                and _seq(trigger) < _seq(creator)
+                and (creator.get("source") != "page_response" or creator.get("status") == 200)
+            )
+        else:
+            author_click = creator_index.by_id.get(str(creator.get("trigger") or ""))
+            from_visit = (
+                creator_index.by_id.get(str(author_click.get("from_visit") or ""))
+                if author_click is not None
+                else None
+            )
+            creator_ok = bool(
+                user_id
+                and creator_index is detail_index
+                and _visit_matches(creator, creator_spec, "creator_profile")
+                and creator.get("subject_id") == user_id
+                and creator.get("url_user_id") == user_id
+                and author_click is not None
+                and author_click.get("kind") == "action"
+                and author_click.get("action") == creator_spec.trigger
+                and _seq(author_click) < _seq(creator)
+                and from_visit is not None
+                and from_visit.get("kind") == "visit"
+                and from_visit.get("stage") == "note_detail"
+            )
     if not creator_ok:
         report.fail("R4", subject)
 
     # R5 逐张图片：资产键、哈希与 manifest 一致，且晚于本账本中该笔记的首个触发动作。
     # 策略允许零图时，记录没有正文图且 images 为空列表即通过；有图时逐张核验不变。
+    # 无图模式在上面已经拒绝了任何正文图，这里不再查找 note_image 规格。
     assets = sorted(
         (item for item in record.get("image_assets") or [] if isinstance(item, Mapping)),
         key=lambda item: int(item.get("source_index") or 0),
     )
     first_trigger = detail_index.first_action([trigger_kind], note_id=note_id, id_field=id_field)
-    image_spec = policy.spec(mode, "note_image")
-    if policy.allow_zero_content_images and not assets and images == []:
+    if image_free:
         images_ok = True
     else:
-        images_ok = bool(assets) and len(images) == len(assets) and first_trigger is not None
+        image_spec = policy.spec(mode, "note_image")
+        if policy.allow_zero_content_images and not assets and images == []:
+            images_ok = True
+        else:
+            images_ok = bool(assets) and len(images) == len(assets) and first_trigger is not None
     if images_ok and assets:
         for position, asset in enumerate(assets):
             if int(asset.get("source_index") or 0) != position:

@@ -111,6 +111,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--fill-missing",
+        action="store_true",
+        help=(
+            "Douyin only, with --post-repair: fill empty author and detail-status fields. "
+            "Does not download content images or overwrite existing values."
+        ),
+    )
+    parser.add_argument(
         "--admit-seen",
         action="store_true",
         help=(
