@@ -47,6 +47,10 @@
   再停留后关闭：同一轮内首次取到某作者（`people` 或 `org` 加 token）的资料后停留随机 5–9 秒，第二次起 2–3 秒
   （#227），资料没取到的访问不算首次；每条详情仍各自点击作者、各自登记访问。随后回到详情标签，再关闭详情标签回到搜索页。点击、页面状态读取、停留和关闭都写入
   访问账本。`url_user_id` 取作者页 URL 的 token。
+- 同一轮内相邻两次打开详情（点击或 `navigate`，含候选级重试）至少间隔随机 8–12 秒，从上一次打开时算起。
+  正常一条详情加作者页本来就超过这个间隔；落到 404、首页等页面时不读页面、不停留，没有这个下限会在一两秒内
+  连开下一个（#209 实测：准入 662 次相邻打开中 102 次不到 2 秒，多数是连续落到 `https://www.zhihu.com/404`）。
+  这段等待只写 worker 日志（`detail open spacing`），不写访问账本。
 - 每条入库记录带 `content_visit_refs`：`ledger_id`、`search_results`、`note_detail`、`creator_profile`、
   `images`。访问阶段统一用这些链名；正文来源字段仍是 `answer_detail` 或 `article_detail`。知乎已纳入
   访问门禁，正式记录要过 `content_visit_ok`（#185）。指定 URL 的修复链没有搜索访问：详情由 `navigate`
