@@ -140,6 +140,15 @@ def test_verify_candidates_are_kept_as_evidence() -> None:
             {"enterprise_verify_reason": "", "account_cert_info": "{}"},
             None, None, id="custom_verify_missing",
         ),
+        # #223 实测（4 位作者）：enterprise_verify_reason 这个键不存在，其余与未认证相同；操作人确认记 0。
+        pytest.param(
+            {"custom_verify": "", "account_cert_info": "{}"},
+            0, None, id="enterprise_reason_absent",
+        ),
+        pytest.param(
+            {"custom_verify": "", "enterprise_verify_reason": None, "account_cert_info": "{}"},
+            None, None, id="enterprise_reason_null",
+        ),
         pytest.param(None, None, None, id="no_creator_profile"),
     ],
 )
