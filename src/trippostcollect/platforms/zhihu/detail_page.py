@@ -135,6 +135,9 @@ def classify_admit_landing(
     path = parsed.path or ""
     if host in _ZHIHU_HOSTS and path in {"", "/"}:
         return "", constant.ADMIT_REDIRECT_HOME
+    if host in _ZHIHU_HOSTS and path == "/404":
+        # #209：知乎把找不到的回答跳到自己的 404 页，该页状态码是 200。
+        return "", constant.ADMIT_NOT_FOUND
     if host == "zhuanlan.zhihu.com" or (host in _ZHIHU_HOSTS and _ARTICLE_PATH_RE.fullmatch(path)):
         return "", constant.ADMIT_REDIRECT_ARTICLE
     match = _FINAL_ANSWER_RE.fullmatch(path)
