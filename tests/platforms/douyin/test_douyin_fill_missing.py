@@ -935,15 +935,16 @@ async def test_fill_round_passes_the_summary_visit_gate(tmp_path, monkeypatch):
     assert gate["request_pacing_ok"] is True
     assert gate["continuity_ok"] is True
 
-    # 修复前的口径：没有正式记录时没有被检查的账本，节奏必然判失败。
+    # 不带补缺观察时没有门禁记录，不会核验到这次访问。
     before = summary_content_visits(summary, [], ["douyin"], repair_mode=True, stop_event=None)["douyin"]
-    assert before["checked_records"] == 0 and before["request_pacing_ok"] is False
+    assert before["checked_records"] == 0 and before["checked_ledger_count"] == 0
 
-    # 全部不可得时没有写库对象，门禁仍失败关闭，不放宽。
+    # 全部不可得时没有写库对象：没有需要追溯的访问，节奏不判失败（#209，操作人 2026-11-27）。
     summary["records"][0]["fill_observations"] = [
         item for item in summary["records"][0]["fill_observations"] if item["kind"] != "observed"
     ]
     empty = summary_content_visits(
         summary, [], ["douyin"], repair_mode=True, stop_event=None, douyin_fill_missing=True
     )["douyin"]
-    assert empty["checked_records"] == 0 and empty["request_pacing_ok"] is False
+    assert empty["checked_records"] == 0 and empty["request_pacing_ok"] is True
+    assert empty["content_visit_ok"] is True
