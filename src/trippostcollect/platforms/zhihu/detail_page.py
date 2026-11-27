@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 import logging
 import random
 import re
@@ -31,6 +32,11 @@ logger = logging.getLogger("TripPostCollect")
 DETAIL_ATTEMPTS = 3
 DETAIL_RETRY_PAUSE_SECONDS = 1.0
 DETAIL_DWELL_SECONDS = (2.0, 3.0)
+# 相邻两次打开详情（含重试）的最短间隔。落到 404 等页面时不读页面也不停留，没有这个下限会在一两秒内
+# 连开下一个（#209 实测 662 次相邻打开里 102 次不到 2 秒）。正常一条约 10–13 秒，与此相当。
+DETAIL_OPEN_MIN_INTERVAL_SECONDS = (8.0, 12.0)
+# 独立随机源：不与停留时长共用抽样序列。
+_SPACING_RANDOM = random.Random()
 DETAIL_TAB_TIMEOUT_MS = 8_000
 DETAIL_LOAD_TIMEOUT_MS = 15_000
 
@@ -209,6 +215,13 @@ def _page_closed(page: Any) -> bool:
         return True
 
 
+@dataclass
+class DetailOpenClock:
+    """一轮共用的上次打开详情时刻（单调时钟）。每次详情都新建 ZhihuDetailPages，所以放在 crawler 上。"""
+
+    last_open: float | None = None
+
+
 class ZhihuDetailPages:
     """在搜索页点击标题打开详情，或按已知 URL 直接打开，然后读取页面状态。"""
 
@@ -219,6 +232,7 @@ class ZhihuDetailPages:
         search_page: Any,
         *,
         visited_authors: set[tuple[str, str]] | None = None,
+        open_clock: DetailOpenClock | None = None,
     ) -> None:
         self.capture = capture
         self.extractor = extractor
@@ -228,6 +242,7 @@ class ZhihuDetailPages:
         # 正式轮次每次详情都新建本类，集合由 ZhihuCrawler 传入，一轮共用。
         self._visited_authors = set() if visited_authors is None else visited_authors
         self._last_direct_status: int | None = None
+        self._open_clock = open_clock if open_clock is not None else DetailOpenClock()
 
     async def open_from_search(self, content: ZhihuContent) -> ZhihuContent:
         return await self._attempts(content, direct_url="")
@@ -255,6 +270,7 @@ class ZhihuDetailPages:
 
     async def _open_once(self, content: ZhihuContent, *, direct_url: str) -> ZhihuContent:
         self._raise_if_closed(self.search_page, "search page")
+        await self._space_open(content)
         self._opened = None
         self._last_direct_status = None
         detail_page: Any = None
@@ -509,6 +525,19 @@ class ZhihuDetailPages:
         if repeat:
             return REPEAT_AUTHOR_TAB_HOLD_SECONDS
         return AUTHOR_TAB_HOLD_SECONDS
+
+    async def _space_open(self, content: ZhihuContent) -> None:
+        last = self._open_clock.last_open
+        if last is not None:
+            target = _SPACING_RANDOM.uniform(*DETAIL_OPEN_MIN_INTERVAL_SECONDS)
+            remaining = target - (time.monotonic() - last)
+            if remaining > 0:
+                logger.info(
+                    "[ZhihuDetailPages] detail open spacing "
+                    f"content_id={content.content_id} wait={remaining:.1f}"
+                )
+                await asyncio.sleep(remaining)
+        self._open_clock.last_open = time.monotonic()
 
     async def _pause(
         self, page: Any, stage: str, low: float, high: float, *, page_role: str,

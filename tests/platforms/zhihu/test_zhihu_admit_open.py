@@ -188,3 +188,32 @@ async def test_canonical_repair_url_keeps_entity_question_id(monkeypatch, tmp_pa
     assert result is not None
     assert result.question_id == "999"
     assert crawler._repair_outcomes == []
+
+
+@pytest.mark.asyncio
+async def test_back_to_back_404_landings_are_spaced(monkeypatch, tmp_path):
+    """#209：落到 404 不读页面也不停留，原来会在一两秒内连开下一个。同一轮相邻两次打开要隔开。"""
+
+    import trippostcollect.platforms.zhihu.detail_page as detail_page
+
+    monkeypatch.setattr(detail_page, "DETAIL_OPEN_MIN_INTERVAL_SECONDS", (8.0, 8.0))
+    waits: list[float] = []
+
+    async def fake_sleep(seconds):
+        waits.append(float(seconds))
+
+    crawler, _page, root = prepare(monkeypatch, tmp_path)
+    monkeypatch.setattr(detail_page.asyncio, "sleep", fake_sleep)  # prepare 自己也替换 sleep，放在其后
+    second = ANSWER.replace("101", "102")
+    _arm(crawler, {"url": "https://www.zhihu.com/404", "status": 200})
+    crawler.browser_context.redirects[second] = {"url": "https://www.zhihu.com/404", "status": 200}
+
+    assert await crawler.get_note_detail(ANSWER, asyncio.Semaphore(1)) is None
+    spacing_before = list(waits)
+    assert await crawler.get_note_detail(second, asyncio.Semaphore(1)) is None
+
+    assert spacing_before == []  # 本轮第一次打开不等
+    assert len(waits) == 1 and 7.0 < waits[0] <= 8.0
+    navigates = [line for line in ledger_lines(root) if line["kind"] == "action" and line["action"] == "navigate"]
+    assert len(navigates) == 2
+    assert [item["error_code"] for item in crawler._repair_outcomes] == [ADMIT_NOT_FOUND, ADMIT_NOT_FOUND]

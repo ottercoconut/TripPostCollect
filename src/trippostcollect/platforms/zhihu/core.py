@@ -36,7 +36,7 @@ from .models import (
     ZhihuImageDownloadError, ZhihuDetailFetchError,
 )
 from .client import ZHIHU_CONTENT_IMAGE_RULE, ZhiHuClient
-from .detail_page import ZhihuDetailPages, bare_admit_answer_id
+from .detail_page import DetailOpenClock, ZhihuDetailPages, bare_admit_answer_id
 from .parser import ZhihuExtractor, judge_zhihu_url, merge_search_content_detail
 from .search_capture import ZhihuPageCapture
 from . import parser as zhihu_store
@@ -70,6 +70,7 @@ class ZhihuCrawler:
         self._opened_search_keyword: str | None = None
         # 每次详情都新建 ZhihuDetailPages，作者停留记忆放在 crawler 上，一轮共用，不落盘。
         self._visited_author_keys: set[tuple[str, str]] = set()
+        self._detail_open_clock = DetailOpenClock()
         self._repair_outcomes: list[dict[str, Any]] = []
 
 
@@ -131,6 +132,7 @@ class ZhihuCrawler:
             self._extractor,
             self.context_page,
             visited_authors=self._visited_author_keys,
+            open_clock=self._detail_open_clock,
         )
 
     async def enrich_search_content_detail(
