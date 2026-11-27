@@ -378,8 +378,9 @@ def _nonblank(value: Any) -> str | None:
 
 def _profile_verification(profile_user: Dict) -> tuple[int | None, str | None]:
     """#163：认证文字依次取 label_text、enterprise_verify_reason、custom_verify 的非空原文（黄 V 与蓝 V
-    同样处理），有文字即已认证。只有 account_cert_info 能解析为对象且没有 label_text，另两个字段也都明确为
-    空串时才记未认证；缺资料、缺字段或无法解析时两列都留空，不推断。"""
+    同样处理），有文字即已认证。只有 account_cert_info 能解析为对象且没有 label_text、custom_verify 明确为
+    空串、enterprise_verify_reason 为空串或这个键不存在时才记未认证（#223，操作人 2026-11-27 确认后者）；
+    其他缺资料、缺字段或无法解析时两列都留空，不推断。"""
     raw_cert = profile_user.get("account_cert_info")
     cert: Dict | None = None
     if isinstance(raw_cert, dict):
@@ -399,7 +400,7 @@ def _profile_verification(profile_user: Dict) -> tuple[int | None, str | None]:
         return 1, text
     if (
         cert is not None
-        and profile_user.get("enterprise_verify_reason") == ""
+        and profile_user.get("enterprise_verify_reason", "") == ""
         and profile_user.get("custom_verify") == ""
     ):
         return 0, None

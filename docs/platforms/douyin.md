@@ -236,8 +236,9 @@ checkpoint 仍写入本轮最后的 page、offset、search ID 与停止原因供
 - 认证（#163，实测对照主页“认证信息”）同样只读资料 `user` 节点：
   - `author_verified_text` 依次取 `account_cert_info.label_text`、`enterprise_verify_reason`、`custom_verify`
     的非空原文，蓝 V 与黄 V 同样处理；取到文字时 `author_verified=1`。
-  - 只有 `account_cert_info` 能解析为对象且没有 `label_text`、另两个字段都明确为空串时，记
-    `author_verified=0`。
+  - 只有 `account_cert_info` 能解析为对象且没有 `label_text`、`custom_verify` 明确为空串、
+    `enterprise_verify_reason` 为空串或这个键不存在时，记 `author_verified=0`。后一种是 #223 实测形态
+    （4 位作者的资料里没有这个键），操作人 2026-11-27 确认记 0；值为 null 等其他形态仍为 NULL。
   - 缺资料、缺字段或无法解析时，两列都为 NULL。
   - `verification_type`（蓝 V 也为 0）与单独出现的 `is_biz_account`（页面不显示认证）不参与判定。
   - 四个字段的原值另记在 `author_verify_evidence`，随 `raw_sample_json` 入库供复核。
