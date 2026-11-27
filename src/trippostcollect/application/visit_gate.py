@@ -850,6 +850,10 @@ def validate_content_visits(
     observed: set[str] = set()
     completed: set[str] = set()
     pacing_ok = continuity_ok = bool(checked_indexes)
+    if mode == "repair" and checked == 0:
+        # 修复批次一条要写库的记录都没有（全部不可得或候选失败）：没有需要追溯的访问，节奏与连续性
+        # 不判失败，否则整轮停下（#209，操作人 2026-11-27 确认）。发现模式仍失败关闭。
+        pacing_ok = continuity_ok = True
     detail_spec_by_mode = policy.spec(mode, "note_detail")
     for index in checked_indexes:
         scroll_triggered = 0

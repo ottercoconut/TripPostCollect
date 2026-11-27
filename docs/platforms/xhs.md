@@ -842,7 +842,9 @@ child `summary.json` 的
   （搜索、详情、作者、逐张图片）或 discovery 停止事件的 `source_visit_id` 能解析到的账本。累计摘要携带、
   但没有任何引用的账本（例如停在筛选的失败轮）照常加载，只用于解析引用；依据为 Mac 实测 2026-10-14：
   第 1 轮失败账本随累计摘要进入第 2、3 轮，报 G1。一个账本都加载不到仍报 `LEDGER`；加载到账本但没有
-  被引用的账本时不做账本级检查，`request_pacing_ok`、`continuity_ok` 为 false。门禁结果的 `ledger_count`
+  被引用的账本时不做账本级检查，`request_pacing_ok`、`continuity_ok` 为 false。例外：修复模式下一条要写库的
+  记录都没有（全部不可得或候选失败）时，两者为 true，不让整轮因此停下（#209，操作人 2026-11-27 确认；对所有
+  门禁平台的修复都适用）。发现模式不变。门禁结果的 `ledger_count`
   为加载的账本数，`checked_ledger_count` 为被引用的账本数。
 - 小红书的 `request_pacing_ok` 与 `continuity_ok` 改由被引用的账本按本轮实际访问推导：有详情访问才要求
   `search_results`、`note_detail`，有点作者才要求 `creator_profile`，至少一次下一页由程序滚动触发才要求

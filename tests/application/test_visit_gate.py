@@ -748,3 +748,17 @@ def test_policies_never_declare_playwright_requests():
             stages={"discovery": {"note_detail": StageSpec("demo.detail", "page_request")}},
             target_filter="x", required_stages=xhs_required_stages,
         )
+
+
+def test_repair_batch_without_records_does_not_fail_pacing(tmp_path):
+    """#209：修复批次全部不可得或候选失败时没有要写库的记录，节奏与连续性不判失败；发现模式仍失败关闭。"""
+
+    run, _record = repair_run(tmp_path / "repair")
+    result = check(run, [], tmp_path / "absent.jsonl", mode="repair")
+    assert result["checked_records"] == 0 and result["checked_ledger_count"] == 0
+    assert result["content_visit_ok"] is True
+    assert result["request_pacing_ok"] is True and result["continuity_ok"] is True
+
+    discovery, _ = stalled_at_filter(tmp_path / "discovery.jsonl")
+    empty = check(discovery, [], tmp_path / "absent.jsonl", stop={})
+    assert empty["request_pacing_ok"] is False and empty["continuity_ok"] is False
